@@ -19,7 +19,8 @@ public sealed class LifecycleTests
         var manager = new InstallationManager(
             autoStart: autoStart,
             clientFactory: runtime.CreateClient,
-            hardwareProvider: () => profile);
+            hardwareProvider: () => profile,
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
 
         var first = await manager.ConfigureAsync(new InstallationOptions(
             paths,
@@ -67,7 +68,8 @@ public sealed class LifecycleTests
             baselinePreview.SourceSha256,
             baselinePreview.PlannedSha256);
         Assert.True(baselineInstalled.Changed);
-        Assert.True((await new StateStore(paths.StateFile).LoadAsync())?.ReliabilityBaselineInstalled);
+        var stateAfterBaselineInstall = await new StateStore(paths.StateFile).LoadAsync();
+        Assert.True(stateAfterBaselineInstall?.ReliabilityBaselineInstalled);
         Assert.Equal(requestCountBeforeBaselineChange, runtime.RequestCount);
         var nonInteractiveUpgrade = await manager.ConfigureAsync(new InstallationOptions(
             paths,
@@ -207,10 +209,14 @@ public sealed class LifecycleTests
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
-        var originalConfig = "model = \"preserve-me\"" + Environment.NewLine;
-        var originalAgents = "# Preserve this user instruction" + Environment.NewLine;
-        File.WriteAllText(paths.CodexConfigFile, originalConfig);
-        File.WriteAllText(paths.AgentsOverrideFile, originalAgents);
+        var originalConfig = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true).GetPreamble()
+            .Concat(Encoding.UTF8.GetBytes("model = \"preserve-me\"\r\n\r\n"))
+            .ToArray();
+        var originalAgents = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true).GetPreamble()
+            .Concat(Encoding.UTF8.GetBytes("# Preserve this user instruction  \r\n"))
+            .ToArray();
+        File.WriteAllBytes(paths.CodexConfigFile, originalConfig);
+        File.WriteAllBytes(paths.AgentsOverrideFile, originalAgents);
         var configResult = new CodexConfigManager().InstallOrRepair(paths, true);
         var agentsResult = new AgentsOverrideManager().InstallOrRepair(paths, HardwareTier.Entry);
         var state = new InstallationState
@@ -247,8 +253,8 @@ public sealed class LifecycleTests
 
         Assert.True(result.Success);
         Assert.False(result.ModelRemoved);
-        Assert.Equal(originalConfig, await File.ReadAllTextAsync(paths.CodexConfigFile));
-        Assert.Equal(originalAgents.TrimEnd() + Environment.NewLine, await File.ReadAllTextAsync(paths.AgentsOverrideFile));
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
         Assert.Null(platform.RunEntry);
         Assert.Equal("prior-models", platform.UserEnvironment["OLLAMA_MODELS"]);
         Assert.Null(platform.UserEnvironment["OLLAMA_HOST"]);

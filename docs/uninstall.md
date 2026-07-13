@@ -19,4 +19,6 @@ A model is removed only when both conditions hold:
 
 Backups remain beside modified Codex files. The automatic local GPU guidance and optional reliability baseline have distinct markers and are removed independently without replacing the file. If a current managed file is malformed or its markers cannot be removed safely, uninstall first writes a separate safety copy, preserves the current file byte-for-byte, keeps product state for recovery, and reports `UNINSTALL_MANUAL_CLEANUP_REQUIRED`. It never replaces newer user edits with a stale recorded backup automatically; review the safety copy and timestamped backups before manual recovery.
 
+When the unmanaged content still matches the first product-created backup, uninstall restores that backup byte-for-byte, including its original encoding, line endings, and trailing whitespace. If unrelated content changed after installation, uninstall does not use the older backup and instead removes only the managed markers from the current file.
+
 The model directory is preserved by default. Delete it manually only after confirming no other Ollama application uses it.

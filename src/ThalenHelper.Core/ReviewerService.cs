@@ -10,6 +10,7 @@ public sealed class ReviewerService
     private readonly OllamaClient _ollama;
     private readonly Func<int, bool> _listenerCheck;
     private readonly Func<InstallationState, ReviewerModelStorageVerification> _modelStorageValidator;
+    private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
 
     public ReviewerService(
         StateStore stateStore,
@@ -22,7 +23,8 @@ public sealed class ReviewerService
         StateStore stateStore,
         OllamaClient ollama,
         Func<int, bool>? listenerCheck,
-        Func<InstallationState, ReviewerModelStorageVerification>? modelStorageValidator = null)
+        Func<InstallationState, ReviewerModelStorageVerification>? modelStorageValidator = null,
+        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null)
     {
         _stateStore = stateStore;
         _ollama = ollama;
@@ -30,6 +32,8 @@ public sealed class ReviewerService
         _modelStorageValidator = modelStorageValidator ?? (state => ValidateModelStorage(
             state,
             Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.Process)));
+        var pressureGuard = new ResourcePressureGuard();
+        _resourcePressureValidator = resourcePressureValidator ?? pressureGuard.Check;
     }
 
     public async Task<ReviewerHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
@@ -242,13 +246,28 @@ public sealed class ReviewerService
                     state.HardwareTier);
             }
 
+            async Task CheckResourcePressureAsync(CancellationToken token)
+            {
+                var running = await _ollama.GetRunningModelsAsync(token).ConfigureAwait(false);
+                var selectedAlreadyLoaded = running.Any(model =>
+                    ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
+                var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
+                if (!pressure.Allowed)
+                {
+                    throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
+                }
+            }
+
             var generation = await _ollama.GenerateAsync(
                 state.SelectedModel,
                 prompt,
                 context,
                 outputTokens,
                 keepAlive,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                request.BusyBehavior,
+                TimeSpan.FromSeconds(request.QueueTimeoutSeconds),
+                CheckResourcePressureAsync).ConfigureAwait(false);
             stopwatch.Stop();
             return new ReviewerResult
             {
@@ -266,7 +285,8 @@ public sealed class ReviewerService
                     ["prompt_eval_count"] = generation.PromptEvalCount,
                     ["eval_count"] = generation.EvalCount,
                     ["eval_duration_ns"] = generation.EvalDurationNanoseconds,
-                    ["keep_alive_seconds"] = Math.Max(0, (int)keepAlive.TotalSeconds)
+                    ["keep_alive_seconds"] = Math.Max(0, (int)keepAlive.TotalSeconds),
+                    ["busy_behavior"] = request.BusyBehavior.ToString().ToLowerInvariant()
                 },
                 ModelRan = true,
                 Paused = false
@@ -365,6 +385,11 @@ public sealed class ReviewerService
         if (combined > Math.Min(110_000, preferences.MaximumInputCharacters))
         {
             throw new ArgumentException("Combined reviewer input exceeds the configured bound.", nameof(request));
+        }
+
+        if (request.QueueTimeoutSeconds is < 1 or > 120)
+        {
+            throw new ArgumentException("Queue timeout must be from 1 through 120 seconds.", nameof(request));
         }
     }
 

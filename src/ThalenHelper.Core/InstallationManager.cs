@@ -46,6 +46,7 @@ public sealed class InstallationManager
     private readonly AgentsOverrideManager _agentsOverride;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly Func<OllamaClient> _clientFactory;
+    private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
 
     public InstallationManager(
         HardwareDetector? hardwareDetector = null,
@@ -56,7 +57,8 @@ public sealed class InstallationManager
         AgentsOverrideManager? agentsOverride = null,
         OllamaAutoStartManager? autoStart = null,
         Func<OllamaClient>? clientFactory = null,
-        Func<HardwareProfile>? hardwareProvider = null)
+        Func<HardwareProfile>? hardwareProvider = null,
+        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null)
     {
         _hardwareProvider = hardwareProvider ?? (hardwareDetector ?? new HardwareDetector()).Detect;
         _catalogService = catalogService ?? new ModelCatalogService();
@@ -66,6 +68,8 @@ public sealed class InstallationManager
         _agentsOverride = agentsOverride ?? new AgentsOverrideManager();
         _clientFactory = clientFactory ?? (() => new OllamaClient());
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
+        var pressureGuard = new ResourcePressureGuard();
+        _resourcePressureValidator = resourcePressureValidator ?? pressureGuard.Check;
     }
 
     public async Task<InstallationOutcome> ConfigureAsync(
@@ -629,13 +633,26 @@ public sealed class InstallationManager
                 return new ModelValidationResult(false, "MODEL_DIGEST_MISMATCH", "The selected model digest does not match the audited catalog digest.", null, 0, 0);
             }
 
+            async Task CheckResourcePressureAsync(CancellationToken token)
+            {
+                var runningModels = await client.GetRunningModelsAsync(token).ConfigureAwait(false);
+                var selectedAlreadyLoaded = runningModels.Any(model =>
+                    ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
+                var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
+                if (!pressure.Allowed)
+                {
+                    throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
+                }
+            }
+
             var exact = await client.GenerateAsync(
                 state.SelectedModel,
                 "Reply with exactly this text and nothing else: THALEN_HELPER_OK",
                 state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
                 64,
                 TimeSpan.FromSeconds(30),
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
             exactStart.Stop();
             if (!string.Equals(exact.Response.Trim(), "THALEN_HELPER_OK", StringComparison.Ordinal))
             {
@@ -650,7 +667,8 @@ public sealed class InstallationManager
                 state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
                 64,
                 TimeSpan.FromSeconds(30),
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
             reviewStart.Stop();
             if (!string.Equals(review.Response.Trim(), "OFF_BY_ONE", StringComparison.Ordinal))
             {
@@ -794,7 +812,7 @@ public sealed class InstallationManager
 
         if (result.BackupPath is not null)
         {
-            state.BackupLocations[result.Path] = result.BackupPath;
+            state.BackupLocations.TryAdd(result.Path, result.BackupPath);
         }
     }
 

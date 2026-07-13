@@ -150,7 +150,9 @@ thalen-helper update [--yes]
 thalen-helper uninstall --yes [--remove-owned-model]
 ```
 
-`pause` rejects new calls, cancels an active helper generation when possible, and unloads the selected model. `release-gpu` unloads without persistently disabling review. `resume` does not preload the model. Local generation is single-flight; low-impact mode unloads immediately.
+`pause` rejects new calls, cancels an active helper generation when possible, and unloads the selected model. `release-gpu` unloads without persistently disabling review. `resume` does not preload the model. Local generation is single-flight through a named per-user Windows semaphore shared by every Codex chat. A review skips immediately by default when busy, or may request a bounded queue of at most 120 seconds. Immediately before generation, the helper refuses optional work when measured dedicated VRAM, physical memory, or Windows commit reserve is unsafe. Low-impact mode unloads immediately; bounded idle keep-alive is opt-in.
+
+Interactive setup leaves model download and validation unchecked. Installing the helper does not automatically pull or load a model; inference occurs only after a separate explicit validation choice or a later review call. The helper never pauses, terminates, or reconfigures Expo, Android, iPhone, graphics, build, or Codex processes. Workload guards and pressure refusal skip optional review instead.
 
 ## Configuration safety
 

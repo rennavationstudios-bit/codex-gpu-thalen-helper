@@ -82,9 +82,12 @@ public sealed class UninstallManager
         {
             StopOwnedMcpProcesses(managedPaths.McpExecutable);
         }
-        managed.Add(UninstallCodexConfigWithRecovery(managedPaths));
+        var originalConfigBackup = GetOriginalBackup(state, managedPaths.CodexConfigFile);
+        var originalAgentsBackup = GetOriginalBackup(state, managedPaths.AgentsOverrideFile);
+        var configWasCreated = state?.FilesCreated.Contains(managedPaths.CodexConfigFile, StringComparer.OrdinalIgnoreCase) == true;
+        managed.Add(UninstallCodexConfigWithRecovery(managedPaths, originalConfigBackup, configWasCreated));
         var agentsWasCreated = state?.FilesCreated.Contains(managedPaths.AgentsOverrideFile, StringComparer.OrdinalIgnoreCase) == true;
-        managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated));
+        managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated, originalAgentsBackup));
         var manualCleanupRequired = managed.Any(item =>
             string.Equals(item.Operation, "manual-cleanup-required", StringComparison.Ordinal));
         var reportPath = Path.Combine(
@@ -137,11 +140,14 @@ public sealed class UninstallManager
             reportPath);
     }
 
-    private ManagedFileResult UninstallCodexConfigWithRecovery(ProductPaths paths)
+    private ManagedFileResult UninstallCodexConfigWithRecovery(
+        ProductPaths paths,
+        string? originalBackupPath,
+        bool configWasCreated)
     {
         try
         {
-            return _codexConfig.Uninstall(paths);
+            return _codexConfig.Uninstall(paths, originalBackupPath, configWasCreated);
         }
         catch (Exception exception) when (exception is InvalidDataException or IOException)
         {
@@ -151,11 +157,12 @@ public sealed class UninstallManager
 
     private ManagedFileResult UninstallAgentsWithRecovery(
         ProductPaths paths,
-        bool agentsWasCreated)
+        bool agentsWasCreated,
+        string? originalBackupPath)
     {
         try
         {
-            return _agentsOverride.Uninstall(paths, agentsWasCreated);
+            return _agentsOverride.Uninstall(paths, agentsWasCreated, originalBackupPath);
         }
         catch (Exception exception) when (exception is InvalidDataException or IOException)
         {
@@ -175,6 +182,9 @@ public sealed class UninstallManager
 
         return new ManagedFileResult(target, false, false, safetyCopy, "manual-cleanup-required");
     }
+
+    private static string? GetOriginalBackup(InstallationState? state, string target)
+        => state?.BackupLocations.TryGetValue(target, out var backup) == true ? backup : null;
 
     private static void StopOwnedMcpProcesses(string expectedExecutable)
     {

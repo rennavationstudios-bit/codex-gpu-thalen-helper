@@ -88,7 +88,10 @@ public sealed class AgentsOverrideManager
         }
     }
 
-    public ManagedFileResult Uninstall(ProductPaths paths, bool fileWasCreatedByProduct)
+    public ManagedFileResult Uninstall(
+        ProductPaths paths,
+        bool fileWasCreatedByProduct,
+        string? originalBackupPath = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         if (!File.Exists(paths.AgentsOverrideFile))
@@ -117,13 +120,33 @@ public sealed class AgentsOverrideManager
         var backup = CreateBackup(paths.AgentsOverrideFile);
         try
         {
-            if (fileWasCreatedByProduct && string.IsNullOrWhiteSpace(updated))
+            if (TryGetExactOriginalBytes(
+                    paths.AgentsOverrideFile,
+                    originalBackupPath,
+                    originalBytes,
+                    original,
+                    out var exactOriginalBytes))
+            {
+                WriteAtomic(paths.AgentsOverrideFile, exactOriginalBytes);
+                return new ManagedFileResult(
+                    paths.AgentsOverrideFile,
+                    false,
+                    true,
+                    backup,
+                    "restored-exact-original");
+            }
+
+            if (fileWasCreatedByProduct
+                && string.IsNullOrWhiteSpace(updated)
+                && IsExactProductManagedRepresentation(originalBytes, original, string.Empty))
             {
                 File.Delete(paths.AgentsOverrideFile);
                 return new ManagedFileResult(paths.AgentsOverrideFile, false, true, backup, "removed-product-file");
             }
 
-            WriteAtomic(paths.AgentsOverrideFile, updated.TrimEnd() + Environment.NewLine);
+            WriteAtomic(
+                paths.AgentsOverrideFile,
+                EncodeUtf8PreservingPreamble(updated, originalBytes));
             return new ManagedFileResult(
                 paths.AgentsOverrideFile,
                 false,
@@ -267,26 +290,9 @@ public sealed class AgentsOverrideManager
             throw new InvalidDataException("Multiple managed AGENTS.override.md sections were found.");
         }
 
-        var removeEnd = end + endMarker.Length;
-        while (removeEnd < content.Length && content[removeEnd] is '\r' or '\n')
-        {
-            removeEnd++;
-        }
-
-        var before = content[..start].TrimEnd();
-        var after = content[removeEnd..].TrimStart();
+        var removeEnd = ConsumeSingleLineEnding(content, end + endMarker.Length);
         removed = true;
-        if (string.IsNullOrEmpty(before))
-        {
-            return after;
-        }
-
-        if (string.IsNullOrEmpty(after))
-        {
-            return before + Environment.NewLine;
-        }
-
-        return before + Environment.NewLine + Environment.NewLine + after;
+        return content[..start] + content[removeEnd..];
     }
 
     private static void ValidateAllMarkers(string content)
@@ -403,6 +409,129 @@ public sealed class AgentsOverrideManager
         {
             File.Delete(path);
         }
+    }
+
+    private static bool TryGetExactOriginalBytes(
+        string target,
+        string? originalBackupPath,
+        byte[] currentBytes,
+        string current,
+        out byte[] exactOriginalBytes)
+    {
+        exactOriginalBytes = [];
+        if (!IsManagedBackupForTarget(target, originalBackupPath))
+        {
+            return false;
+        }
+
+        var original = File.ReadAllText(originalBackupPath!, Encoding.UTF8);
+        if (original.Contains(ProductInfo.ManagedAgentsStart, StringComparison.Ordinal)
+            || original.Contains(ProductInfo.ManagedAgentsEnd, StringComparison.Ordinal)
+            || original.Contains(ProductInfo.ManagedReliabilityStart, StringComparison.Ordinal)
+            || original.Contains(ProductInfo.ManagedReliabilityEnd, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!IsExactProductManagedRepresentation(currentBytes, current, original))
+        {
+            return false;
+        }
+
+        exactOriginalBytes = File.ReadAllBytes(originalBackupPath!);
+        return true;
+    }
+
+    private static bool IsExactProductManagedRepresentation(
+        byte[] currentBytes,
+        string current,
+        string baseContent)
+    {
+        var expected = baseContent;
+        var found = false;
+        if (HasManagedLocalGpuSection(current))
+        {
+            expected = AppendManagedSection(expected, ExtractManagedSection(
+                current,
+                ProductInfo.ManagedAgentsStart,
+                ProductInfo.ManagedAgentsEnd));
+            found = true;
+        }
+
+        if (HasManagedReliabilitySection(current))
+        {
+            expected = AppendManagedSection(expected, ExtractManagedSection(
+                current,
+                ProductInfo.ManagedReliabilityStart,
+                ProductInfo.ManagedReliabilityEnd));
+            found = true;
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+
+        expected = string.IsNullOrWhiteSpace(expected)
+            ? string.Empty
+            : expected.TrimEnd() + Environment.NewLine;
+        var expectedBytes = new UTF8Encoding(false).GetBytes(expected);
+        return currentBytes.AsSpan().SequenceEqual(expectedBytes);
+    }
+
+    private static int ConsumeSingleLineEnding(string content, int index)
+    {
+        if (index >= content.Length)
+        {
+            return index;
+        }
+
+        if (content[index] == '\r')
+        {
+            index++;
+            if (index < content.Length && content[index] == '\n')
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        return content[index] == '\n' ? index + 1 : index;
+    }
+
+    private static byte[] EncodeUtf8PreservingPreamble(string content, byte[] originalBytes)
+    {
+        var payload = new UTF8Encoding(false).GetBytes(content);
+        var preamble = Encoding.UTF8.GetPreamble();
+        if (!originalBytes.AsSpan().StartsWith(preamble))
+        {
+            return payload;
+        }
+
+        var result = new byte[preamble.Length + payload.Length];
+        preamble.CopyTo(result, 0);
+        payload.CopyTo(result, preamble.Length);
+        return result;
+    }
+
+    private static bool IsManagedBackupForTarget(string target, string? backup)
+    {
+        if (string.IsNullOrWhiteSpace(backup) || !File.Exists(backup))
+        {
+            return false;
+        }
+
+        var targetFull = Path.GetFullPath(target);
+        var backupFull = Path.GetFullPath(backup);
+        return string.Equals(
+                Path.GetDirectoryName(targetFull),
+                Path.GetDirectoryName(backupFull),
+                StringComparison.OrdinalIgnoreCase)
+            && Path.GetFileName(backupFull).StartsWith(
+                Path.GetFileName(targetFull) + ".thalen-helper.",
+                StringComparison.OrdinalIgnoreCase)
+            && backupFull.EndsWith(".bak", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void WriteAtomic(string path, string content)

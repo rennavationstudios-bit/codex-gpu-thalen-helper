@@ -16,6 +16,8 @@ State contains operational paths because Ollama/Codex integration requires them.
 
 The MCP server is stdio-only. The helper sets `OLLAMA_HOST=127.0.0.1:11434`, verifies active listeners are loopback, and refuses to enable after exposure is detected. Activation also requires the configured model directory, manifest, selected tag, and audited digest to agree. The logon verifier fails closed and persists a disabled state if those checks drift.
 
+Generation is single-flight through a named per-user Windows semaphore. Busy calls skip by default or may use a bounded queue. Before each generation, the helper reads only aggregate dedicated-VRAM and Windows memory/commit counters and refuses optional inference under unsafe pressure. It never pauses, terminates, or reconfigures unrelated development, emulator, device, graphics, build, or Codex processes.
+
 ## Prompt injection and model output
 
 The review prompt labels supplied text as untrusted and denies tool/filesystem claims. Output is returned as hypotheses, with an explicit requirement for primary Codex verification. The model cannot execute its output or apply patches.

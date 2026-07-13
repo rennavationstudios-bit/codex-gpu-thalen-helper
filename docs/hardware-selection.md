@@ -8,6 +8,8 @@ Windows version/edition and process architecture are read from Windows APIs/WMI.
 
 ## Memory and GPU
 
+Immediately before optional inference, the helper requires current Windows physical-memory and commit-reserve measurements. When a discrete GPU is present, it also requires a current available-dedicated-VRAM measurement; unknown free VRAM fails closed instead of guessing. The initial beta obtains that measurement from supported NVIDIA tooling. AMD or Intel adapters whose current dedicated-VRAM availability cannot be measured remain installable but local review is refused with `GPU_MEMORY_PRESSURE_UNKNOWN` until a supported measurement route is available.
+
 Installed/available system RAM is measured separately. GPU adapters are enumerated through DXGI, which provides modern dedicated and shared memory values without relying on the unreliable `Win32_VideoController.AdapterRAM` field.
 
 For NVIDIA, `nvidia-smi` augments adapter data with total/free VRAM, driver version, and compute capability. AMD/Intel routes are labeled conservatively. Integrated adapters and adapters with unsupported routes are not treated as dedicated-accelerator candidates. Shared memory is never added to dedicated VRAM.

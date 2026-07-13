@@ -15,6 +15,7 @@ Highlights:
 - Automatic sanitized local-GPU guidance plus a separate optional Codex reliability baseline with an interactive before/after diff, source/plan-hash-bound apply, Control Center add/remove, distinct markers, backup, idempotent upgrades, and surgical rollback.
 - WinForms setup/Control Center plus self-contained CLI and MCP executables.
 - Pause, resume, immediate GPU release, low-impact, repair, update, model move, and surgical uninstall.
+- Cross-chat single-flight inference with default busy-skip or bounded queue behavior, live dedicated-VRAM/Windows commit-pressure refusal, and no install-time model load unless validation is explicitly selected.
 - Zero telemetry; no OpenAI API key requested or stored.
 - Locked dependencies, fixture/mocked integration tests, CodeQL/dependency review, SPDX SBOM, checksums, and GitHub build attestation.
 - Protected release tags/environment with exact tag, commit, and `main` ancestry verification.

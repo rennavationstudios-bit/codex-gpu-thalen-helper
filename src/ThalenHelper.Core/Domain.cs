@@ -48,6 +48,13 @@ public enum HelperAvailability
     Disabled
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ReviewBusyBehavior
+{
+    Skip,
+    Queue
+}
+
 public sealed record OperatingSystemInfo(
     string ProductName,
     Version Version,
@@ -207,7 +214,9 @@ public sealed record ReviewRequest(
     string Assignment,
     string? Context = null,
     string? Focus = null,
-    int? MaximumOutputTokens = null);
+    int? MaximumOutputTokens = null,
+    ReviewBusyBehavior BusyBehavior = ReviewBusyBehavior.Skip,
+    int QueueTimeoutSeconds = 30);
 
 public sealed record ReviewerResult
 {

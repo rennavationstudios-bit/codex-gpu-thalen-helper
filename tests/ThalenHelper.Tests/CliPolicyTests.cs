@@ -5,6 +5,16 @@ namespace ThalenHelper.Tests;
 public sealed class CliPolicyTests
 {
     [Fact]
+    public void InstallationDefaultsNeverPullOrLoadAModel()
+    {
+        using var temporary = new TemporaryDirectory();
+        var options = new InstallationOptions(temporary.CreatePaths());
+
+        Assert.False(options.PullAndValidateModel);
+        Assert.False(options.InstallReliabilityBaseline);
+    }
+
+    [Fact]
     public async Task ReliabilityBaselineCannotBypassInteractiveDiffPreview()
     {
         using var temporary = new TemporaryDirectory();

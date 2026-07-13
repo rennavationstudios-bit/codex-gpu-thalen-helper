@@ -68,7 +68,21 @@ public sealed partial class ModelCatalogService
                 errors.Add($"invalid size metadata for {model.Tag}");
             }
 
-            if (model.SafeDefaultContextTokens > model.MaximumContextTokens)
+            if (model.ParameterBillions is <= 0 or > 1_000
+                || model.MinimumDedicatedVramGiB is <= 0 or > 256
+                || model.RecommendedDedicatedVramGiB < model.MinimumDedicatedVramGiB
+                || model.RecommendedDedicatedVramGiB > 256
+                || model.MinimumSystemRamGiB is <= 0 or > 1_024
+                || model.RecommendedSystemRamGiB < model.MinimumSystemRamGiB
+                || model.RecommendedSystemRamGiB > 1_024
+                || model.MinimumFreeDiskGiB > 4_096)
+            {
+                errors.Add($"resource metadata is outside safe bounds for {model.Tag}");
+            }
+
+            if (model.SafeDefaultContextTokens is < 512 or > 32_768
+                || model.MaximumContextTokens is < 512 or > 32_768
+                || model.SafeDefaultContextTokens > model.MaximumContextTokens)
             {
                 errors.Add($"default context exceeds maximum for {model.Tag}");
             }

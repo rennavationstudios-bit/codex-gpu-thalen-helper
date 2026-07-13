@@ -60,13 +60,21 @@ public static class LocalGpuReviewerTools
         [Description("Optional explicitly supplied context, up to 96,000 characters.")] string? context = null,
         [Description("Optional focus, up to 2,000 characters.")] string? focus = null,
         [Description("Optional response token limit from 64 through 2,048.")] int? maximumOutputTokens = null,
+        [Description("When another review is active, skip immediately (default) or enter a bounded queue.")] ReviewBusyBehavior busyBehavior = ReviewBusyBehavior.Skip,
+        [Description("Bounded queue timeout from 1 through 120 seconds when busyBehavior is queue.")] int queueTimeoutSeconds = 30,
         CancellationToken cancellationToken = default)
     {
         var reviewer = services.GetRequiredService<ReviewerService>();
         try
         {
             return await reviewer.ReviewAsync(
-                new ReviewRequest(assignment, context, focus, maximumOutputTokens),
+                new ReviewRequest(
+                    assignment,
+                    context,
+                    focus,
+                    maximumOutputTokens,
+                    busyBehavior,
+                    queueTimeoutSeconds),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (ArgumentException exception)

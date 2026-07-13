@@ -74,7 +74,10 @@ public sealed partial class OllamaClient : IDisposable
         int contextTokens,
         int outputTokens,
         TimeSpan keepAlive,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        ReviewBusyBehavior busyBehavior = ReviewBusyBehavior.Queue,
+        TimeSpan? queueTimeout = null,
+        Func<CancellationToken, Task>? preGenerationCheck = null)
     {
         ValidateModelIdentifier(model);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
@@ -103,7 +106,15 @@ public sealed partial class OllamaClient : IDisposable
             true);
         try
         {
-            using var lease = await GpuCoordination.AcquireAsync(linked.Token).ConfigureAwait(false);
+            using var lease = await GpuCoordination.AcquireAsync(
+                busyBehavior,
+                queueTimeout ?? TimeSpan.FromSeconds(30),
+                linked.Token).ConfigureAwait(false);
+            if (preGenerationCheck is not null)
+            {
+                await preGenerationCheck(linked.Token).ConfigureAwait(false);
+            }
+
             var payload = new
             {
                 model,
@@ -379,15 +390,62 @@ public static class GpuCoordination
     }
 
     public static async Task<IDisposable> AcquireAsync(CancellationToken cancellationToken)
+        => await AcquireAsync(
+            ReviewBusyBehavior.Queue,
+            TimeSpan.FromSeconds(30),
+            cancellationToken).ConfigureAwait(false);
+
+    public static async Task<IDisposable> AcquireAsync(
+        ReviewBusyBehavior busyBehavior,
+        TimeSpan queueTimeout,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var semaphore = new Semaphore(1, 1, InferenceSemaphoreName);
-        var index = await Task.Run(
-            () => WaitHandle.WaitAny([semaphore, cancellationToken.WaitHandle]),
+        if (busyBehavior is not ReviewBusyBehavior.Skip and not ReviewBusyBehavior.Queue)
+        {
+            semaphore.Dispose();
+            throw new ArgumentOutOfRangeException(nameof(busyBehavior));
+        }
+
+        if (busyBehavior == ReviewBusyBehavior.Skip)
+        {
+            if (semaphore.WaitOne(0))
+            {
+                return new Lease(semaphore);
+            }
+
+            semaphore.Dispose();
+            throw new OllamaException(
+                "REVIEW_BUSY_SKIPPED",
+                "Another local review is using the model; this optional review was skipped.",
+                retryable: true);
+        }
+
+        if (queueTimeout != Timeout.InfiniteTimeSpan
+            && (queueTimeout <= TimeSpan.Zero || queueTimeout > TimeSpan.FromMinutes(2)))
+        {
+            semaphore.Dispose();
+            throw new ArgumentOutOfRangeException(nameof(queueTimeout));
+        }
+
+        var index = await Task.Run(() => queueTimeout == Timeout.InfiniteTimeSpan
+            ? WaitHandle.WaitAny([semaphore, cancellationToken.WaitHandle])
+            : WaitHandle.WaitAny([semaphore, cancellationToken.WaitHandle], queueTimeout),
             CancellationToken.None).ConfigureAwait(false);
         if (index == 1)
         {
             semaphore.Dispose();
             cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        if (index == WaitHandle.WaitTimeout)
+        {
+            semaphore.Dispose();
+            throw new OllamaException(
+                "REVIEW_QUEUE_TIMEOUT",
+                "Another local review remained active until the bounded queue timeout; this optional review was skipped.",
+                retryable: true);
         }
 
         return new Lease(semaphore);

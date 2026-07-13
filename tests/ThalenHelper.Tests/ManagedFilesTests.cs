@@ -35,8 +35,8 @@ public sealed class ManagedFilesTests
 
         manager.SetEnabled(paths, true);
         Assert.Contains("enabled = true", File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);
-        manager.Uninstall(paths);
-        Assert.Equal(original.TrimEnd() + Environment.NewLine, File.ReadAllText(paths.CodexConfigFile));
+        manager.Uninstall(paths, installed.BackupPath);
+        Assert.Equal(Encoding.UTF8.GetBytes(original), File.ReadAllBytes(paths.CodexConfigFile));
     }
 
     [Fact]
@@ -107,6 +107,60 @@ public sealed class ManagedFilesTests
     }
 
     [Fact]
+    public void CodexConfigUninstallDoesNotRestoreStaleBackupOverNewUserContent()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = "model = \"original\"\r\n";
+        File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
+        var manager = new CodexConfigManager();
+        var installed = manager.InstallOrRepair(paths, false);
+        File.AppendAllText(paths.CodexConfigFile, "# added after install\r\n");
+
+        var removed = manager.Uninstall(paths, installed.BackupPath);
+        var content = File.ReadAllText(paths.CodexConfigFile);
+
+        Assert.Equal("removed", removed.Operation);
+        Assert.Contains("# added after install", content, StringComparison.Ordinal);
+        Assert.DoesNotContain(ProductInfo.ManagedConfigStart, content, StringComparison.Ordinal);
+        Assert.NotEqual(original, content);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CodexConfigUninstallPreservesByteOnlyUserChangesInsteadOfRestoringStaleBackup(bool addBom)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = "model = \"original\"\r\n";
+        File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
+        var manager = new CodexConfigManager();
+        var installed = manager.InstallOrRepair(paths, false);
+        var installedBytes = File.ReadAllBytes(paths.CodexConfigFile);
+        var changed = addBom
+            ? Encoding.UTF8.GetPreamble().Concat(installedBytes).ToArray()
+            : Encoding.UTF8.GetBytes(
+                File.ReadAllText(paths.CodexConfigFile).Replace(
+                    ProductInfo.ManagedConfigStart,
+                    "  " + Environment.NewLine + ProductInfo.ManagedConfigStart,
+                    StringComparison.Ordinal));
+        File.WriteAllBytes(paths.CodexConfigFile, changed);
+
+        var removed = manager.Uninstall(paths, installed.BackupPath);
+        var result = File.ReadAllBytes(paths.CodexConfigFile);
+
+        Assert.Equal("removed", removed.Operation);
+        Assert.NotEqual(Encoding.UTF8.GetBytes(original), result);
+        Assert.Equal(addBom, result.AsSpan().StartsWith(Encoding.UTF8.GetPreamble()));
+        Assert.DoesNotContain(ProductInfo.ManagedConfigStart, File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);
+        if (!addBom)
+        {
+            Assert.Contains("  ", File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void AgentsOverridePreservesUserTextAndRemovesOnlyManagedSection()
     {
         using var temporary = new TemporaryDirectory();
@@ -125,8 +179,8 @@ public sealed class ManagedFilesTests
         Assert.DoesNotContain(Environment.UserName, content, StringComparison.OrdinalIgnoreCase);
         Assert.False(manager.InstallOrRepair(paths, HardwareTier.Entry).Changed);
 
-        manager.Uninstall(paths, fileWasCreatedByProduct: false);
-        Assert.Equal(original.TrimEnd() + Environment.NewLine, File.ReadAllText(paths.AgentsOverrideFile));
+        manager.Uninstall(paths, fileWasCreatedByProduct: false, installed.BackupPath);
+        Assert.Equal(Encoding.UTF8.GetBytes(original), File.ReadAllBytes(paths.AgentsOverrideFile));
     }
 
     [Fact]
@@ -160,8 +214,8 @@ public sealed class ManagedFilesTests
         content = File.ReadAllText(paths.AgentsOverrideFile);
         Assert.Contains(ProductInfo.ManagedAgentsStart, content, StringComparison.Ordinal);
         Assert.DoesNotContain(ProductInfo.ManagedReliabilityStart, content, StringComparison.Ordinal);
-        manager.Uninstall(paths, fileWasCreatedByProduct: false);
-        Assert.Equal(original.TrimEnd() + Environment.NewLine, File.ReadAllText(paths.AgentsOverrideFile));
+        manager.Uninstall(paths, fileWasCreatedByProduct: false, installed.BackupPath);
+        Assert.Equal(Encoding.UTF8.GetBytes(original), File.ReadAllBytes(paths.AgentsOverrideFile));
     }
 
     [Fact]
@@ -179,6 +233,60 @@ public sealed class ManagedFilesTests
         Assert.Equal("preserved-existing-unmanaged", result.Operation);
         Assert.Equal(original, File.ReadAllText(paths.AgentsOverrideFile));
         Assert.DoesNotContain(ProductInfo.ManagedAgentsStart, original, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AgentsUninstallDoesNotRestoreStaleBackupOverNewUserContent()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = "# Original instruction\r\n";
+        File.WriteAllText(paths.AgentsOverrideFile, original, new UTF8Encoding(false));
+        var manager = new AgentsOverrideManager();
+        var installed = manager.InstallOrRepair(paths, HardwareTier.Entry);
+        File.AppendAllText(paths.AgentsOverrideFile, "# Added after install\r\n");
+
+        var removed = manager.Uninstall(paths, fileWasCreatedByProduct: false, installed.BackupPath);
+        var content = File.ReadAllText(paths.AgentsOverrideFile);
+
+        Assert.Equal("removed-managed-sections", removed.Operation);
+        Assert.Contains("# Added after install", content, StringComparison.Ordinal);
+        Assert.DoesNotContain(ProductInfo.ManagedAgentsStart, content, StringComparison.Ordinal);
+        Assert.NotEqual(original, content);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AgentsUninstallPreservesByteOnlyUserChangesInsteadOfRestoringStaleBackup(bool addBom)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = "# Original instruction\r\n";
+        File.WriteAllText(paths.AgentsOverrideFile, original, new UTF8Encoding(false));
+        var manager = new AgentsOverrideManager();
+        var installed = manager.InstallOrRepair(paths, HardwareTier.Entry);
+        var installedBytes = File.ReadAllBytes(paths.AgentsOverrideFile);
+        var changed = addBom
+            ? Encoding.UTF8.GetPreamble().Concat(installedBytes).ToArray()
+            : Encoding.UTF8.GetBytes(
+                File.ReadAllText(paths.AgentsOverrideFile).Replace(
+                    ProductInfo.ManagedAgentsStart,
+                    "  " + Environment.NewLine + ProductInfo.ManagedAgentsStart,
+                    StringComparison.Ordinal));
+        File.WriteAllBytes(paths.AgentsOverrideFile, changed);
+
+        var removed = manager.Uninstall(paths, fileWasCreatedByProduct: false, installed.BackupPath);
+        var result = File.ReadAllBytes(paths.AgentsOverrideFile);
+
+        Assert.Equal("removed-managed-sections", removed.Operation);
+        Assert.NotEqual(Encoding.UTF8.GetBytes(original), result);
+        Assert.Equal(addBom, result.AsSpan().StartsWith(Encoding.UTF8.GetPreamble()));
+        Assert.DoesNotContain(ProductInfo.ManagedAgentsStart, File.ReadAllText(paths.AgentsOverrideFile), StringComparison.Ordinal);
+        if (!addBom)
+        {
+            Assert.Contains("  ", File.ReadAllText(paths.AgentsOverrideFile), StringComparison.Ordinal);
+        }
     }
 
     [Fact]

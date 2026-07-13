@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -51,6 +52,171 @@ public sealed class OllamaAndReviewerTests
         Assert.Equal("0s", requestBody.RootElement.GetProperty("keep_alive").GetString());
         Assert.Equal(2_048, requestBody.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
         Assert.Equal(128, requestBody.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+    }
+
+    [Fact]
+    public async Task NamedInferenceLockSupportsImmediateSkipAndBoundedQueue()
+    {
+        var first = await GpuCoordination.AcquireAsync(
+            ReviewBusyBehavior.Queue,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        try
+        {
+            var skipped = await Assert.ThrowsAsync<OllamaException>(() =>
+                GpuCoordination.AcquireAsync(
+                    ReviewBusyBehavior.Skip,
+                    TimeSpan.FromSeconds(2),
+                    CancellationToken.None));
+            Assert.Equal("REVIEW_BUSY_SKIPPED", skipped.Code);
+
+            var queued = GpuCoordination.AcquireAsync(
+                ReviewBusyBehavior.Queue,
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None);
+            await Task.Delay(75);
+            Assert.False(queued.IsCompleted);
+            first.Dispose();
+            using var second = await queued;
+        }
+        finally
+        {
+            first.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task NamedInferenceLockTimesOutInsteadOfQueuingIndefinitely()
+    {
+        using var first = await GpuCoordination.AcquireAsync(
+            ReviewBusyBehavior.Queue,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+
+        var timedOut = await Assert.ThrowsAsync<OllamaException>(() =>
+            GpuCoordination.AcquireAsync(
+                ReviewBusyBehavior.Queue,
+                TimeSpan.FromMilliseconds(50),
+                CancellationToken.None));
+
+        Assert.Equal("REVIEW_QUEUE_TIMEOUT", timedOut.Code);
+    }
+
+    [Fact]
+    public async Task NamedInferenceLockIsSharedWithAnotherWindowsProcess()
+    {
+        var script = "$s=[System.Threading.Semaphore]::new(1,1,'Local\\CodexGpuThalenHelperInference');"
+            + "$null=$s.WaitOne();[Console]::Out.WriteLine('READY');[Console]::Out.Flush();"
+            + "$null=[Console]::In.ReadLine();$null=$s.Release();$s.Dispose()";
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encoded}",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        }) ?? throw new InvalidOperationException("Could not start cross-process semaphore fixture.");
+        try
+        {
+            Assert.Equal("READY", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            var skipped = await Assert.ThrowsAsync<OllamaException>(() =>
+                GpuCoordination.AcquireAsync(
+                    ReviewBusyBehavior.Skip,
+                    TimeSpan.FromSeconds(2),
+                    CancellationToken.None));
+            Assert.Equal("REVIEW_BUSY_SKIPPED", skipped.Code);
+
+            await process.StandardInput.WriteLineAsync(string.Empty);
+            await process.StandardInput.FlushAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(0, process.ExitCode);
+            using var acquired = await GpuCoordination.AcquireAsync(
+                ReviewBusyBehavior.Skip,
+                TimeSpan.FromSeconds(2),
+                CancellationToken.None);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CancelledQueueAndFailedPrecheckReleaseTheInferenceLock()
+    {
+        using (var first = await GpuCoordination.AcquireAsync(
+            ReviewBusyBehavior.Queue,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None))
+        {
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                GpuCoordination.AcquireAsync(
+                    ReviewBusyBehavior.Queue,
+                    TimeSpan.FromSeconds(2),
+                    cancellation.Token));
+        }
+
+        var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(FakeHttpMessageHandler.Json(
+            "{\"model\":\"qwen2.5-coder:1.5b\",\"response\":\"OK\",\"done\":true}")));
+        using var http = new HttpClient(handler);
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), http);
+        var precheck = await Assert.ThrowsAsync<OllamaException>(() => client.GenerateAsync(
+            "qwen2.5-coder:1.5b",
+            "Inspect.",
+            2_048,
+            64,
+            TimeSpan.Zero,
+            busyBehavior: ReviewBusyBehavior.Skip,
+            preGenerationCheck: _ => throw new OllamaException("PRESSURE_TEST", "Refused.")));
+        Assert.Equal("PRESSURE_TEST", precheck.Code);
+
+        var succeeded = await client.GenerateAsync(
+            "qwen2.5-coder:1.5b",
+            "Inspect.",
+            2_048,
+            64,
+            TimeSpan.Zero,
+            busyBehavior: ReviewBusyBehavior.Skip);
+
+        Assert.Equal("OK", succeeded.Response);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task PressurePrecheckDoesNotRunUntilInferenceLockIsAcquired()
+    {
+        using var first = await GpuCoordination.AcquireAsync(
+            ReviewBusyBehavior.Queue,
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+        var precheckRan = false;
+        using var http = new HttpClient(new FakeHttpMessageHandler((_, _) =>
+            Task.FromResult(FakeHttpMessageHandler.Json("{}"))));
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), http);
+
+        var timedOut = await Assert.ThrowsAsync<OllamaException>(() => client.GenerateAsync(
+            "qwen2.5-coder:1.5b",
+            "Inspect.",
+            2_048,
+            64,
+            TimeSpan.Zero,
+            busyBehavior: ReviewBusyBehavior.Queue,
+            queueTimeout: TimeSpan.FromMilliseconds(50),
+            preGenerationCheck: _ =>
+            {
+                precheckRan = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.Equal("REVIEW_QUEUE_TIMEOUT", timedOut.Code);
+        Assert.False(precheckRan);
     }
 
     [Fact]
@@ -324,6 +490,67 @@ public sealed class OllamaAndReviewerTests
         Assert.Equal("GPU_RESOURCE_BLOCKED", result.ErrorCode);
         Assert.False(result.ModelRan);
         Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task AutomaticResourcePressureGuardBlocksBeforeGeneration()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Enabled
+        });
+        var handler = InventoryHandler();
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var reviewer = new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            (_, _) => new ResourcePressureCheck(
+                false,
+                "WINDOWS_COMMIT_PRESSURE",
+                "Commit pressure is high."));
+
+        var result = await reviewer.ReviewAsync(new ReviewRequest("Inspect."));
+
+        Assert.Equal("WINDOWS_COMMIT_PRESSURE", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal(["/api/tags", "/api/ps"], handler.Requests.Select(request => request.Path));
+    }
+
+    [Fact]
+    public async Task ModelValidationAlsoRefusesResourcePressureBeforeInference()
+    {
+        var handler = InventoryHandler();
+        var manager = new InstallationManager(
+            clientFactory: () => new OllamaClient(
+                new Uri("http://127.0.0.1:11434"),
+                new HttpClient(handler)),
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(
+                false,
+                "GPU_MEMORY_PRESSURE",
+                "VRAM pressure is high."));
+        var state = new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Disabled
+        };
+
+        var result = await manager.ValidateSelectedModelAsync(state);
+
+        Assert.False(result.Success);
+        Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
+        Assert.Equal(["/api/tags", "/api/ps"], handler.Requests.Select(request => request.Path));
     }
 
     [Fact]

@@ -14,7 +14,7 @@ public sealed class SetupWizardForm : Form
     private readonly Button _next = new() { Text = "Next", AutoSize = true };
     private readonly TextBox _modelDirectory = new() { Width = 600 };
     private readonly CheckBox _autoStart = new() { Text = "Start Ollama automatically for this Windows user after sign-in", Checked = true, AutoSize = true };
-    private readonly CheckBox _pullAndValidate = new() { Text = "Download and run the selected model validation now", Checked = true, AutoSize = true };
+    private readonly CheckBox _pullAndValidate = new() { Text = "Download and run the selected model validation now (loads the model)", Checked = false, AutoSize = true };
     private readonly CheckBox _installOllama = new() { Text = "Install Ollama from its current official signed Windows release if missing", Checked = true, AutoSize = true };
     private readonly CheckBox _installReliabilityBaseline = new()
     {

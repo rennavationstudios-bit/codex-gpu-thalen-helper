@@ -121,6 +121,12 @@ public sealed class ModelAndStorageTests
             Models = [valid.Models[0] with { ExpectedDigest = "not-a-sha256" }, .. valid.Models.Skip(1)]
         };
         Assert.Throws<InvalidDataException>(() => new ModelCatalogService().Validate(invalidDigest));
+
+        var unsafeResources = valid with
+        {
+            Models = [valid.Models[0] with { MinimumDedicatedVramGiB = decimal.MaxValue }, .. valid.Models.Skip(1)]
+        };
+        Assert.Throws<InvalidDataException>(() => new ModelCatalogService().Validate(unsafeResources));
     }
 
     private static StorageVolume Volume(

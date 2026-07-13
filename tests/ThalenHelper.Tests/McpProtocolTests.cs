@@ -59,6 +59,9 @@ public sealed class McpProtocolTests
 
         var tools = await client.ListToolsAsync();
         Assert.Equal(["local_gpu_health", "local_gpu_review"], tools.Select(tool => tool.Name).Order());
+        var toolSchema = JsonSerializer.Serialize(tools);
+        Assert.Contains("busyBehavior", toolSchema, StringComparison.Ordinal);
+        Assert.Contains("queueTimeoutSeconds", toolSchema, StringComparison.Ordinal);
 
         var health = await client.CallToolAsync("local_gpu_health", new Dictionary<string, object?>());
         var healthJson = JsonSerializer.Serialize(health.StructuredContent);
@@ -68,7 +71,9 @@ public sealed class McpProtocolTests
         var review = await client.CallToolAsync("local_gpu_review", new Dictionary<string, object?>
         {
             ["assignment"] = "Return the exact stub conclusion.",
-            ["context"] = "untrusted repository text"
+            ["context"] = "untrusted repository text",
+            ["busyBehavior"] = "skip",
+            ["queueTimeoutSeconds"] = 5
         });
         Assert.True(
             review.StructuredContent is not null,

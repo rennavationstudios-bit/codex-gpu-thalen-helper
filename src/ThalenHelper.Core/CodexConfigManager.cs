@@ -105,7 +105,10 @@ public sealed partial class CodexConfigManager
         }
     }
 
-    public ManagedFileResult Uninstall(ProductPaths paths)
+    public ManagedFileResult Uninstall(
+        ProductPaths paths,
+        string? originalBackupPath = null,
+        bool fileWasCreatedByProduct = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
         if (!File.Exists(paths.CodexConfigFile))
@@ -126,13 +129,33 @@ public sealed partial class CodexConfigManager
         var backup = CreateBackup(paths.CodexConfigFile);
         try
         {
-            if (string.IsNullOrWhiteSpace(updated))
+            if (TryGetExactOriginalBytes(
+                    paths.CodexConfigFile,
+                    originalBackupPath,
+                    originalBytes,
+                    original,
+                    out var exactOriginalBytes))
+            {
+                WriteAtomic(paths.CodexConfigFile, exactOriginalBytes);
+                return new ManagedFileResult(
+                    paths.CodexConfigFile,
+                    false,
+                    true,
+                    backup,
+                    "restored-exact-original");
+            }
+
+            if (fileWasCreatedByProduct
+                && string.IsNullOrWhiteSpace(updated)
+                && IsExactProductManagedRepresentation(originalBytes, original, string.Empty))
             {
                 File.Delete(paths.CodexConfigFile);
             }
             else
             {
-                WriteAtomic(paths.CodexConfigFile, updated);
+                WriteAtomic(
+                    paths.CodexConfigFile,
+                    EncodeUtf8PreservingPreamble(updated, originalBytes));
             }
 
             return new ManagedFileResult(paths.CodexConfigFile, false, true, backup, "removed");
@@ -248,26 +271,11 @@ public sealed partial class CodexConfigManager
             throw new InvalidDataException("Multiple managed Codex configuration sections were found.");
         }
 
-        var removeEnd = end + ProductInfo.ManagedConfigEnd.Length;
-        while (removeEnd < content.Length && content[removeEnd] is '\r' or '\n')
-        {
-            removeEnd++;
-        }
-
-        var before = content[..start].TrimEnd('\r', '\n', ' ', '\t');
-        var after = content[removeEnd..].TrimStart('\r', '\n');
+        var removeEnd = ConsumeSingleLineEnding(
+            content,
+            end + ProductInfo.ManagedConfigEnd.Length);
         removed = true;
-        if (string.IsNullOrEmpty(before))
-        {
-            return after;
-        }
-
-        if (string.IsNullOrEmpty(after))
-        {
-            return before + Environment.NewLine;
-        }
-
-        return before + Environment.NewLine + Environment.NewLine + after;
+        return content[..start] + content[removeEnd..];
     }
 
     private static string EscapeTomlBasicString(string value)
@@ -318,6 +326,108 @@ public sealed partial class CodexConfigManager
             && serversValue is TomlTable servers
             && servers.TryGetValue(ProductInfo.IntegrationName, out var reviewerValue)
             && reviewerValue is TomlTable;
+    }
+
+    private static bool TryGetExactOriginalBytes(
+        string target,
+        string? originalBackupPath,
+        byte[] currentBytes,
+        string current,
+        out byte[] exactOriginalBytes)
+    {
+        exactOriginalBytes = [];
+        if (!IsManagedBackupForTarget(target, originalBackupPath))
+        {
+            return false;
+        }
+
+        var original = File.ReadAllText(originalBackupPath!, Encoding.UTF8);
+        ValidateToml(original, allowEmpty: true);
+        if (original.Contains(ProductInfo.ManagedConfigStart, StringComparison.Ordinal)
+            || original.Contains(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!IsExactProductManagedRepresentation(currentBytes, current, original))
+        {
+            return false;
+        }
+
+        exactOriginalBytes = File.ReadAllBytes(originalBackupPath!);
+        return true;
+    }
+
+    private static bool IsExactProductManagedRepresentation(
+        byte[] currentBytes,
+        string current,
+        string baseContent)
+    {
+        var start = current.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
+        var end = current.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
+        if (start < 0 || end < start)
+        {
+            return false;
+        }
+
+        var managed = current[start..(end + ProductInfo.ManagedConfigEnd.Length)];
+        var expected = new UTF8Encoding(false).GetBytes(AppendBlock(baseContent, managed));
+        return currentBytes.AsSpan().SequenceEqual(expected);
+    }
+
+    private static int ConsumeSingleLineEnding(string content, int index)
+    {
+        if (index >= content.Length)
+        {
+            return index;
+        }
+
+        if (content[index] == '\r')
+        {
+            index++;
+            if (index < content.Length && content[index] == '\n')
+            {
+                index++;
+            }
+
+            return index;
+        }
+
+        return content[index] == '\n' ? index + 1 : index;
+    }
+
+    private static byte[] EncodeUtf8PreservingPreamble(string content, byte[] originalBytes)
+    {
+        var payload = new UTF8Encoding(false).GetBytes(content);
+        var preamble = Encoding.UTF8.GetPreamble();
+        if (!originalBytes.AsSpan().StartsWith(preamble))
+        {
+            return payload;
+        }
+
+        var result = new byte[preamble.Length + payload.Length];
+        preamble.CopyTo(result, 0);
+        payload.CopyTo(result, preamble.Length);
+        return result;
+    }
+
+    private static bool IsManagedBackupForTarget(string target, string? backup)
+    {
+        if (string.IsNullOrWhiteSpace(backup) || !File.Exists(backup))
+        {
+            return false;
+        }
+
+        var targetFull = Path.GetFullPath(target);
+        var backupFull = Path.GetFullPath(backup);
+        return string.Equals(
+                Path.GetDirectoryName(targetFull),
+                Path.GetDirectoryName(backupFull),
+                StringComparison.OrdinalIgnoreCase)
+            && Path.GetFileName(backupFull).StartsWith(
+                Path.GetFileName(targetFull) + ".thalen-helper.",
+                StringComparison.OrdinalIgnoreCase)
+            && backupFull.EndsWith(".bak", StringComparison.OrdinalIgnoreCase);
     }
 
     [GeneratedRegex("(?m)^enabled\\s*=\\s*(true|false)\\s*$", RegexOptions.CultureInvariant)]
