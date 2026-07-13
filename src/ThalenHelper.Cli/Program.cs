@@ -24,13 +24,10 @@ internal static class CliApplication
                 return 0;
             }
 
-            var paths = ProductPaths.Resolve(
-                parsed.Get("install-dir"),
-                parsed.Get("state-dir"),
-                parsed.Get("codex-home"));
+            var command = parsed.Positionals[0].ToLowerInvariant();
+            var paths = ResolvePaths(parsed, command);
             var store = new StateStore(paths.StateFile);
             var control = new ControlService(paths, store);
-            var command = parsed.Positionals[0].ToLowerInvariant();
             return command switch
             {
                 "version" => Write(new { product = ProductInfo.Name, version = ProductInfo.Version }),
@@ -60,6 +57,25 @@ internal static class CliApplication
         {
             return Fail("COMMAND_FAILED", Sanitize(exception.Message));
         }
+    }
+
+    internal static ProductPaths ResolvePaths(ParsedArguments parsed, string command)
+    {
+        var requestedInstallDirectory = parsed.Get("install-dir");
+        if (!string.Equals(command, "uninstall", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProductPaths.Resolve(
+                requestedInstallDirectory,
+                parsed.Get("state-dir"),
+                parsed.Get("codex-home"));
+        }
+
+        var probe = ProductPaths.Resolve(requestedInstallDirectory ?? AppContext.BaseDirectory);
+        var context = InstallContextStore.Load(probe.InstallDirectory);
+        return ProductPaths.Resolve(
+            probe.InstallDirectory,
+            parsed.Get("state-dir") ?? context?.StateDirectory,
+            parsed.Get("codex-home") ?? context?.CodexHome);
     }
 
     private static async Task<int> StatusAsync(StateStore store)

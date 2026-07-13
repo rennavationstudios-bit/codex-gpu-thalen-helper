@@ -56,7 +56,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Filename: "{app}\ThalenHelper.ControlCenter.exe"; Description: "Open setup and Control Center"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{app}\thalen-helper.exe"; Parameters: "uninstall --yes"; Flags: runhidden waituntilterminated; RunOnceId: "ThalenHelperManagedCleanup"; Check: ShouldRunManagedUninstall
+Filename: "{app}\thalen-helper.exe"; Parameters: "uninstall --yes --install-dir ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "ThalenHelperManagedCleanup"; Check: ShouldRunManagedUninstall
 
 [UninstallDelete]
 Type: files; Name: "{app}\.package-lifecycle-test"

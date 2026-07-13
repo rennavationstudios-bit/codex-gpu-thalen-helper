@@ -89,6 +89,8 @@ public sealed class InstallationManager
             throw new InvalidOperationException("Both AGENTS.override.md preview hashes are required together.");
         }
 
+        InstallContextStore.Save(options.Paths);
+
         var currentUserModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
@@ -439,6 +441,8 @@ public sealed class InstallationManager
         Func<string, bool>? codexStartupValidator = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(paths);
+        InstallContextStore.Save(paths);
         var store = new StateStore(paths.StateFile);
         var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
@@ -571,6 +575,7 @@ public sealed class InstallationManager
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        InstallContextStore.Save(paths);
         var store = new StateStore(paths.StateFile);
         var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");

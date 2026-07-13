@@ -78,16 +78,20 @@ public sealed class UninstallManager
             }
         }
 
-        if (ownsRuntime)
+        if (state is not null)
         {
-            StopOwnedMcpProcesses(managedPaths.McpExecutable);
+            if (ownsRuntime)
+            {
+                StopOwnedMcpProcesses(managedPaths.McpExecutable);
+            }
+
+            var originalConfigBackup = GetOriginalBackup(state, managedPaths.CodexConfigFile);
+            var originalAgentsBackup = GetOriginalBackup(state, managedPaths.AgentsOverrideFile);
+            var configWasCreated = state.FilesCreated.Contains(managedPaths.CodexConfigFile, StringComparer.OrdinalIgnoreCase);
+            managed.Add(UninstallCodexConfigWithRecovery(managedPaths, originalConfigBackup, configWasCreated));
+            var agentsWasCreated = state.FilesCreated.Contains(managedPaths.AgentsOverrideFile, StringComparer.OrdinalIgnoreCase);
+            managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated, originalAgentsBackup));
         }
-        var originalConfigBackup = GetOriginalBackup(state, managedPaths.CodexConfigFile);
-        var originalAgentsBackup = GetOriginalBackup(state, managedPaths.AgentsOverrideFile);
-        var configWasCreated = state?.FilesCreated.Contains(managedPaths.CodexConfigFile, StringComparer.OrdinalIgnoreCase) == true;
-        managed.Add(UninstallCodexConfigWithRecovery(managedPaths, originalConfigBackup, configWasCreated));
-        var agentsWasCreated = state?.FilesCreated.Contains(managedPaths.AgentsOverrideFile, StringComparer.OrdinalIgnoreCase) == true;
-        managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated, originalAgentsBackup));
         var manualCleanupRequired = managed.Any(item =>
             string.Equals(item.Operation, "manual-cleanup-required", StringComparison.Ordinal));
         var reportPath = Path.Combine(
@@ -103,6 +107,8 @@ public sealed class UninstallManager
             managedFiles = managed.Select(item => new { item.Operation, file = Path.GetFileName(item.Path), item.Changed }),
             note = preservesUnownedRuntime
                 ? "No positive managed reviewer ownership was present. The existing integration, Ollama, models, startup, environment, Codex authentication, and unrelated configuration were preserved."
+                : state is null
+                    ? "No product state was present. Codex files, Ollama, models, startup, environment, and other applications were left untouched."
                 : "Codex authentication, unrelated Codex configuration, pre-existing Ollama, and pre-existing models were preserved."
         };
         await File.WriteAllTextAsync(
@@ -126,11 +132,18 @@ public sealed class UninstallManager
             GpuCoordination.ClearCancellation();
         }
 
+        if (!manualCleanupRequired)
+        {
+            InstallContextStore.Delete(_paths.InstallDirectory);
+        }
+
         return new UninstallResult(
             !manualCleanupRequired,
             manualCleanupRequired ? "UNINSTALL_MANUAL_CLEANUP_REQUIRED" : "UNINSTALLED",
             manualCleanupRequired
                 ? "A managed Codex file is malformed or unsafe to edit. Its current bytes and helper state were preserved for manual cleanup and retry."
+                : state is null
+                    ? "No product state was present, so protected Codex and runtime files were left untouched. Package files may be removed safely."
                 : preservesUnownedRuntime
                     ? "Only product-managed file sections and state were removed; the unowned local_gpu_reviewer integration and runtime were untouched."
                     : "Managed Codex integration, instructions, startup entry, and state were removed surgically.",
