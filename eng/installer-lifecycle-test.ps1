@@ -26,6 +26,18 @@ if (-not ([System.IO.Path]::GetFullPath($testRoot).StartsWith($runnerTemp, [Syst
 }
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
+function New-QuotedInstallerSwitch {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    if ($Name -notmatch '^[A-Z]+$' -or $Value.Contains('"')) {
+        throw 'Installer lifecycle switch contains unsupported characters.'
+    }
+    return ('/{0}="{1}"' -f $Name, $Value)
+}
+
 function Assert-SilentSetupRejected {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -47,35 +59,35 @@ $negativeModels = Join-Path $testRoot 'Rejected Models'
 New-Item -ItemType Directory -Path $negativeCodexHome, $negativeModels -Force | Out-Null
 $missingChoiceInstall = Join-Path $testRoot 'Rejected missing choice'
 Assert-SilentSetupRejected -Name 'missing explicit AUTOSTART choice' -InstallPath $missingChoiceInstall -Arguments @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$missingChoiceInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
-    "/LOG=$(Join-Path $testRoot 'rejected-missing-choice.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'DIR' $missingChoiceInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $negativeCodexHome), (New-QuotedInstallerSwitch 'MODELSDIR' $negativeModels), '/MODEL=auto', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
+    (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'rejected-missing-choice.log'))
 )
 $malformedChoiceInstall = Join-Path $testRoot 'Rejected malformed choice'
 Assert-SilentSetupRejected -Name 'malformed PULLANDVALIDATE choice' -InstallPath $malformedChoiceInstall -Arguments @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$malformedChoiceInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=maybe', '/RELIABILITYBASELINE=false',
-    "/LOG=$(Join-Path $testRoot 'rejected-malformed-choice.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'DIR' $malformedChoiceInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $negativeCodexHome), (New-QuotedInstallerSwitch 'MODELSDIR' $negativeModels), '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=maybe', '/RELIABILITYBASELINE=false',
+    (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'rejected-malformed-choice.log'))
 )
 $duplicateChoiceInstall = Join-Path $testRoot 'Rejected duplicate choice'
 Assert-SilentSetupRejected -Name 'duplicate AUTOSTART choice' -InstallPath $duplicateChoiceInstall -Arguments @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$duplicateChoiceInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto',
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'DIR' $duplicateChoiceInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $negativeCodexHome), (New-QuotedInstallerSwitch 'MODELSDIR' $negativeModels), '/MODEL=auto',
     '/AUTOSTART=false', '/AUTOSTART=true', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
-    "/LOG=$(Join-Path $testRoot 'rejected-duplicate-choice.log')"
+    (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'rejected-duplicate-choice.log'))
 )
 $conflictingPackageOnlyInstall = Join-Path $testRoot 'Rejected package-only conflict'
 Assert-SilentSetupRejected -Name 'NOCONFIGURE conflict' -InstallPath $conflictingPackageOnlyInstall -Arguments @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCONFIGURE=1', "/DIR=$conflictingPackageOnlyInstall",
-    "/CODEXHOME=$negativeCodexHome", "/LOG=$(Join-Path $testRoot 'rejected-package-only-conflict.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCONFIGURE=1', (New-QuotedInstallerSwitch 'DIR' $conflictingPackageOnlyInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $negativeCodexHome), (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'rejected-package-only-conflict.log'))
 )
 
 $silentBaselineInstall = Join-Path $testRoot 'rejected-silent-baseline'
 Assert-SilentSetupRejected -Name 'silent reliability baseline bypasses diff preview' -InstallPath $silentBaselineInstall -Arguments @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$silentBaselineInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto',
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'DIR' $silentBaselineInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $negativeCodexHome), (New-QuotedInstallerSwitch 'MODELSDIR' $negativeModels), '/MODEL=auto',
     '/AUTOSTART=false', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=true',
-    "/LOG=$(Join-Path $testRoot 'rejected-silent-baseline.log')"
+    (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'rejected-silent-baseline.log'))
 )
 
 $configuredInstall = Join-Path $testRoot 'Configured install folder ü'
@@ -90,10 +102,10 @@ Set-Content -LiteralPath $configuredAgents -Value '# configured installer sentin
 $configuredConfigBefore = Get-FileHash -LiteralPath $configuredConfig -Algorithm SHA256
 $configuredAgentsBefore = Get-FileHash -LiteralPath $configuredAgents -Algorithm SHA256
 $configuredProcess = Start-Process -FilePath $SetupPath -ArgumentList @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$configuredInstall",
-    "/CODEXHOME=$configuredCodexHome", "/STATEDIR=$configuredState", "/MODELSDIR=$configuredModels",
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'DIR' $configuredInstall),
+    (New-QuotedInstallerSwitch 'CODEXHOME' $configuredCodexHome), (New-QuotedInstallerSwitch 'STATEDIR' $configuredState), (New-QuotedInstallerSwitch 'MODELSDIR' $configuredModels),
     '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
-    "/LOG=$(Join-Path $testRoot 'configured-install.log')"
+    (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'configured-install.log'))
 ) -Wait -PassThru -WindowStyle Hidden
 if ($configuredProcess.ExitCode -ne 0) { throw "Explicit isolated silent configuration failed: $($configuredProcess.ExitCode)" }
 if (-not (Select-String -LiteralPath $configuredConfig -SimpleMatch 'BEGIN CODEX GPU THALEN HELPER (managed)' -Quiet)) {
@@ -117,7 +129,7 @@ if ($configuredStateJson.availability -ne 'disabled') {
 $configuredUninstaller = Join-Path $configuredInstall 'unins000.exe'
 if (-not (Test-Path -LiteralPath $configuredUninstaller)) { throw 'Configured test uninstaller was not installed.' }
 $configuredUninstall = Start-Process -FilePath $configuredUninstaller -ArgumentList @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$(Join-Path $testRoot 'configured-uninstall.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'configured-uninstall.log'))
 ) -Wait -PassThru -WindowStyle Hidden
 if ($configuredUninstall.ExitCode -ne 0) { throw "Configured silent uninstall failed: $($configuredUninstall.ExitCode)" }
 if ((Get-FileHash -LiteralPath $configuredConfig -Algorithm SHA256).Hash -ne $configuredConfigBefore.Hash) {
@@ -138,7 +150,7 @@ $beforeConfig = Get-FileHash -LiteralPath (Join-Path $codexHome 'config.toml') -
 $beforeAgents = Get-FileHash -LiteralPath (Join-Path $codexHome 'AGENTS.override.md') -Algorithm SHA256
 
 $installProcess = Start-Process -FilePath $SetupPath -ArgumentList @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCONFIGURE=1', "/DIR=$install", "/LOG=$(Join-Path $testRoot 'install.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCONFIGURE=1', (New-QuotedInstallerSwitch 'DIR' $install), (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'install.log'))
 ) -Wait -PassThru -WindowStyle Hidden
 if ($installProcess.ExitCode -ne 0) { throw "Silent package install failed: $($installProcess.ExitCode)" }
 
@@ -151,7 +163,7 @@ if ($LASTEXITCODE -ne 0 -or $versionJson -notmatch [regex]::Escape($ExpectedVers
 $uninstaller = Join-Path $install 'unins000.exe'
 if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Inno uninstaller was not installed.' }
 $uninstallProcess = Start-Process -FilePath $uninstaller -ArgumentList @(
-    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$(Join-Path $testRoot 'uninstall.log')"
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', (New-QuotedInstallerSwitch 'LOG' (Join-Path $testRoot 'uninstall.log'))
 ) -Wait -PassThru -WindowStyle Hidden
 if ($uninstallProcess.ExitCode -ne 0) { throw "Silent package uninstall failed: $($uninstallProcess.ExitCode)" }
 
