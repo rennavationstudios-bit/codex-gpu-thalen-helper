@@ -5,3 +5,5 @@ The helper adds an optional, bounded, read-only local MCP reviewer. Codex remain
 This v0.1.0 beta installer is not Authenticode-signed. Windows SmartScreen may show an unknown publisher warning. Verify the SHA-256 checksum and GitHub artifact attestation before running it.
 
 Ollama is configured for loopback access only. Automatic startup is per-user and avoids starting a second process when Ollama is already running. If automatic startup is declined, local review requires manually starting Ollama after each sign-in.
+
+An existing unmarked local_gpu_reviewer integration is preserved by default and is not reconfigured or controlled by this helper. Local GPU guidance is managed automatically when missing. The broader sanitized Codex reliability baseline is optional, unchecked by default, and available only in the interactive wizard after a before/after diff preview.

@@ -33,7 +33,9 @@ Ollama auto-start uses a separate named cross-process semaphore. It checks a res
 
 ## Configuration ownership
 
-The product state JSON records only operational ownership and settings. Managed Codex files use unique start/end markers. New content is parsed before and after atomic write; failures restore the exact original. Uninstall removes only marked content and product-owned state/startup entries.
+The product state JSON records only operational ownership and settings. The MCP table, automatic local GPU guidance, and opt-in reliability baseline use distinct start/end markers. New content is validated before and after atomic write; failures restore the exact original. Uninstall removes only marked content and product-owned state/startup entries.
+
+An existing unmarked `local_gpu_reviewer` table is a separate ownership boundary. Detection enters preservation mode before any Ollama, model-directory, startup, model, or control mutation. Product controls fail closed, and uninstall leaves the existing integration/runtime untouched.
 
 ## Compatibility workaround
 

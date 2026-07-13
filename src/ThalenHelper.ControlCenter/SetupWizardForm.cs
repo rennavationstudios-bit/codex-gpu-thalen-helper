@@ -16,10 +16,27 @@ public sealed class SetupWizardForm : Form
     private readonly CheckBox _autoStart = new() { Text = "Start Ollama automatically for this Windows user after sign-in", Checked = true, AutoSize = true };
     private readonly CheckBox _pullAndValidate = new() { Text = "Download and run the selected model validation now", Checked = true, AutoSize = true };
     private readonly CheckBox _installOllama = new() { Text = "Install Ollama from its current official signed Windows release if missing", Checked = true, AutoSize = true };
+    private readonly CheckBox _installReliabilityBaseline = new()
+    {
+        Text = "Add the optional sanitized Codex reliability baseline",
+        Checked = false,
+        AutoSize = true
+    };
+    private readonly TextBox _reliabilityPreview = new()
+    {
+        Multiline = true,
+        ReadOnly = true,
+        ScrollBars = ScrollBars.Both,
+        WordWrap = false,
+        Width = 720,
+        Height = 210,
+        Font = new Font("Consolas", 8.5F)
+    };
     private readonly ComboBox _modelChoice = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420 };
     private readonly Label _result = new() { AutoSize = true, MaximumSize = new Size(720, 0) };
     private readonly Button _cancel = new() { Text = "Cancel", AutoSize = true };
     private readonly CancellationTokenSource _installationCancellation = new();
+    private AgentsOverridePreview? _agentsPreview;
     private bool _installing;
     private int _page;
 
@@ -48,7 +65,7 @@ public sealed class SetupWizardForm : Form
 
         Text = "Codex GPU Thalen Helper Setup";
         StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(820, 570);
+        MinimumSize = new Size(860, 700);
         Font = new Font("Segoe UI", 10F);
         var footer = new FlowLayoutPanel
         {
@@ -78,6 +95,8 @@ public sealed class SetupWizardForm : Form
                 Close();
             }
         };
+        _installReliabilityBaseline.CheckedChanged += (_, _) => RefreshReliabilityPreview();
+        _modelChoice.SelectedIndexChanged += (_, _) => RefreshReliabilityPreview();
         FormClosing += (_, eventArgs) =>
         {
             if (_installing)
@@ -130,17 +149,6 @@ public sealed class SetupWizardForm : Form
         RenderPage();
         try
         {
-            if (_installOllama.Checked && !await IsOllamaReachableAsync())
-            {
-                _result.Text = "Downloading and verifying the current official Ollama installer…";
-                using var installer = new OllamaInstallerService();
-                var install = await installer.DownloadVerifyAndLaunchAsync(waitForExit: true, _installationCancellation.Token);
-                if (!install.Success)
-                {
-                    throw new InvalidOperationException(install.Message);
-                }
-            }
-
             var selectedModel = _modelChoice.SelectedItem as ModelCatalogEntry ?? _recommendation.Model;
             if (_pullAndValidate.Checked && selectedModel is not null)
             {
@@ -154,7 +162,25 @@ public sealed class SetupWizardForm : Form
                 false,
                 false,
                 _autoStart.Checked,
-                _pullAndValidate.Checked),
+                _pullAndValidate.Checked,
+                InstallReliabilityBaseline: _installReliabilityBaseline.Checked,
+                ExpectedAgentsSourceSha256: _agentsPreview?.SourceSha256,
+                ExpectedAgentsPlannedSha256: _agentsPreview?.PlannedSha256,
+                EnsureOllamaInstalledAsync: async cancellationToken =>
+                {
+                    if (!_installOllama.Checked || await IsOllamaReachableAsync())
+                    {
+                        return;
+                    }
+
+                    _result.Text = "Downloading and verifying the current official Ollama installer…";
+                    using var installer = new OllamaInstallerService();
+                    var install = await installer.DownloadVerifyAndLaunchAsync(waitForExit: true, cancellationToken);
+                    if (!install.Success)
+                    {
+                        throw new InvalidOperationException(install.Message);
+                    }
+                }),
                 _installationCancellation.Token);
             _result.Text = $"{outcome.Message}\n\nState: {outcome.State.Availability}\nModel: {outcome.State.SelectedModel ?? "none"}\nStorage: {outcome.State.ModelStorageLocation ?? "not selected"}\n\nRestart Codex so it loads the managed MCP integration. The executable is unsigned; Windows may show a SmartScreen warning.";
         }
@@ -217,13 +243,51 @@ public sealed class SetupWizardForm : Form
     {
         var panel = (FlowLayoutPanel)Page(
             "Installation choices",
-            "Existing config.toml and AGENTS.override.md files receive timestamped backups. Only clearly marked managed sections are added, upgraded, repaired, or removed.",
+            "The local GPU guidance section is installed automatically unless equivalent unmarked local_gpu_reviewer guidance already exists. The broader reliability baseline below is optional and unchecked by default.",
+            "Existing config.toml and AGENTS.override.md files are never replaced. Changes use distinct managed markers, timestamped backups, atomic writes, idempotent upgrades, and surgical rollback.",
             "Ollama is kept loopback-only at 127.0.0.1:11434. The selected model is unloaded after requests by default. Automatic startup uses a single per-user helper entry that checks for an existing endpoint/process before starting anything.");
         panel.Controls.Add(_autoStart);
         panel.Controls.Add(_installOllama);
         panel.Controls.Add(_pullAndValidate);
+        panel.Controls.Add(_installReliabilityBaseline);
+        panel.Controls.Add(new Label
+        {
+            Text = "Before/after diff preview for AGENTS.override.md (review this before selecting Install and validate):",
+            AutoSize = true,
+            MaximumSize = new Size(720, 0),
+            Margin = new Padding(0, 12, 0, 4)
+        });
+        panel.Controls.Add(_reliabilityPreview);
         panel.Controls.Add(new Label { Text = "If automatic startup is declined, local review requires manually starting Ollama after each sign-in. Model validation runs local inference only when selected above.", AutoSize = true, MaximumSize = new Size(700, 0), ForeColor = Color.DarkSlateBlue, Margin = new Padding(0, 12, 0, 0) });
+        RefreshReliabilityPreview();
         return panel;
+    }
+
+    private void RefreshReliabilityPreview()
+    {
+        try
+        {
+            var selectedModel = _modelChoice.SelectedItem as ModelCatalogEntry ?? _recommendation.Model;
+            var tier = selectedModel is null ? HardwareTier.NoModel : ModelSelector.GetHardwareTier(selectedModel);
+            _agentsPreview = new AgentsOverrideManager().PreviewInstall(
+                _paths,
+                tier,
+                _installReliabilityBaseline.Checked);
+            _reliabilityPreview.Text = _agentsPreview.Diff;
+            if (_page == 3 && !_installing)
+            {
+                _next.Enabled = true;
+            }
+        }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            _agentsPreview = null;
+            _reliabilityPreview.Text = "Preview unavailable. Setup will not change a malformed managed instruction file.\r\n\r\n" + exception.Message;
+            if (_page == 3 && !_installing)
+            {
+                _next.Enabled = false;
+            }
+        }
     }
 
     private Control ResultPage()

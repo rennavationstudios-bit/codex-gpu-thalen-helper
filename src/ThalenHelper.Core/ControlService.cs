@@ -30,6 +30,11 @@ public sealed class ControlService
     public async Task<ControlResult> PauseAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         state.Availability = HelperAvailability.Paused;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
@@ -46,6 +51,11 @@ public sealed class ControlService
     public async Task<ControlResult> ResumeAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         var verification = await _autoStart.VerifyAsync(_paths, state, false, cancellationToken).ConfigureAwait(false);
         if (!ModelIntegrity.IsOperationallySafe(verification, state))
         {
@@ -66,6 +76,11 @@ public sealed class ControlService
     public async Task<ControlResult> ReleaseGpuAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         GpuCoordination.RequestCancellation();
         var unloaded = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
         if (state.Availability == HelperAvailability.Enabled)
@@ -83,6 +98,11 @@ public sealed class ControlService
     public async Task<ControlResult> DisableAsync(bool disableCodexEntry, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         state.Availability = HelperAvailability.Disabled;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
@@ -104,6 +124,11 @@ public sealed class ControlService
     public async Task<ControlResult> EnableAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         if (string.IsNullOrWhiteSpace(state.SelectedModel))
         {
             return new ControlResult(false, "NO_MODEL", "Select and validate a model before enabling local review.", state);
@@ -130,6 +155,11 @@ public sealed class ControlService
     public async Task<ControlResult> SetLowImpactAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         state.Preferences = state.Preferences with
         {
             LowImpactMode = enabled,
@@ -148,6 +178,11 @@ public sealed class ControlService
     public async Task<ControlResult> SetKeepWarmAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (PreservationGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
         if (enabled && state.HardwareTier == HardwareTier.Entry)
         {
             return new ControlResult(false, "KEEP_WARM_UNSAFE", "Keep-warm mode is unavailable on the entry hardware tier.", state);
@@ -171,6 +206,17 @@ public sealed class ControlService
     private async Task<InstallationState> RequireStateAsync(CancellationToken cancellationToken)
         => await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The helper is not installed or configured.");
+
+    private static ControlResult? PreservationGuard(InstallationState state)
+    {
+        return !IntegrationOwnership.IsManagedByHelper(state)
+            ? new ControlResult(
+                false,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not own the existing local_gpu_reviewer integration, so no configuration, Ollama, model, or GPU state was changed.",
+                state)
+            : null;
+    }
 
     private async Task<bool> TryUnloadAsync(string? model, CancellationToken cancellationToken)
     {

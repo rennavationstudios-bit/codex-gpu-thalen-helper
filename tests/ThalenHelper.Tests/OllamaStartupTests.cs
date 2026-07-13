@@ -260,18 +260,32 @@ internal sealed class FakeStartupPlatform : IOllamaStartupPlatform
     public string? LastStoppedExecutable { get; private set; }
     public int DelayCount { get; private set; }
     public bool StopSucceeds { get; set; } = true;
+    public int MutationCount { get; private set; }
 
     public string? GetUserEnvironmentVariable(string name) => UserEnvironment.GetValueOrDefault(name);
-    public void SetUserEnvironmentVariable(string name, string? value) => UserEnvironment[name] = value;
-    public void SetProcessEnvironmentVariable(string name, string? value) => ProcessEnvironment[name] = value;
+    public void SetUserEnvironmentVariable(string name, string? value)
+    {
+        MutationCount++;
+        UserEnvironment[name] = value;
+    }
+    public void SetProcessEnvironmentVariable(string name, string? value)
+    {
+        MutationCount++;
+        ProcessEnvironment[name] = value;
+    }
     public string? GetRunEntry() => RunEntry;
-    public void SetRunEntry(string? command) => RunEntry = command;
+    public void SetRunEntry(string? command)
+    {
+        MutationCount++;
+        RunEntry = command;
+    }
     public bool IsAnyOllamaProcessRunning() => ProcessRunning;
     public string? FindOllamaExecutable() => Executable;
 
     public bool StartOllama(string executable, string modelDirectory, HelperPreferences preferences)
     {
         StartCount++;
+        MutationCount++;
         ProcessRunning = true;
         return true;
     }
@@ -279,6 +293,7 @@ internal sealed class FakeStartupPlatform : IOllamaStartupPlatform
     public bool StopOllamaProcesses(string expectedExecutable)
     {
         StopCount++;
+        MutationCount++;
         LastStoppedExecutable = expectedExecutable;
         if (StopSucceeds)
         {
@@ -289,7 +304,7 @@ internal sealed class FakeStartupPlatform : IOllamaStartupPlatform
     }
 
     public bool IsPortLoopbackOnly(int port) => LoopbackOnly;
-    public void BroadcastEnvironmentChange() { }
+    public void BroadcastEnvironmentChange() => MutationCount++;
 
     public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
     {

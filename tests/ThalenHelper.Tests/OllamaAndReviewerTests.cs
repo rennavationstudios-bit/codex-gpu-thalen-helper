@@ -92,6 +92,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();
@@ -117,6 +118,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();
@@ -140,6 +142,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();
@@ -165,6 +168,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(FakeHttpMessageHandler.Json(
@@ -190,6 +194,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();
@@ -218,6 +223,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();
@@ -282,6 +288,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = availability
         });
         var handler = InventoryHandler();
@@ -305,6 +312,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         File.WriteAllText(Path.Combine(paths.StateDirectory, "gpu-blocked"), "device testing");
@@ -329,6 +337,7 @@ public sealed class OllamaAndReviewerTests
             SelectedModel = "qwen2.5-coder:1.5b",
             SelectedModelDigest = "d7372fd82851",
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         var handler = InventoryHandler();

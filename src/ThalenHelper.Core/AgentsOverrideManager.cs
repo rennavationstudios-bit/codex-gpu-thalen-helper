@@ -1,52 +1,87 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace ThalenHelper.Core;
 
+public sealed record AgentsOverridePreview(
+    string Diff,
+    bool Changed,
+    bool ExistingLocalGpuGuidancePreserved,
+    bool ReliabilityBaselineSelected,
+    string SourceSha256,
+    string PlannedSha256);
+
 public sealed class AgentsOverrideManager
 {
-    public ManagedFileResult InstallOrRepair(ProductPaths paths, HardwareTier tier)
+    public AgentsOverridePreview PreviewInstall(
+        ProductPaths paths,
+        HardwareTier tier,
+        bool installReliabilityBaseline)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        var templatePath = Path.Combine(AppContext.BaseDirectory, "templates", "AGENTS.override.md");
-        var template = File.ReadAllText(templatePath, Encoding.UTF8)
-            .ReplaceLineEndings(Environment.NewLine)
-            .Replace("{{TIER_GUIDANCE}}", GetTierGuidance(tier), StringComparison.Ordinal);
-        ValidateMarkers(template);
-        var originalExists = File.Exists(paths.AgentsOverrideFile);
-        var original = originalExists ? File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8) : string.Empty;
-        var managedSection = ExtractManagedSection(template);
-        var baseContent = RemoveManagedSection(original, out var hadManagedSection);
-        var merged = originalExists
-            ? AppendManagedSection(baseContent, managedSection)
-            : template.TrimEnd() + Environment.NewLine;
-        if (string.Equals(original, merged, StringComparison.Ordinal))
+        var snapshot = ReadSnapshot(paths.AgentsOverrideFile);
+        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline);
+        return new AgentsOverridePreview(
+            BuildDiff(snapshot.Content, plan.Merged),
+            !string.Equals(snapshot.Content, plan.Merged, StringComparison.Ordinal),
+            plan.PreserveExistingLocalGpuGuidance,
+            installReliabilityBaseline,
+            snapshot.SourceSha256,
+            HashPlannedContent(plan.Merged));
+    }
+
+    public ManagedFileResult InstallOrRepair(
+        ProductPaths paths,
+        HardwareTier tier,
+        bool installReliabilityBaseline = false,
+        string? expectedSourceSha256 = null,
+        string? expectedPlannedSha256 = null,
+        Func<string, bool>? postWriteValidator = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var snapshot = ReadSnapshot(paths.AgentsOverrideFile);
+        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline);
+        ValidatePreviewBinding(snapshot, plan.Merged, expectedSourceSha256, expectedPlannedSha256);
+        if (string.Equals(snapshot.Content, plan.Merged, StringComparison.Ordinal))
         {
-            return new ManagedFileResult(paths.AgentsOverrideFile, false, false, null, "unchanged");
+            return new ManagedFileResult(
+                paths.AgentsOverrideFile,
+                false,
+                false,
+                null,
+                plan.PreserveExistingLocalGpuGuidance ? "preserved-existing-unmanaged" : "unchanged",
+                plan.Warning);
         }
 
         Directory.CreateDirectory(paths.CodexHome);
-        var backup = originalExists ? CreateBackup(paths.AgentsOverrideFile) : null;
+        AssertSnapshotUnchanged(paths.AgentsOverrideFile, snapshot.SourceSha256);
+        var backup = snapshot.Exists ? CreateBackup(paths.AgentsOverrideFile) : null;
+        AssertSnapshotUnchanged(paths.AgentsOverrideFile, snapshot.SourceSha256);
+        var replaced = false;
         try
         {
-            WriteAtomic(paths.AgentsOverrideFile, merged);
-            ValidateMarkers(File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8));
+            WriteAtomic(paths.AgentsOverrideFile, plan.Merged);
+            replaced = true;
+            ValidateAllMarkers(File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8));
+            if (postWriteValidator is not null && !postWriteValidator(paths.AgentsOverrideFile))
+            {
+                throw new InvalidOperationException("The managed AGENTS.override.md update failed post-write validation.");
+            }
+
             return new ManagedFileResult(
                 paths.AgentsOverrideFile,
-                !originalExists,
+                !snapshot.Exists,
                 true,
                 backup,
-                hadManagedSection ? "updated" : "installed");
+                plan.HadAnyManagedSection ? "updated" : "installed",
+                plan.Warning);
         }
         catch
         {
-            if (originalExists)
+            if (replaced)
             {
-                WriteAtomic(paths.AgentsOverrideFile, original);
-            }
-            else if (File.Exists(paths.AgentsOverrideFile))
-            {
-                File.Delete(paths.AgentsOverrideFile);
+                RestoreOriginal(paths.AgentsOverrideFile, snapshot.Exists, snapshot.Bytes);
             }
 
             throw;
@@ -61,10 +96,20 @@ public sealed class AgentsOverrideManager
             return new ManagedFileResult(paths.AgentsOverrideFile, false, false, null, "not-present");
         }
 
+        var originalBytes = File.ReadAllBytes(paths.AgentsOverrideFile);
         var original = File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8);
-        ValidateMarkers(original, requireMarkers: false);
-        var updated = RemoveManagedSection(original, out var removed);
-        if (!removed)
+        ValidateAllMarkers(original);
+        var updated = RemoveManagedSection(
+            original,
+            ProductInfo.ManagedAgentsStart,
+            ProductInfo.ManagedAgentsEnd,
+            out var removedLocalGpu);
+        updated = RemoveManagedSection(
+            updated,
+            ProductInfo.ManagedReliabilityStart,
+            ProductInfo.ManagedReliabilityEnd,
+            out var removedReliability);
+        if (!removedLocalGpu && !removedReliability)
         {
             return new ManagedFileResult(paths.AgentsOverrideFile, false, false, null, "not-managed");
         }
@@ -84,14 +129,92 @@ public sealed class AgentsOverrideManager
                 false,
                 true,
                 backup,
-                fileWasCreatedByProduct ? "preserved-user-content" : "removed-managed-section");
+                fileWasCreatedByProduct ? "preserved-user-content" : "removed-managed-sections");
         }
         catch
         {
-            WriteAtomic(paths.AgentsOverrideFile, original);
+            WriteAtomic(paths.AgentsOverrideFile, originalBytes);
             throw;
         }
     }
+
+    public static bool HasManagedLocalGpuSection(string content)
+        => content.Contains(ProductInfo.ManagedAgentsStart, StringComparison.Ordinal)
+            && content.Contains(ProductInfo.ManagedAgentsEnd, StringComparison.Ordinal);
+
+    public static bool HasManagedReliabilitySection(string content)
+        => content.Contains(ProductInfo.ManagedReliabilityStart, StringComparison.Ordinal)
+            && content.Contains(ProductInfo.ManagedReliabilityEnd, StringComparison.Ordinal);
+
+    private static MergePlan BuildPlan(string original, HardwareTier tier, bool installReliabilityBaseline)
+    {
+        ValidateAllMarkers(original);
+        var localTemplate = ReadTemplate("AGENTS.local-gpu-reviewer.md")
+            .Replace("{{TIER_GUIDANCE}}", GetTierGuidance(tier), StringComparison.Ordinal);
+        var reliabilityTemplate = ReadTemplate("AGENTS.reliability-baseline.md");
+        ValidateAllMarkers(localTemplate);
+        ValidateAllMarkers(reliabilityTemplate);
+
+        var baseContent = RemoveManagedSection(
+            original,
+            ProductInfo.ManagedAgentsStart,
+            ProductInfo.ManagedAgentsEnd,
+            out var hadLocalGpu);
+        baseContent = RemoveManagedSection(
+            baseContent,
+            ProductInfo.ManagedReliabilityStart,
+            ProductInfo.ManagedReliabilityEnd,
+            out var hadReliability);
+        var preserveExisting = !hadLocalGpu
+            && baseContent.Contains(ProductInfo.IntegrationName, StringComparison.OrdinalIgnoreCase);
+        var merged = baseContent;
+        if (!preserveExisting)
+        {
+            merged = AppendManagedSection(merged, ExtractManagedSection(
+                localTemplate,
+                ProductInfo.ManagedAgentsStart,
+                ProductInfo.ManagedAgentsEnd));
+        }
+
+        if (installReliabilityBaseline)
+        {
+            merged = AppendManagedSection(merged, ExtractManagedSection(
+                reliabilityTemplate,
+                ProductInfo.ManagedReliabilityStart,
+                ProductInfo.ManagedReliabilityEnd));
+        }
+
+        var preserveExactBytes = preserveExisting && !installReliabilityBaseline && !hadLocalGpu && !hadReliability;
+        if (preserveExactBytes)
+        {
+            merged = original;
+        }
+
+        if (preserveExactBytes)
+        {
+            // User-owned guidance remains exactly as read; no newline or encoding normalization is allowed.
+        }
+        else if (string.IsNullOrWhiteSpace(merged))
+        {
+            merged = string.Empty;
+        }
+        else
+        {
+            merged = merged.TrimEnd() + Environment.NewLine;
+        }
+
+        return new MergePlan(
+            merged,
+            preserveExisting,
+            hadLocalGpu || hadReliability,
+            preserveExisting
+                ? "Existing unmarked local_gpu_reviewer guidance was kept user-owned; no duplicate managed local GPU section was added."
+                : null);
+    }
+
+    private static string ReadTemplate(string fileName)
+        => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "templates", fileName), Encoding.UTF8)
+            .ReplaceLineEndings(Environment.NewLine);
 
     private static string GetTierGuidance(HardwareTier tier)
     {
@@ -104,11 +227,11 @@ public sealed class AgentsOverrideManager
         };
     }
 
-    private static string ExtractManagedSection(string content)
+    private static string ExtractManagedSection(string content, string startMarker, string endMarker)
     {
-        var start = content.IndexOf(ProductInfo.ManagedAgentsStart, StringComparison.Ordinal);
-        var end = content.IndexOf(ProductInfo.ManagedAgentsEnd, StringComparison.Ordinal);
-        return content[start..(end + ProductInfo.ManagedAgentsEnd.Length)];
+        var start = content.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = content.IndexOf(endMarker, StringComparison.Ordinal);
+        return content[start..(end + endMarker.Length)];
     }
 
     private static string AppendManagedSection(string content, string managed)
@@ -119,10 +242,14 @@ public sealed class AgentsOverrideManager
             : trimmed + Environment.NewLine + Environment.NewLine + managed + Environment.NewLine;
     }
 
-    private static string RemoveManagedSection(string content, out bool removed)
+    private static string RemoveManagedSection(
+        string content,
+        string startMarker,
+        string endMarker,
+        out bool removed)
     {
-        var start = content.IndexOf(ProductInfo.ManagedAgentsStart, StringComparison.Ordinal);
-        var end = content.IndexOf(ProductInfo.ManagedAgentsEnd, StringComparison.Ordinal);
+        var start = content.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = content.IndexOf(endMarker, StringComparison.Ordinal);
         if (start < 0 && end < 0)
         {
             removed = false;
@@ -134,13 +261,13 @@ public sealed class AgentsOverrideManager
             throw new InvalidDataException("The managed AGENTS.override.md markers are malformed.");
         }
 
-        if (content.IndexOf(ProductInfo.ManagedAgentsStart, start + ProductInfo.ManagedAgentsStart.Length, StringComparison.Ordinal) >= 0
-            || content.IndexOf(ProductInfo.ManagedAgentsEnd, end + ProductInfo.ManagedAgentsEnd.Length, StringComparison.Ordinal) >= 0)
+        if (content.IndexOf(startMarker, start + startMarker.Length, StringComparison.Ordinal) >= 0
+            || content.IndexOf(endMarker, end + endMarker.Length, StringComparison.Ordinal) >= 0)
         {
             throw new InvalidDataException("Multiple managed AGENTS.override.md sections were found.");
         }
 
-        var removeEnd = end + ProductInfo.ManagedAgentsEnd.Length;
+        var removeEnd = end + endMarker.Length;
         while (removeEnd < content.Length && content[removeEnd] is '\r' or '\n')
         {
             removeEnd++;
@@ -162,13 +289,19 @@ public sealed class AgentsOverrideManager
         return before + Environment.NewLine + Environment.NewLine + after;
     }
 
-    private static void ValidateMarkers(string content, bool requireMarkers = true)
+    private static void ValidateAllMarkers(string content)
     {
-        var starts = Count(content, ProductInfo.ManagedAgentsStart);
-        var ends = Count(content, ProductInfo.ManagedAgentsEnd);
-        if ((requireMarkers && (starts != 1 || ends != 1)) || (!requireMarkers && starts != ends))
+        ValidateMarkerPair(content, ProductInfo.ManagedAgentsStart, ProductInfo.ManagedAgentsEnd);
+        ValidateMarkerPair(content, ProductInfo.ManagedReliabilityStart, ProductInfo.ManagedReliabilityEnd);
+    }
+
+    private static void ValidateMarkerPair(string content, string startMarker, string endMarker)
+    {
+        var starts = Count(content, startMarker);
+        var ends = Count(content, endMarker);
+        if (starts != ends || starts > 1)
         {
-            throw new InvalidDataException("Invalid managed AGENTS.override.md markers.");
+            throw new InvalidDataException("Invalid or duplicate managed AGENTS.override.md markers.");
         }
     }
 
@@ -183,6 +316,25 @@ public sealed class AgentsOverrideManager
         return count;
     }
 
+    private static string BuildDiff(string before, string after)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("--- AGENTS.override.md (before)");
+        builder.AppendLine("+++ AGENTS.override.md (after)");
+        builder.AppendLine("@@ full-file preview; existing content is not logged or packaged @@");
+        foreach (var line in before.ReplaceLineEndings("\n").Split('\n'))
+        {
+            builder.Append('-').AppendLine(line);
+        }
+
+        foreach (var line in after.ReplaceLineEndings("\n").Split('\n'))
+        {
+            builder.Append('+').AppendLine(line);
+        }
+
+        return builder.ToString();
+    }
+
     private static string CreateBackup(string path)
     {
         var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
@@ -191,10 +343,83 @@ public sealed class AgentsOverrideManager
         return backup;
     }
 
+    private static FileSnapshot ReadSnapshot(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return new FileSnapshot(false, [], string.Empty, "MISSING");
+        }
+
+        var bytes = File.ReadAllBytes(path);
+        return new FileSnapshot(
+            true,
+            bytes,
+            File.ReadAllText(path, Encoding.UTF8),
+            Convert.ToHexString(SHA256.HashData(bytes)));
+    }
+
+    private static string HashPlannedContent(string content)
+        => Convert.ToHexString(SHA256.HashData(new UTF8Encoding(false).GetBytes(content)));
+
+    private static void ValidatePreviewBinding(
+        FileSnapshot snapshot,
+        string planned,
+        string? expectedSourceSha256,
+        string? expectedPlannedSha256)
+    {
+        if (expectedSourceSha256 is not null
+            && !string.Equals(expectedSourceSha256, snapshot.SourceSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "AGENTS.override.md changed after the before/after preview. Review a fresh diff before applying the optional baseline choice.");
+        }
+
+        var plannedSha256 = HashPlannedContent(planned);
+        if (expectedPlannedSha256 is not null
+            && !string.Equals(expectedPlannedSha256, plannedSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The managed AGENTS.override.md plan no longer matches the reviewed diff. Review a fresh diff before applying it.");
+        }
+    }
+
+    private static void AssertSnapshotUnchanged(string path, string expectedSourceSha256)
+    {
+        var current = ReadSnapshot(path).SourceSha256;
+        if (!string.Equals(current, expectedSourceSha256, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "AGENTS.override.md changed while the managed update was being prepared. No update was applied; review a fresh diff.");
+        }
+    }
+
+    private static void RestoreOriginal(string path, bool existed, byte[] bytes)
+    {
+        if (existed)
+        {
+            WriteAtomic(path, bytes);
+        }
+        else if (File.Exists(path))
+        {
+            File.Delete(path);
+        }
+    }
+
     private static void WriteAtomic(string path, string content)
+        => WriteAtomic(path, new UTF8Encoding(false).GetBytes(content));
+
+    private static void WriteAtomic(string path, byte[] content)
     {
         var temporary = path + ".tmp";
-        File.WriteAllText(temporary, content, new UTF8Encoding(false));
+        File.WriteAllBytes(temporary, content);
         File.Move(temporary, path, true);
     }
+
+    private sealed record MergePlan(
+        string Merged,
+        bool PreserveExistingLocalGpuGuidance,
+        bool HadAnyManagedSection,
+        string? Warning);
+
+    private sealed record FileSnapshot(bool Exists, byte[] Bytes, string Content, string SourceSha256);
 }

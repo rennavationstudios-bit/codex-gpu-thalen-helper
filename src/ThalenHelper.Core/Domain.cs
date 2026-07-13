@@ -171,6 +171,8 @@ public sealed record InstallationState
     public Dictionary<string, string?> PreviousUserEnvironment { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public bool OllamaWasPreExisting { get; set; }
     public bool StartupEntryOwnedByHelper { get; set; }
+    public bool ExistingIntegrationPreserved { get; set; }
+    public bool ReliabilityBaselineInstalled { get; set; }
     public string? SelectedModel { get; set; }
     public string? SelectedModelDigest { get; set; }
     public bool SelectedModelOwnedByHelper { get; set; }
@@ -265,4 +267,6 @@ public static class ProductInfo
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";
     public const string ManagedAgentsStart = "<!-- BEGIN CODEX GPU THALEN HELPER (managed) -->";
     public const string ManagedAgentsEnd = "<!-- END CODEX GPU THALEN HELPER (managed) -->";
+    public const string ManagedReliabilityStart = "<!-- BEGIN CODEX RELIABILITY BASELINE (managed by Codex GPU Thalen Helper) -->";
+    public const string ManagedReliabilityEnd = "<!-- END CODEX RELIABILITY BASELINE (managed by Codex GPU Thalen Helper) -->";
 }

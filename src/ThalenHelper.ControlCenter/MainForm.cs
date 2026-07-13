@@ -86,6 +86,7 @@ public sealed class MainForm : Form
         AddButton(controls, "Change model", ChangeModelAsync);
         AddButton(controls, "Move models", MoveModelsAsync);
         AddButton(controls, "Repair integration", RepairAsync);
+        AddButton(controls, "Reliability baseline", ConfigureReliabilityBaselineAsync);
         AddButton(controls, "Export diagnostics", ExportDiagnosticsAsync);
         AddButton(controls, "Uninstall guidance", ShowUninstallGuidanceAsync);
 
@@ -259,6 +260,38 @@ public sealed class MainForm : Form
         await RefreshAsync();
     }
 
+    private async Task ConfigureReliabilityBaselineAsync()
+    {
+        var state = await new StateStore(_paths.StateFile).LoadAsync()
+            ?? throw new InvalidOperationException("The helper is not configured.");
+        var managedPaths = string.IsNullOrWhiteSpace(state.ManagedCodexHome)
+            ? _paths
+            : ProductPaths.Resolve(_paths.InstallDirectory, _paths.StateDirectory, state.ManagedCodexHome);
+        using var dialog = new ReliabilityBaselineDialog(
+            managedPaths,
+            state.HardwareTier,
+            state.ReliabilityBaselineInstalled);
+        if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Preview is null)
+        {
+            return;
+        }
+
+        var result = await new InstallationManager().ConfigureReliabilityBaselineAsync(
+            managedPaths,
+            dialog.InstallBaseline,
+            dialog.Preview.SourceSha256,
+            dialog.Preview.PlannedSha256);
+        MessageBox.Show(
+            this,
+            result.Changed
+                ? "The reviewed managed instruction diff was applied. A timestamped backup was retained for rollback."
+                : "AGENTS.override.md already matches the reviewed choice; no write or backup was needed.",
+            ProductInfo.Name,
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        await RefreshAsync();
+    }
+
     private async Task ExportDiagnosticsAsync()
     {
         using var dialog = new SaveFileDialog
@@ -396,4 +429,88 @@ internal sealed class ModelSelectionDialog : Form
 
     public ModelCatalogEntry? SelectedModel => _models.SelectedItem as ModelCatalogEntry;
     public bool AcceptRestrictedLicense => _license.Checked;
+}
+
+internal sealed class ReliabilityBaselineDialog : Form
+{
+    private readonly ProductPaths _paths;
+    private readonly HardwareTier _tier;
+    private readonly CheckBox _install;
+    private readonly TextBox _diff;
+    private readonly Button _apply;
+
+    public ReliabilityBaselineDialog(ProductPaths paths, HardwareTier tier, bool installed)
+    {
+        _paths = paths;
+        _tier = tier;
+        Text = "Optional Codex reliability baseline";
+        StartPosition = FormStartPosition.CenterParent;
+        MinimumSize = new Size(900, 650);
+        Padding = new Padding(18);
+        Font = new Font("Segoe UI", 10F);
+        _install = new CheckBox
+        {
+            Text = "Install the sanitized managed reliability baseline",
+            Checked = installed,
+            AutoSize = true
+        };
+        _diff = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Dock = DockStyle.Fill,
+            Font = new Font("Consolas", 9F)
+        };
+        _apply = new Button { Text = "Apply reviewed diff", DialogResult = DialogResult.OK, AutoSize = true };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
+        var header = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Dock = DockStyle.Top,
+            AutoSize = true
+        };
+        header.Controls.Add(new Label
+        {
+            Text = "Review the complete before/after diff. Existing instructions are never replaced; only marked helper sections can change.",
+            AutoSize = true,
+            MaximumSize = new Size(820, 0)
+        });
+        header.Controls.Add(_install);
+        var footer = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.RightToLeft,
+            Dock = DockStyle.Bottom,
+            AutoSize = true,
+            Controls = { _apply, cancel }
+        };
+        Controls.Add(_diff);
+        Controls.Add(footer);
+        Controls.Add(header);
+        AcceptButton = _apply;
+        CancelButton = cancel;
+        _install.CheckedChanged += (_, _) => RefreshPreview();
+        RefreshPreview();
+    }
+
+    public bool InstallBaseline => _install.Checked;
+    public AgentsOverridePreview? Preview { get; private set; }
+
+    private void RefreshPreview()
+    {
+        try
+        {
+            Preview = new AgentsOverrideManager().PreviewInstall(_paths, _tier, _install.Checked);
+            _diff.Text = Preview.Diff;
+            _apply.Enabled = true;
+        }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            Preview = null;
+            _diff.Text = "Preview unavailable. No change can be applied.\r\n\r\n" + exception.Message;
+            _apply.Enabled = false;
+        }
+    }
 }

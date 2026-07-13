@@ -54,6 +54,8 @@ public sealed class DiagnosticsExporter
             state.HardwareTier,
             state.Acceleration,
             state.Preferences,
+            state.ExistingIntegrationPreserved,
+            state.ReliabilityBaselineInstalled,
             state.Availability,
             state.LastHealthCheckAt,
             state.LastHealthCheckCode
@@ -72,7 +74,8 @@ public sealed class DiagnosticsExporter
                 codexConfigPresent = File.Exists(paths.CodexConfigFile),
                 codexManagedSectionPresent = ContainsMarker(paths.CodexConfigFile, ProductInfo.ManagedConfigStart),
                 agentsOverridePresent = File.Exists(paths.AgentsOverrideFile),
-                agentsManagedSectionPresent = ContainsMarker(paths.AgentsOverrideFile, ProductInfo.ManagedAgentsStart)
+                agentsManagedSectionPresent = ContainsMarker(paths.AgentsOverrideFile, ProductInfo.ManagedAgentsStart),
+                reliabilityBaselinePresent = ContainsMarker(paths.AgentsOverrideFile, ProductInfo.ManagedReliabilityStart)
             },
             health
         };

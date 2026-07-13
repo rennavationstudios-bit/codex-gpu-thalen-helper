@@ -28,7 +28,8 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 - A self-contained stdio MCP server (`local-gpu-reviewer.exe`).
 - Dynamic Windows, CPU, RAM, GPU, driver, VRAM, and storage detection.
 - A versioned, audited Ollama model catalog and conservative selector.
-- Safe, backed-up, idempotent merging of `config.toml` and `AGENTS.override.md`.
+- Preservation-first, backed-up, idempotent merging of `config.toml` and `AGENTS.override.md`.
+- A sanitized reusable reliability baseline that is installed only through an explicit opt-in preview.
 - Pause, resume, immediate GPU release, persistent disable, low-impact, and keep-warm controls.
 - Repair, update, doctor, model change, verified model move, diagnostics, and surgical uninstall operations.
 - Zero telemetry.
@@ -62,6 +63,7 @@ End users do not need .NET, Node.js, Python, or a development SDK. The release e
 
 3. Compare it with the exact installer line in `SHA256SUMS.txt`.
 4. Run setup, review the detected hardware/model/storage choices, and authorize any Ollama installation or model download.
+   The local GPU guidance is automatic. The broader reliability baseline is unchecked by default and shows an `AGENTS.override.md` before/after diff before installation.
 5. Restart Codex after successful setup so the new stdio MCP server is discovered.
 
 ### Unsigned beta warning
@@ -154,7 +156,9 @@ thalen-helper uninstall --yes [--remove-owned-model]
 
 Setup parses TOML, makes timestamped backups, preserves unrelated content, inserts a marked MCP block with `required = false`, an explicit two-tool allowlist, prompt approval for review, automatic approval only for passive health, and re-parses the result. A supplied fresh-Codex validator can roll the edit back automatically.
 
-The public `AGENTS.override.md` template is tier-aware. Existing files retain unrelated instructions; only a marked managed section is installed, updated, or removed. See [docs/configuration-merging.md](docs/configuration-merging.md).
+If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup preserves it byte-for-byte, adds no duplicate TOML table, leaves its Ollama/model/startup/runtime behavior untouched, and disables this helper's control operations. Missing non-conflicting instruction sections can still be added safely.
+
+The automatic [local GPU guidance template](templates/AGENTS.local-gpu-reviewer.md) is tier-aware. The separate [sanitized reliability baseline](templates/AGENTS.reliability-baseline.md) generalizes task continuity, Goal/Context/Constraints/Done, planning, delegation, repository safety, privacy, honest verification, local-review announcements, and GPU-contention rules. It is optional, unchecked by default, and installed only after a before/after diff preview. The reviewed source and planned-output hashes must still match at apply time. The Control Center can later preview and surgically add or remove the baseline. Both sections use distinct markers; existing files are never replaced. Reinstall/repair is idempotent, changes create timestamped backups, failures restore the original bytes, and uninstall removes only product-managed sections. See [docs/configuration-merging.md](docs/configuration-merging.md).
 
 ## Troubleshooting and uninstall
 

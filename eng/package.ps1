@@ -135,9 +135,9 @@ try {
     )
     foreach ($project in $projects) {
         $output = Join-Path $publish $project.Name
-        Invoke-Dotnet restore $project.Path --runtime win-x64 --locked-mode -p:SelfContained=true
+        Invoke-Dotnet restore $project.Path --runtime win-x64 --locked-mode '-p:SelfContained=true'
         Invoke-Dotnet publish $project.Path --configuration Release --runtime win-x64 --self-contained true --no-restore --output $output `
-            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false
+            '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:DebugType=None' '-p:DebugSymbols=false'
         Copy-Item -LiteralPath (Join-Path $output $project.Exe) -Destination (Join-Path $stage $project.Exe)
     }
 

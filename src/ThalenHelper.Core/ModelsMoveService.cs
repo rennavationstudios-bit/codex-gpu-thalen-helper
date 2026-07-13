@@ -38,6 +38,19 @@ public sealed class ModelsMoveService
     {
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
+        if (!IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return new ModelsMoveResult(
+                false,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not own the existing local_gpu_reviewer integration, so the model directory was not changed.",
+                state.ModelStorageLocation ?? string.Empty,
+                destination,
+                0,
+                0,
+                false);
+        }
+
         var source = ValidateModelDirectory(state.ModelStorageLocation, "source");
         var finalDestination = ValidateModelDirectory(destination, "destination");
         if (PathsOverlap(source, finalDestination))
@@ -53,7 +66,12 @@ public sealed class ModelsMoveService
 
         var priorAvailability = state.Availability;
         var priorLocation = state.ModelStorageLocation!;
-        _ = await _control.PauseAsync(cancellationToken).ConfigureAwait(false);
+        var pause = await _control.PauseAsync(cancellationToken).ConfigureAwait(false);
+        if (!pause.Success)
+        {
+            return new ModelsMoveResult(false, pause.Code, pause.Message, source, finalDestination, 0, 0, false);
+        }
+
         var staging = finalDestination + ".staging-" + Guid.NewGuid().ToString("N");
         var filesVerified = 0;
         ulong bytesVerified = 0;

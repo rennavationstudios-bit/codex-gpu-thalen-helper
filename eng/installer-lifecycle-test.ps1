@@ -48,26 +48,34 @@ New-Item -ItemType Directory -Path $negativeCodexHome, $negativeModels -Force | 
 $missingChoiceInstall = Join-Path $testRoot 'Rejected missing choice'
 Assert-SilentSetupRejected -Name 'missing explicit AUTOSTART choice' -InstallPath $missingChoiceInstall -Arguments @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$missingChoiceInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/PULLANDVALIDATE=false',
+    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
     "/LOG=$(Join-Path $testRoot 'rejected-missing-choice.log')"
 )
 $malformedChoiceInstall = Join-Path $testRoot 'Rejected malformed choice'
 Assert-SilentSetupRejected -Name 'malformed PULLANDVALIDATE choice' -InstallPath $malformedChoiceInstall -Arguments @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$malformedChoiceInstall",
-    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=maybe',
+    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=maybe', '/RELIABILITYBASELINE=false',
     "/LOG=$(Join-Path $testRoot 'rejected-malformed-choice.log')"
 )
 $duplicateChoiceInstall = Join-Path $testRoot 'Rejected duplicate choice'
 Assert-SilentSetupRejected -Name 'duplicate AUTOSTART choice' -InstallPath $duplicateChoiceInstall -Arguments @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$duplicateChoiceInstall",
     "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto',
-    '/AUTOSTART=false', '/AUTOSTART=true', '/PULLANDVALIDATE=false',
+    '/AUTOSTART=false', '/AUTOSTART=true', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
     "/LOG=$(Join-Path $testRoot 'rejected-duplicate-choice.log')"
 )
 $conflictingPackageOnlyInstall = Join-Path $testRoot 'Rejected package-only conflict'
 Assert-SilentSetupRejected -Name 'NOCONFIGURE conflict' -InstallPath $conflictingPackageOnlyInstall -Arguments @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCONFIGURE=1', "/DIR=$conflictingPackageOnlyInstall",
     "/CODEXHOME=$negativeCodexHome", "/LOG=$(Join-Path $testRoot 'rejected-package-only-conflict.log')"
+)
+
+$silentBaselineInstall = Join-Path $testRoot 'rejected-silent-baseline'
+Assert-SilentSetupRejected -Name 'silent reliability baseline bypasses diff preview' -InstallPath $silentBaselineInstall -Arguments @(
+    '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$silentBaselineInstall",
+    "/CODEXHOME=$negativeCodexHome", "/MODELSDIR=$negativeModels", '/MODEL=auto',
+    '/AUTOSTART=false', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=true',
+    "/LOG=$(Join-Path $testRoot 'rejected-silent-baseline.log')"
 )
 
 $configuredInstall = Join-Path $testRoot 'Configured install folder ü'
@@ -84,7 +92,7 @@ $configuredAgentsBefore = Get-FileHash -LiteralPath $configuredAgents -Algorithm
 $configuredProcess = Start-Process -FilePath $SetupPath -ArgumentList @(
     '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$configuredInstall",
     "/CODEXHOME=$configuredCodexHome", "/STATEDIR=$configuredState", "/MODELSDIR=$configuredModels",
-    '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=false',
+    '/MODEL=auto', '/AUTOSTART=false', '/PULLANDVALIDATE=false', '/RELIABILITYBASELINE=false',
     "/LOG=$(Join-Path $testRoot 'configured-install.log')"
 ) -Wait -PassThru -WindowStyle Hidden
 if ($configuredProcess.ExitCode -ne 0) { throw "Explicit isolated silent configuration failed: $($configuredProcess.ExitCode)" }
@@ -93,6 +101,9 @@ if (-not (Select-String -LiteralPath $configuredConfig -SimpleMatch 'BEGIN CODEX
 }
 if (-not (Select-String -LiteralPath $configuredAgents -SimpleMatch 'BEGIN CODEX GPU THALEN HELPER (managed)' -Quiet)) {
     throw 'Configured silent setup did not add the managed AGENTS section.'
+}
+if (Select-String -LiteralPath $configuredAgents -SimpleMatch 'BEGIN CODEX RELIABILITY BASELINE' -Quiet) {
+    throw 'Configured silent setup installed the opt-in reliability baseline without an interactive diff preview.'
 }
 $configuredStateFile = Join-Path $configuredState 'state.json'
 if (-not (Test-Path -LiteralPath $configuredStateFile)) { throw 'Configured silent setup did not use the isolated state directory.' }

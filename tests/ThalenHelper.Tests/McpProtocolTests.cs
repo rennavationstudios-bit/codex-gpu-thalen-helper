@@ -32,6 +32,7 @@ public sealed class McpProtocolTests
             SelectedModelDigest = "d7372fd82851",
             ModelStorageLocation = modelDirectory,
             HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
         GpuCoordination.ClearCancellation();

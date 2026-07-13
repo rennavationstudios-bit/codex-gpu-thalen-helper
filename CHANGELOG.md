@@ -12,5 +12,7 @@ All notable changes are documented here.
 - Added Control Center, CLI, pause/resume/release, repair/update/model move/uninstall operations.
 - Added self-contained packaging, Inno Setup source, tests, CI/security/release workflows, checksums, SBOM, and attestation support.
 - Added protected-tag/environment release gating, bounded downloads, race-safe model moves, and byte-preserving malformed-file uninstall recovery.
+- Added preservation-first coexistence for existing unmarked `local_gpu_reviewer` integrations, with no runtime takeover or duplicate TOML/AGENTS sections.
+- Split automatic local GPU guidance from an explicit opt-in sanitized reliability baseline with diff preview, distinct managed markers, backups, idempotent upgrades, and surgical rollback.
 
 The beta installer is not Authenticode-signed and may trigger SmartScreen.

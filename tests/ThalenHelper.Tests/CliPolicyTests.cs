@@ -5,6 +5,28 @@ namespace ThalenHelper.Tests;
 public sealed class CliPolicyTests
 {
     [Fact]
+    public async Task ReliabilityBaselineCannotBypassInteractiveDiffPreview()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+
+        var exitCode = await CliApplication.RunAsync(
+        [
+            "install",
+            "--yes",
+            "--reliability-baseline",
+            "--install-dir", paths.InstallDirectory,
+            "--state-dir", paths.StateDirectory,
+            "--codex-home", paths.CodexHome
+        ]);
+
+        Assert.Equal(2, exitCode);
+        Assert.False(File.Exists(paths.CodexConfigFile));
+        Assert.False(File.Exists(paths.AgentsOverrideFile));
+        Assert.False(File.Exists(paths.StateFile));
+    }
+
+    [Fact]
     public void StartupVerificationExitPolicyRejectsReachableUnsafeStates()
     {
         var state = new InstallationState

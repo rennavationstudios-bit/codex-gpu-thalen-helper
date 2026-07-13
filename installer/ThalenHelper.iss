@@ -171,6 +171,7 @@ var
   Model: String;
   AutoStart: String;
   Pull: String;
+  ReliabilityBaseline: String;
 begin
   Result := True;
   if WizardSilent and IsTrueSwitch('NOCONFIGURE') then
@@ -181,7 +182,8 @@ begin
        (CountSwitchOccurrences('MODELSDIR') <> 0) or
        (CountSwitchOccurrences('MODEL') <> 0) or
        (CountSwitchOccurrences('AUTOSTART') <> 0) or
-       (CountSwitchOccurrences('PULLANDVALIDATE') <> 0) then
+       (CountSwitchOccurrences('PULLANDVALIDATE') <> 0) or
+       (CountSwitchOccurrences('RELIABILITYBASELINE') <> 0) then
     begin
       Log('Package-only /NOCONFIGURE=1 cannot be duplicated or combined with configuration switches.');
       Result := False;
@@ -195,21 +197,30 @@ begin
     Model := GetSwitchValue('MODEL');
     AutoStart := GetSwitchValue('AUTOSTART');
     Pull := GetSwitchValue('PULLANDVALIDATE');
+    ReliabilityBaseline := GetSwitchValue('RELIABILITYBASELINE');
     if (CountSwitchOccurrences('CODEXHOME') <> 1) or
        (CountSwitchOccurrences('MODELSDIR') <> 1) or
        (CountSwitchOccurrences('MODEL') <> 1) or
        (CountSwitchOccurrences('AUTOSTART') <> 1) or
        (CountSwitchOccurrences('PULLANDVALIDATE') <> 1) or
+       (CountSwitchOccurrences('RELIABILITYBASELINE') <> 1) or
        (CountSwitchOccurrences('STATEDIR') > 1) or
        (CodexHome = '') or (ModelsDir = '') or (Model = '') or
-       (AutoStart = '') or (Pull = '') then
+       (AutoStart = '') or (Pull = '') or (ReliabilityBaseline = '') then
     begin
-      Log('Configured silent setup requires explicit /CODEXHOME, /MODELSDIR, /MODEL, /AUTOSTART, and /PULLANDVALIDATE choices, or /NOCONFIGURE=1 for package-only lifecycle testing.');
+      Log('Configured silent setup requires explicit /CODEXHOME, /MODELSDIR, /MODEL, /AUTOSTART, /PULLANDVALIDATE, and /RELIABILITYBASELINE choices, or /NOCONFIGURE=1 for package-only lifecycle testing.');
       Result := False;
     end
-    else if (not IsBooleanSwitchValue(AutoStart)) or (not IsBooleanSwitchValue(Pull)) then
+    else if (not IsBooleanSwitchValue(AutoStart)) or
+            (not IsBooleanSwitchValue(Pull)) or
+            (not IsBooleanSwitchValue(ReliabilityBaseline)) then
     begin
-      Log('Silent setup requires explicit Boolean /AUTOSTART and /PULLANDVALIDATE values.');
+      Log('Silent setup requires explicit Boolean /AUTOSTART, /PULLANDVALIDATE, and /RELIABILITYBASELINE values.');
+      Result := False;
+    end
+    else if IsTrueSwitchValue(ReliabilityBaseline) then
+    begin
+      Log('The optional reliability baseline requires the interactive before/after diff preview and cannot be enabled by silent setup. Use /RELIABILITYBASELINE=false.');
       Result := False;
     end
     else if HasUnsafeQuotedArgumentCharacters(CodexHome) or

@@ -46,34 +46,42 @@ public sealed class UninstallManager
             : ProductPaths.Resolve(_paths.InstallDirectory, _paths.StateDirectory, state.ManagedCodexHome);
         var managed = new List<ManagedFileResult>();
         var modelRemoved = false;
+        var ownsRuntime = IntegrationOwnership.IsManagedByHelper(state);
+        var preservesUnownedRuntime = state is not null && !ownsRuntime;
         if (state is not null)
         {
             state.Availability = HelperAvailability.Disabled;
             await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-            GpuCoordination.RequestCancellation();
-            if (!string.IsNullOrWhiteSpace(state.SelectedModel))
+            if (ownsRuntime)
             {
-                try
+                GpuCoordination.RequestCancellation();
+                if (!string.IsNullOrWhiteSpace(state.SelectedModel))
                 {
-                    using var client = _clientFactory();
-                    await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                    if (removeOwnedModel && state.SelectedModelOwnedByHelper)
+                    try
                     {
-                        await client.DeleteAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                        modelRemoved = true;
+                        using var client = _clientFactory();
+                        await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+                        if (removeOwnedModel && state.SelectedModelOwnedByHelper)
+                        {
+                            await client.DeleteAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+                            modelRemoved = true;
+                        }
+                    }
+                    catch (OllamaException)
+                    {
+                        // Optional Ollama failure must not block surgical Codex cleanup.
                     }
                 }
-                catch (OllamaException)
-                {
-                    // Optional Ollama failure must not block surgical Codex cleanup.
-                }
-            }
 
-            _autoStart.RemoveOwnedStartupEntry();
-            _autoStart.RestoreOwnedEnvironment(state);
+                _autoStart.RemoveOwnedStartupEntry();
+                _autoStart.RestoreOwnedEnvironment(state);
+            }
         }
 
-        StopOwnedMcpProcesses(managedPaths.McpExecutable);
+        if (ownsRuntime)
+        {
+            StopOwnedMcpProcesses(managedPaths.McpExecutable);
+        }
         managed.Add(UninstallCodexConfigWithRecovery(managedPaths));
         var agentsWasCreated = state?.FilesCreated.Contains(managedPaths.AgentsOverrideFile, StringComparer.OrdinalIgnoreCase) == true;
         managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated));
@@ -90,7 +98,9 @@ public sealed class UninstallManager
             modelRemoved,
             ollamaPreserved = true,
             managedFiles = managed.Select(item => new { item.Operation, file = Path.GetFileName(item.Path), item.Changed }),
-            note = "Codex authentication, unrelated Codex configuration, pre-existing Ollama, and pre-existing models were preserved."
+            note = preservesUnownedRuntime
+                ? "No positive managed reviewer ownership was present. The existing integration, Ollama, models, startup, environment, Codex authentication, and unrelated configuration were preserved."
+                : "Codex authentication, unrelated Codex configuration, pre-existing Ollama, and pre-existing models were preserved."
         };
         await File.WriteAllTextAsync(
             reportPath,
@@ -108,7 +118,7 @@ public sealed class UninstallManager
             Directory.Delete(_paths.StateDirectory, false);
         }
 
-        if (!manualCleanupRequired)
+        if (!manualCleanupRequired && ownsRuntime)
         {
             GpuCoordination.ClearCancellation();
         }
@@ -118,7 +128,9 @@ public sealed class UninstallManager
             manualCleanupRequired ? "UNINSTALL_MANUAL_CLEANUP_REQUIRED" : "UNINSTALLED",
             manualCleanupRequired
                 ? "A managed Codex file is malformed or unsafe to edit. Its current bytes and helper state were preserved for manual cleanup and retry."
-                : "Managed Codex integration, instructions, startup entry, and state were removed surgically.",
+                : preservesUnownedRuntime
+                    ? "Only product-managed file sections and state were removed; the unowned local_gpu_reviewer integration and runtime were untouched."
+                    : "Managed Codex integration, instructions, startup entry, and state were removed surgically.",
             modelRemoved,
             true,
             managed,

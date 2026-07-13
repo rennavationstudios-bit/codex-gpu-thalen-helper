@@ -15,14 +15,20 @@ public sealed partial class CodexConfigManager
     {
         ArgumentNullException.ThrowIfNull(paths);
         var originalExists = File.Exists(paths.CodexConfigFile);
+        var originalBytes = originalExists ? File.ReadAllBytes(paths.CodexConfigFile) : [];
         var original = originalExists ? File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8) : string.Empty;
         ValidateToml(original, allowEmpty: true);
 
         var withoutManaged = RemoveManagedBlock(original, out var hadManagedBlock);
-        if (!hadManagedBlock && ExistingIntegrationRegex().IsMatch(withoutManaged))
+        if (!hadManagedBlock && ContainsExistingIntegration(withoutManaged))
         {
-            throw new InvalidOperationException(
-                "An unmanaged mcp_servers.local_gpu_reviewer table already exists. It was not overwritten.");
+            return new ManagedFileResult(
+                paths.CodexConfigFile,
+                false,
+                false,
+                null,
+                "preserved-existing-unmanaged",
+                "An existing unmarked mcp_servers.local_gpu_reviewer table was preserved byte-for-byte. No duplicate TOML table was added, and this helper did not activate or reconfigure that integration.");
         }
 
         var managed = BuildManagedBlock(paths, enabled);
@@ -53,7 +59,7 @@ public sealed partial class CodexConfigManager
         }
         catch
         {
-            RestoreOriginal(paths.CodexConfigFile, originalExists, original);
+            RestoreOriginal(paths.CodexConfigFile, originalExists, originalBytes);
             throw;
         }
     }
@@ -66,6 +72,7 @@ public sealed partial class CodexConfigManager
             throw new FileNotFoundException("Codex config.toml was not found.", paths.CodexConfigFile);
         }
 
+        var originalBytes = File.ReadAllBytes(paths.CodexConfigFile);
         var original = File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8);
         ValidateToml(original, allowEmpty: false);
         var start = original.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
@@ -93,7 +100,7 @@ public sealed partial class CodexConfigManager
         }
         catch
         {
-            WriteAtomic(paths.CodexConfigFile, original);
+            WriteAtomic(paths.CodexConfigFile, originalBytes);
             throw;
         }
     }
@@ -106,6 +113,7 @@ public sealed partial class CodexConfigManager
             return new ManagedFileResult(paths.CodexConfigFile, false, false, null, "not-present");
         }
 
+        var originalBytes = File.ReadAllBytes(paths.CodexConfigFile);
         var original = File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8);
         ValidateToml(original, allowEmpty: true);
         var updated = RemoveManagedBlock(original, out var removed);
@@ -131,9 +139,35 @@ public sealed partial class CodexConfigManager
         }
         catch
         {
-            WriteAtomic(paths.CodexConfigFile, original);
+            WriteAtomic(paths.CodexConfigFile, originalBytes);
             throw;
         }
+    }
+
+    public void Rollback(ManagedFileResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (!result.Changed)
+        {
+            return;
+        }
+
+        if (result.Created)
+        {
+            if (File.Exists(result.Path))
+            {
+                File.Delete(result.Path);
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(result.BackupPath) || !File.Exists(result.BackupPath))
+        {
+            throw new InvalidOperationException("The exact Codex configuration backup required for rollback is unavailable.");
+        }
+
+        WriteAtomic(result.Path, File.ReadAllBytes(result.BackupPath));
     }
 
     public static void ValidateToml(string content, bool allowEmpty)
@@ -247,7 +281,7 @@ public sealed partial class CodexConfigManager
         return backup;
     }
 
-    private static void RestoreOriginal(string path, bool existed, string content)
+    private static void RestoreOriginal(string path, bool existed, byte[] content)
     {
         if (existed)
         {
@@ -260,16 +294,31 @@ public sealed partial class CodexConfigManager
     }
 
     private static void WriteAtomic(string path, string content)
+        => WriteAtomic(path, new UTF8Encoding(false).GetBytes(content));
+
+    private static void WriteAtomic(string path, byte[] content)
     {
         var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Managed path has no directory.");
         Directory.CreateDirectory(directory);
         var temporary = path + ".tmp";
-        File.WriteAllText(temporary, content, new UTF8Encoding(false));
+        File.WriteAllBytes(temporary, content);
         File.Move(temporary, path, true);
     }
 
-    [GeneratedRegex("(?m)^\\s*\\[\\s*mcp_servers\\.local_gpu_reviewer\\s*\\]\\s*$", RegexOptions.CultureInvariant)]
-    private static partial Regex ExistingIntegrationRegex();
+    private static bool ContainsExistingIntegration(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var document = TomlSerializer.Deserialize<TomlTable>(content);
+        return document is not null
+            && document.TryGetValue("mcp_servers", out var serversValue)
+            && serversValue is TomlTable servers
+            && servers.TryGetValue(ProductInfo.IntegrationName, out var reviewerValue)
+            && reviewerValue is TomlTable;
+    }
 
     [GeneratedRegex("(?m)^enabled\\s*=\\s*(true|false)\\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex EnabledLineRegex();

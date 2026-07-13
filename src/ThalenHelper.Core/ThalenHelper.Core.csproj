@@ -5,6 +5,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="../../model-catalog/models.v1.json" Link="model-catalog/models.v1.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="../../templates/AGENTS.override.md" Link="templates/AGENTS.override.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../templates/AGENTS.local-gpu-reviewer.md" Link="templates/AGENTS.local-gpu-reviewer.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../templates/AGENTS.reliability-baseline.md" Link="templates/AGENTS.reliability-baseline.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -35,6 +35,17 @@ public sealed class ModelChangeService
         OllamaClient.ValidateModelIdentifier(modelTag);
         var state = await _store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
+        if (!IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return new ModelChangeResult(
+                false,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not own the existing local_gpu_reviewer integration, so the model was not changed.",
+                state.SelectedModel,
+                state.SelectedModel,
+                null);
+        }
+
         var catalog = new ModelCatalogService().LoadBundled();
         var model = catalog.Models.FirstOrDefault(item => string.Equals(item.Tag, modelTag, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("The requested model is not in the audited catalog.");
@@ -54,7 +65,12 @@ public sealed class ModelChangeService
         var previousOwnership = state.SelectedModelOwnedByHelper;
         var previousTier = state.HardwareTier;
         var previousAvailability = state.Availability;
-        _ = await _control.PauseAsync(cancellationToken).ConfigureAwait(false);
+        var pause = await _control.PauseAsync(cancellationToken).ConfigureAwait(false);
+        if (!pause.Success)
+        {
+            return new ModelChangeResult(false, pause.Code, pause.Message, previousModel, previousModel, null);
+        }
+
         try
         {
             using (var client = _clientFactory())

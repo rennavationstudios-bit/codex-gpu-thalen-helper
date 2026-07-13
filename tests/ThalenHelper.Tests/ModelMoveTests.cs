@@ -98,6 +98,7 @@ public sealed class ModelMoveTests
             ModelStorageLocation = source,
             HardwareTier = HardwareTier.Entry,
             Availability = HelperAvailability.Enabled,
+            ManagedConfigurationSections = ["mcp_servers.local_gpu_reviewer"],
             Preferences = new HelperPreferences(AutoStartOllama: true)
         };
 }

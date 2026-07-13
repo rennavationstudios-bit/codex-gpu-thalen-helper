@@ -9,7 +9,11 @@ public sealed record InstallationOptions(
     bool AutoStartOllama = true,
     bool PullAndValidateModel = false,
     bool RestartOllamaForModelPath = true,
-    Func<string, bool>? CodexStartupValidator = null);
+    Func<string, bool>? CodexStartupValidator = null,
+    bool InstallReliabilityBaseline = false,
+    string? ExpectedAgentsSourceSha256 = null,
+    string? ExpectedAgentsPlannedSha256 = null,
+    Func<CancellationToken, Task>? EnsureOllamaInstalledAsync = null);
 
 public sealed record InstallationOutcome(
     bool Success,
@@ -69,6 +73,18 @@ public sealed class InstallationManager
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.InstallReliabilityBaseline
+            && (options.ExpectedAgentsSourceSha256 is null || options.ExpectedAgentsPlannedSha256 is null))
+        {
+            throw new InvalidOperationException(
+                "The optional reliability baseline requires a reviewed before/after diff with matching source and plan hashes.");
+        }
+
+        if ((options.ExpectedAgentsSourceSha256 is null) != (options.ExpectedAgentsPlannedSha256 is null))
+        {
+            throw new InvalidOperationException("Both AGENTS.override.md preview hashes are required together.");
+        }
+
         var currentUserModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
@@ -88,6 +104,10 @@ public sealed class InstallationManager
 
         var store = new StateStore(options.Paths.StateFile);
         var priorState = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var hasAgentsPreviewBinding = options.ExpectedAgentsSourceSha256 is not null;
+        var installReliabilityBaseline = hasAgentsPreviewBinding
+            ? options.InstallReliabilityBaseline
+            : priorState?.ReliabilityBaselineInstalled ?? false;
         var priorValidatedSelection = priorState?.Availability == HelperAvailability.Enabled
             && string.Equals(priorState.SelectedModel, selected?.Tag, StringComparison.OrdinalIgnoreCase)
             && string.Equals(
@@ -106,6 +126,8 @@ public sealed class InstallationManager
             PreviousUserEnvironment = priorState is null
                 ? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string?>(priorState.PreviousUserEnvironment, StringComparer.OrdinalIgnoreCase),
+            ExistingIntegrationPreserved = priorState?.ExistingIntegrationPreserved ?? false,
+            ReliabilityBaselineInstalled = installReliabilityBaseline,
             SelectedModel = selected?.Tag,
             SelectedModelDigest = selected?.ExpectedDigest,
             SelectedModelOwnedByHelper = priorValidatedSelection && priorState?.SelectedModelOwnedByHelper == true,
@@ -132,23 +154,109 @@ public sealed class InstallationManager
 
         state.OllamaWasPreExisting = priorState?.OllamaWasPreExisting ?? IsOllamaPresent();
         Directory.CreateDirectory(options.Paths.StateDirectory);
-        await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        if (options.ExpectedAgentsSourceSha256 is not null || options.ExpectedAgentsPlannedSha256 is not null)
+        {
+            var previewCheck = _agentsOverride.PreviewInstall(
+                options.Paths,
+                state.HardwareTier,
+                installReliabilityBaseline);
+            if (!string.Equals(
+                    previewCheck.SourceSha256,
+                    options.ExpectedAgentsSourceSha256,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    previewCheck.PlannedSha256,
+                    options.ExpectedAgentsPlannedSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "AGENTS.override.md or its managed plan changed after preview. Review a fresh before/after diff before setup applies any configuration.");
+            }
+        }
+
         var configResult = _codexConfig.InstallOrRepair(
             options.Paths,
             state.Availability == HelperAvailability.Enabled,
             options.CodexStartupValidator);
-        var agentsResult = _agentsOverride.InstallOrRepair(options.Paths, state.HardwareTier);
-        TrackManagedFile(state, configResult);
-        TrackManagedFile(state, agentsResult);
-        if (!state.ManagedConfigurationSections.Contains("mcp_servers.local_gpu_reviewer", StringComparer.Ordinal))
+        state.ExistingIntegrationPreserved = IsExistingIntegrationPreserved(configResult);
+        if (state.ExistingIntegrationPreserved)
         {
-            state.ManagedConfigurationSections.Add("mcp_servers.local_gpu_reviewer");
+            state.SelectedModel = null;
+            state.SelectedModelDigest = null;
+            state.SelectedModelOwnedByHelper = false;
+            state.ModelStorageLocation = null;
+            state.Acceleration = null;
         }
 
-        if (!state.ManagedConfigurationSections.Contains("AGENTS.override.md managed section", StringComparer.Ordinal))
+        ManagedFileResult agentsResult;
+        try
         {
-            state.ManagedConfigurationSections.Add("AGENTS.override.md managed section");
+            agentsResult = _agentsOverride.InstallOrRepair(
+                options.Paths,
+                state.HardwareTier,
+                installReliabilityBaseline,
+                options.ExpectedAgentsSourceSha256,
+                options.ExpectedAgentsPlannedSha256);
         }
+        catch
+        {
+            _codexConfig.Rollback(configResult);
+            throw;
+        }
+        TrackManagedFile(state, configResult);
+        TrackManagedFile(state, agentsResult);
+        SetManagedSection(state, "mcp_servers.local_gpu_reviewer", !state.ExistingIntegrationPreserved);
+        var agentsContent = File.Exists(options.Paths.AgentsOverrideFile)
+            ? File.ReadAllText(options.Paths.AgentsOverrideFile)
+            : string.Empty;
+        SetManagedSection(
+            state,
+            "AGENTS.override.md local GPU section",
+            AgentsOverrideManager.HasManagedLocalGpuSection(agentsContent));
+        state.ReliabilityBaselineInstalled = AgentsOverrideManager.HasManagedReliabilitySection(agentsContent);
+        SetManagedSection(
+            state,
+            "AGENTS.override.md reliability baseline",
+            state.ReliabilityBaselineInstalled);
+
+        var warnings = new List<string>();
+        warnings.AddRange(hardware.Warnings);
+        warnings.AddRange(recommendation.Warnings);
+        if (storage is not null)
+        {
+            warnings.AddRange(storage.Warnings);
+        }
+
+        AddWarning(warnings, configResult.Warning);
+        AddWarning(warnings, agentsResult.Warning);
+        if (state.ExistingIntegrationPreserved)
+        {
+            state.Availability = HelperAvailability.Disabled;
+            state.LastHealthCheckAt = DateTimeOffset.UtcNow;
+            state.LastHealthCheckCode = "EXISTING_INTEGRATION_PRESERVED";
+            state.SelectedModelOwnedByHelper = false;
+            state.StartupEntryOwnedByHelper = false;
+            await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+            return new InstallationOutcome(
+                true,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "The existing local_gpu_reviewer integration was preserved unchanged. Only missing, non-conflicting managed instruction sections were considered; Ollama, models, startup, and integration activation were not changed.",
+                hardware,
+                recommendation,
+                null,
+                state,
+                configResult,
+                agentsResult,
+                null,
+                warnings);
+        }
+
+        await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        if (selected is not null && options.EnsureOllamaInstalledAsync is not null)
+        {
+            await options.EnsureOllamaInstalledAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         OllamaStartupVerification? startup = null;
         if (selected is not null && state.ModelStorageLocation is not null)
         {
@@ -161,14 +269,6 @@ public sealed class InstallationManager
                 options.RestartOllamaForModelPath,
                 cancellationToken).ConfigureAwait(false);
             state.StartupEntryOwnedByHelper = options.AutoStartOllama;
-        }
-
-        var warnings = new List<string>();
-        warnings.AddRange(hardware.Warnings);
-        warnings.AddRange(recommendation.Warnings);
-        if (storage is not null)
-        {
-            warnings.AddRange(storage.Warnings);
         }
 
         if (!options.AutoStartOllama)
@@ -345,9 +445,69 @@ public sealed class InstallationManager
             paths,
             state.Availability == HelperAvailability.Enabled,
             codexStartupValidator);
-        var agents = _agentsOverride.InstallOrRepair(paths, state.HardwareTier);
+        state.ExistingIntegrationPreserved = IsExistingIntegrationPreserved(config);
+        if (state.ExistingIntegrationPreserved)
+        {
+            state.SelectedModel = null;
+            state.SelectedModelDigest = null;
+            state.SelectedModelOwnedByHelper = false;
+            state.ModelStorageLocation = null;
+            state.Acceleration = null;
+        }
+
+        ManagedFileResult agents;
+        try
+        {
+            agents = _agentsOverride.InstallOrRepair(
+                paths,
+                state.HardwareTier,
+                state.ReliabilityBaselineInstalled);
+        }
+        catch
+        {
+            _codexConfig.Rollback(config);
+            throw;
+        }
         TrackManagedFile(state, config);
         TrackManagedFile(state, agents);
+        SetManagedSection(state, "mcp_servers.local_gpu_reviewer", !state.ExistingIntegrationPreserved);
+        var agentsContent = File.Exists(paths.AgentsOverrideFile)
+            ? File.ReadAllText(paths.AgentsOverrideFile)
+            : string.Empty;
+        SetManagedSection(
+            state,
+            "AGENTS.override.md local GPU section",
+            AgentsOverrideManager.HasManagedLocalGpuSection(agentsContent));
+        state.ReliabilityBaselineInstalled = AgentsOverrideManager.HasManagedReliabilitySection(agentsContent);
+        SetManagedSection(
+            state,
+            "AGENTS.override.md reliability baseline",
+            state.ReliabilityBaselineInstalled);
+        var repairWarnings = hardware.Warnings.ToList();
+        AddWarning(repairWarnings, config.Warning);
+        AddWarning(repairWarnings, agents.Warning);
+        if (state.ExistingIntegrationPreserved)
+        {
+            state.Availability = HelperAvailability.Disabled;
+            state.LastHealthCheckAt = DateTimeOffset.UtcNow;
+            state.LastHealthCheckCode = "EXISTING_INTEGRATION_PRESERVED";
+            state.SelectedModelOwnedByHelper = false;
+            state.StartupEntryOwnedByHelper = false;
+            await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+            return new InstallationOutcome(
+                true,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "Repair preserved the existing unmarked local_gpu_reviewer integration and did not change Ollama, models, startup, or activation.",
+                hardware,
+                recommendation,
+                null,
+                state,
+                config,
+                agents,
+                null,
+                repairWarnings);
+        }
+
         OllamaStartupVerification? startup = null;
         if (state.ModelStorageLocation is not null)
         {
@@ -381,7 +541,7 @@ public sealed class InstallationManager
                 config,
                 agents,
                 startup,
-                hardware.Warnings);
+                repairWarnings);
         }
 
         await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
@@ -396,13 +556,58 @@ public sealed class InstallationManager
             config,
             agents,
             startup,
-            hardware.Warnings);
+            repairWarnings);
+    }
+
+    public async Task<ManagedFileResult> ConfigureReliabilityBaselineAsync(
+        ProductPaths paths,
+        bool install,
+        string expectedAgentsSourceSha256,
+        string expectedAgentsPlannedSha256,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var store = new StateStore(paths.StateFile);
+        var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("No installation state was found.");
+        var result = _agentsOverride.InstallOrRepair(
+            paths,
+            state.HardwareTier,
+            install,
+            expectedAgentsSourceSha256,
+            expectedAgentsPlannedSha256);
+        TrackManagedFile(state, result);
+        var content = File.Exists(paths.AgentsOverrideFile)
+            ? File.ReadAllText(paths.AgentsOverrideFile)
+            : string.Empty;
+        SetManagedSection(
+            state,
+            "AGENTS.override.md local GPU section",
+            AgentsOverrideManager.HasManagedLocalGpuSection(content));
+        state.ReliabilityBaselineInstalled = AgentsOverrideManager.HasManagedReliabilitySection(content);
+        SetManagedSection(
+            state,
+            "AGENTS.override.md reliability baseline",
+            state.ReliabilityBaselineInstalled);
+        await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     public async Task<ModelValidationResult> ValidateSelectedModelAsync(
         InstallationState state,
         CancellationToken cancellationToken = default)
     {
+        if (!IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return new ModelValidationResult(
+                false,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "The existing unmarked local_gpu_reviewer integration is not controlled by this helper.",
+                null,
+                0,
+                0);
+        }
+
         if (string.IsNullOrWhiteSpace(state.SelectedModel))
         {
             return new ModelValidationResult(false, "NO_MODEL", "No selected model is configured.", null, 0, 0);
@@ -590,6 +795,32 @@ public sealed class InstallationManager
         if (result.BackupPath is not null)
         {
             state.BackupLocations[result.Path] = result.BackupPath;
+        }
+    }
+
+    private static bool IsExistingIntegrationPreserved(ManagedFileResult result)
+        => string.Equals(result.Operation, "preserved-existing-unmanaged", StringComparison.Ordinal);
+
+    private static void SetManagedSection(InstallationState state, string section, bool managed)
+    {
+        state.ManagedConfigurationSections.RemoveAll(item => string.Equals(item, section, StringComparison.Ordinal));
+        if (managed)
+        {
+            state.ManagedConfigurationSections.Add(section);
+        }
+
+        if (string.Equals(section, "AGENTS.override.md local GPU section", StringComparison.Ordinal))
+        {
+            state.ManagedConfigurationSections.RemoveAll(item =>
+                string.Equals(item, "AGENTS.override.md managed section", StringComparison.Ordinal));
+        }
+    }
+
+    private static void AddWarning(List<string> warnings, string? warning)
+    {
+        if (!string.IsNullOrWhiteSpace(warning) && !warnings.Contains(warning, StringComparer.Ordinal))
+        {
+            warnings.Add(warning);
         }
     }
 

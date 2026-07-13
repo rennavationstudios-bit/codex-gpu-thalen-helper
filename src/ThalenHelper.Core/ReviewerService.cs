@@ -46,6 +46,14 @@ public sealed class ReviewerService
             };
         }
 
+        if (!IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return HealthError(
+                state,
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not have positive ownership of local_gpu_reviewer and did not probe Ollama.");
+        }
+
         if (!_listenerCheck(_ollama.BaseUri.Port))
         {
             return HealthError(state, "OLLAMA_NETWORK_EXPOSURE", "Ollama is listening on a non-loopback address; local review is blocked.");
@@ -114,6 +122,14 @@ public sealed class ReviewerService
     {
         ArgumentNullException.ThrowIfNull(request);
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        if (state is not null && !IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return Error(
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not have positive ownership of local_gpu_reviewer and did not run local inference.",
+                false);
+        }
+
         if (state is null || string.IsNullOrWhiteSpace(state.SelectedModel))
         {
             return Error("NOT_CONFIGURED", "No local reviewer model is configured.", false);

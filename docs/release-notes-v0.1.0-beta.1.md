@@ -11,6 +11,8 @@ Highlights:
 - Per-user idempotent Ollama startup with no duplicate process launch.
 - Exact `OLLAMA_MODELS`, selected-model tag/digest/manifest, endpoint, and loopback verification with fail-closed activation.
 - Backed-up, parsed, idempotent Codex config/instruction merging.
+- Preservation-first coexistence: an existing unmarked `local_gpu_reviewer` table is never replaced, duplicated, activated, or used to take over Ollama/model/startup controls.
+- Automatic sanitized local-GPU guidance plus a separate optional Codex reliability baseline with an interactive before/after diff, source/plan-hash-bound apply, Control Center add/remove, distinct markers, backup, idempotent upgrades, and surgical rollback.
 - WinForms setup/Control Center plus self-contained CLI and MCP executables.
 - Pause, resume, immediate GPU release, low-impact, repair, update, model move, and surgical uninstall.
 - Zero telemetry; no OpenAI API key requested or stored.

@@ -105,6 +105,13 @@ internal static class CliApplication
             return Fail("CONFIRMATION_REQUIRED", "Use the interactive setup wizard, or supply --yes with explicit silent-install choices.");
         }
 
+        if (parsed.Has("reliability-baseline"))
+        {
+            return Fail(
+                "INTERACTIVE_PREVIEW_REQUIRED",
+                "The optional reliability baseline can be selected only in the interactive setup wizard after reviewing its before/after diff preview.");
+        }
+
         var autoStart = !string.Equals(parsed.Get("auto-start"), "false", StringComparison.OrdinalIgnoreCase);
         var options = new InstallationOptions(
             paths,
@@ -113,7 +120,8 @@ internal static class CliApplication
             parsed.Has("allow-cpu"),
             parsed.Has("accept-restricted-license"),
             autoStart,
-            parsed.Has("pull-and-validate"));
+            parsed.Has("pull-and-validate"),
+            InstallReliabilityBaseline: false);
         if (options.PullAndValidateModel)
         {
             Console.Error.WriteLine("Integration: local_gpu_reviewer | Provider: Ollama | Purpose: installer exact-response and bounded code-review validation");
@@ -171,7 +179,7 @@ internal static class CliApplication
                     var result = await service.ChangeAsync(
                         parsed.Positionals[2],
                         parsed.Has("accept-restricted-license")).ConfigureAwait(false);
-                    return Write(new { previousState = state?.SelectedModel, result });
+                    return Write(result);
                 }
             default:
                 return Fail("UNKNOWN_SUBCOMMAND", "Use model recommend or model change <tag>.");
@@ -213,6 +221,13 @@ internal static class CliApplication
         }
 
         var state = await store.LoadAsync().ConfigureAwait(false);
+        if (state is not null && !IntegrationOwnership.IsManagedByHelper(state))
+        {
+            return Fail(
+                "EXISTING_INTEGRATION_PRESERVED",
+                "This helper does not own the existing local_gpu_reviewer integration, so Ollama, startup, models, and environment were not changed or probed.");
+        }
+
         switch (parsed.Positionals[1].ToLowerInvariant())
         {
             case "autostart":
@@ -331,7 +346,11 @@ internal static class CliApplication
     {
         Console.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
         return value is ControlResult { Success: false }
+            or InstallationOutcome { Success: false }
             or ModelValidationResult { Success: false }
+            or ModelChangeResult { Success: false }
+            or ModelsMoveResult { Success: false }
+            or UninstallResult { Success: false }
             or OllamaInstallResult { Success: false }
             or OllamaStartupVerification { EndpointReachable: false }
             ? 1
@@ -368,6 +387,7 @@ internal static class CliApplication
             thalen-helper uninstall --yes [--remove-owned-model]
 
             Silent configuration requires --yes and explicit --codex-home/--model/--models-dir choices.
+            The optional reliability baseline is installed only from the interactive wizard after its diff preview.
             Real inference occurs only for test, model change, or install --pull-and-validate.
             """);
     }
