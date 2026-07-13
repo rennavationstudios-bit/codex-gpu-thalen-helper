@@ -87,16 +87,19 @@ public sealed class LifecycleTests
             autoStart: new OllamaAutoStartManager(runtime.CreateClient, platform),
             clientFactory: runtime.CreateClient,
             hardwareProvider: () => profile);
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
-
-        var cancellationException = await Record.ExceptionAsync(() => manager.ConfigureAsync(
+        using var cancellation = new CancellationTokenSource();
+        var configureTask = manager.ConfigureAsync(
             new InstallationOptions(
                 paths,
                 RequestedModel: "qwen2.5-coder:1.5b",
                 RequestedModelDirectory: models,
                 PullAndValidateModel: true,
                 CodexStartupValidator: _ => true),
-            cancellation.Token));
+            cancellation.Token);
+        await runtime.PullStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        cancellation.Cancel();
+
+        var cancellationException = await Record.ExceptionAsync(() => configureTask);
         Assert.IsAssignableFrom<OperationCanceledException>(cancellationException);
 
         var state = await new StateStore(paths.StateFile).LoadAsync();
@@ -286,6 +289,7 @@ internal sealed class FakeOllamaRuntime
     }
 
     public bool BlockPullUntilCancelled { get; set; }
+    public TaskCompletionSource<bool> PullStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Action? OnTagsRequested { get; set; }
     public int ValidationGenerationCount { get; private set; }
     public int UnloadCount { get; private set; }
@@ -311,6 +315,7 @@ internal sealed class FakeOllamaRuntime
 
             if (path == "/api/pull")
             {
+                PullStarted.TrySetResult(true);
                 if (BlockPullUntilCancelled)
                 {
                     await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);

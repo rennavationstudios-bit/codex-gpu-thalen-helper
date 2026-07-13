@@ -36,9 +36,8 @@ public sealed class McpProtocolTests
         });
         GpuCoordination.ClearCancellation();
         var repository = FindRepositoryRoot();
-        var dotnet = Path.Combine(repository, ".tools", "dotnet", "dotnet.exe");
+        var dotnet = FindDotnetHost(repository);
         var server = Path.Combine(AppContext.BaseDirectory, "local-gpu-reviewer.dll");
-        Assert.True(File.Exists(dotnet));
         Assert.True(File.Exists(server));
         var environment = StdioClientTransportOptions.GetDefaultEnvironmentVariables();
         environment["THALEN_HELPER_STATE_DIR"] = paths.StateDirectory;
@@ -102,6 +101,18 @@ public sealed class McpProtocolTests
         }
 
         return current?.FullName ?? throw new DirectoryNotFoundException("Repository root was not found.");
+    }
+
+    private static string FindDotnetHost(string repository)
+    {
+        var candidates = new[]
+        {
+            Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
+            Path.Combine(Environment.GetEnvironmentVariable("DOTNET_ROOT") ?? string.Empty, "dotnet.exe"),
+            Path.Combine(repository, ".tools", "dotnet", "dotnet.exe")
+        };
+        return candidates.FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            ?? throw new FileNotFoundException("A dotnet host was not found for the fresh MCP process test.");
     }
 }
 
