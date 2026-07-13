@@ -91,11 +91,15 @@ public sealed class InstallationManager
 
         InstallContextStore.Save(options.Paths);
 
+        var existingIntegration = _codexConfig.InspectExistingUnmanagedIntegration(options.Paths);
+        var preserveExistingIntegration = existingIntegration.ShouldPreserve;
         var currentUserModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
         var recommendation = _modelSelector.Recommend(hardware, catalog, options.AllowCpuFallback);
-        var selected = SelectRequestedModel(options, catalog, recommendation);
+        var selected = preserveExistingIntegration
+            ? null
+            : SelectRequestedModel(options, catalog, recommendation);
         StorageRecommendation? storage = null;
         if (selected is not null)
         {
@@ -120,6 +124,11 @@ public sealed class InstallationManager
                 priorState.ModelStorageLocation is null ? null : Path.GetFullPath(priorState.ModelStorageLocation),
                 storage?.ModelDirectory is null ? null : Path.GetFullPath(storage.ModelDirectory),
                 StringComparison.OrdinalIgnoreCase);
+        var hardwareTier = preserveExistingIntegration && recommendation.Model is not null
+            ? ModelSelector.GetHardwareTier(recommendation.Model)
+            : selected is null
+                ? HardwareTier.NoModel
+                : ModelSelector.GetHardwareTier(selected);
         var state = new InstallationState
         {
             InstalledAt = priorState?.InstalledAt ?? DateTimeOffset.UtcNow,
@@ -139,7 +148,7 @@ public sealed class InstallationManager
             SelectedModelOwnedByHelper = priorValidatedSelection && priorState?.SelectedModelOwnedByHelper == true,
             ModelStorageLocation = storage?.ModelDirectory,
             ManagedCodexHome = options.Paths.CodexHome,
-            HardwareTier = selected is null ? HardwareTier.NoModel : ModelSelector.GetHardwareTier(selected),
+            HardwareTier = hardwareTier,
             Acceleration = priorValidatedSelection ? priorState?.Acceleration : null,
             Availability = priorValidatedSelection ? HelperAvailability.Enabled : HelperAvailability.Disabled,
             LastHealthCheckAt = priorValidatedSelection ? priorState?.LastHealthCheckAt : null,
@@ -180,10 +189,12 @@ public sealed class InstallationManager
             }
         }
 
-        var configResult = _codexConfig.InstallOrRepair(
-            options.Paths,
-            state.Availability == HelperAvailability.Enabled,
-            options.CodexStartupValidator);
+        var configResult = preserveExistingIntegration
+            ? _codexConfig.PreserveExistingUnmanagedIntegration(options.Paths, existingIntegration)
+            : _codexConfig.InstallOrRepair(
+                options.Paths,
+                state.Availability == HelperAvailability.Enabled,
+                options.CodexStartupValidator);
         state.ExistingIntegrationPreserved = IsExistingIntegrationPreserved(configResult);
         if (state.ExistingIntegrationPreserved)
         {

@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -55,18 +54,39 @@ public sealed class AgentsOverrideManager
         }
 
         Directory.CreateDirectory(paths.CodexHome);
-        AssertSnapshotUnchanged(paths.AgentsOverrideFile, snapshot.SourceSha256);
-        var backup = snapshot.Exists ? CreateBackup(paths.AgentsOverrideFile) : null;
-        AssertSnapshotUnchanged(paths.AgentsOverrideFile, snapshot.SourceSha256);
+        var protectedSnapshot = new ProtectedFileSnapshot(
+            snapshot.Exists,
+            snapshot.Bytes,
+            snapshot.SourceSha256);
+        var backup = snapshot.Exists
+            ? ProtectedFileTransaction.CreateBackup(paths.AgentsOverrideFile, protectedSnapshot)
+            : null;
+        var appliedBytes = new UTF8Encoding(false).GetBytes(plan.Merged);
         var replaced = false;
         try
         {
-            WriteAtomic(paths.AgentsOverrideFile, plan.Merged);
+            ProtectedFileTransaction.ReplaceIfUnchanged(
+                paths.AgentsOverrideFile,
+                protectedSnapshot,
+                appliedBytes);
             replaced = true;
-            ValidateAllMarkers(File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8));
+            var written = ProtectedFileTransaction.Capture(paths.AgentsOverrideFile);
+            if (!written.Bytes.AsSpan().SequenceEqual(appliedBytes))
+            {
+                throw new InvalidOperationException("AGENTS.override.md changed immediately after the helper update.");
+            }
+
+            ValidateAllMarkers(ProtectedFileTransaction.DecodeUtf8(written));
             if (postWriteValidator is not null && !postWriteValidator(paths.AgentsOverrideFile))
             {
                 throw new InvalidOperationException("The managed AGENTS.override.md update failed post-write validation.");
+            }
+
+            if (!ProtectedFileTransaction.Matches(
+                    paths.AgentsOverrideFile,
+                    new ProtectedFileSnapshot(true, appliedBytes, string.Empty)))
+            {
+                throw new InvalidOperationException("AGENTS.override.md changed during post-write validation.");
             }
 
             return new ManagedFileResult(
@@ -75,13 +95,22 @@ public sealed class AgentsOverrideManager
                 true,
                 backup,
                 plan.HadAnyManagedSection ? "updated" : "installed",
-                plan.Warning);
-        }
-        catch
-        {
-            if (replaced)
+                plan.Warning)
             {
-                RestoreOriginal(paths.AgentsOverrideFile, snapshot.Exists, snapshot.Bytes);
+                AppliedBytes = appliedBytes
+            };
+        }
+        catch (Exception exception)
+        {
+            if (replaced
+                && !ProtectedFileTransaction.TryRestoreIfUnchanged(
+                    paths.AgentsOverrideFile,
+                    appliedBytes,
+                    protectedSnapshot))
+            {
+                throw new IOException(
+                    "AGENTS.override.md changed after the helper update. The newer bytes were preserved; use the timestamped backup and current-file diff for manual review.",
+                    exception);
             }
 
             throw;
@@ -94,13 +123,14 @@ public sealed class AgentsOverrideManager
         string? originalBackupPath = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        if (!File.Exists(paths.AgentsOverrideFile))
+        var snapshot = ProtectedFileTransaction.Capture(paths.AgentsOverrideFile);
+        if (!snapshot.Exists)
         {
             return new ManagedFileResult(paths.AgentsOverrideFile, false, false, null, "not-present");
         }
 
-        var originalBytes = File.ReadAllBytes(paths.AgentsOverrideFile);
-        var original = File.ReadAllText(paths.AgentsOverrideFile, Encoding.UTF8);
+        var originalBytes = snapshot.Bytes;
+        var original = ProtectedFileTransaction.DecodeUtf8(snapshot);
         ValidateAllMarkers(original);
         var updated = RemoveManagedSection(
             original,
@@ -117,7 +147,9 @@ public sealed class AgentsOverrideManager
             return new ManagedFileResult(paths.AgentsOverrideFile, false, false, null, "not-managed");
         }
 
-        var backup = CreateBackup(paths.AgentsOverrideFile);
+        var backup = ProtectedFileTransaction.CreateBackup(paths.AgentsOverrideFile, snapshot);
+        byte[]? appliedBytes = null;
+        var replaced = false;
         try
         {
             if (TryGetExactOriginalBytes(
@@ -127,36 +159,55 @@ public sealed class AgentsOverrideManager
                     original,
                     out var exactOriginalBytes))
             {
-                WriteAtomic(paths.AgentsOverrideFile, exactOriginalBytes);
+                appliedBytes = exactOriginalBytes;
+                ProtectedFileTransaction.ReplaceIfUnchanged(paths.AgentsOverrideFile, snapshot, appliedBytes);
+                replaced = true;
                 return new ManagedFileResult(
                     paths.AgentsOverrideFile,
                     false,
                     true,
                     backup,
-                    "restored-exact-original");
+                    "restored-exact-original")
+                {
+                    AppliedBytes = appliedBytes
+                };
             }
 
             if (fileWasCreatedByProduct
                 && string.IsNullOrWhiteSpace(updated)
                 && IsExactProductManagedRepresentation(originalBytes, original, string.Empty))
             {
-                File.Delete(paths.AgentsOverrideFile);
+                ProtectedFileTransaction.DeleteIfUnchanged(paths.AgentsOverrideFile, snapshot);
                 return new ManagedFileResult(paths.AgentsOverrideFile, false, true, backup, "removed-product-file");
             }
 
-            WriteAtomic(
-                paths.AgentsOverrideFile,
-                EncodeUtf8PreservingPreamble(updated, originalBytes));
+            appliedBytes = EncodeUtf8PreservingPreamble(updated, originalBytes);
+            ProtectedFileTransaction.ReplaceIfUnchanged(paths.AgentsOverrideFile, snapshot, appliedBytes);
+            replaced = true;
             return new ManagedFileResult(
                 paths.AgentsOverrideFile,
                 false,
                 true,
                 backup,
-                fileWasCreatedByProduct ? "preserved-user-content" : "removed-managed-sections");
+                fileWasCreatedByProduct ? "preserved-user-content" : "removed-managed-sections")
+            {
+                AppliedBytes = appliedBytes
+            };
         }
-        catch
+        catch (Exception exception)
         {
-            WriteAtomic(paths.AgentsOverrideFile, originalBytes);
+            if (replaced
+                && appliedBytes is not null
+                && !ProtectedFileTransaction.TryRestoreIfUnchanged(
+                    paths.AgentsOverrideFile,
+                    appliedBytes,
+                    snapshot))
+            {
+                throw new IOException(
+                    "AGENTS.override.md changed during uninstall. The newer bytes were preserved for manual review.",
+                    exception);
+            }
+
             throw;
         }
     }
@@ -341,27 +392,14 @@ public sealed class AgentsOverrideManager
         return builder.ToString();
     }
 
-    private static string CreateBackup(string path)
-    {
-        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
-        var backup = $"{path}.thalen-helper.{timestamp}.bak";
-        File.Copy(path, backup, false);
-        return backup;
-    }
-
     private static FileSnapshot ReadSnapshot(string path)
     {
-        if (!File.Exists(path))
-        {
-            return new FileSnapshot(false, [], string.Empty, "MISSING");
-        }
-
-        var bytes = File.ReadAllBytes(path);
+        var snapshot = ProtectedFileTransaction.Capture(path);
         return new FileSnapshot(
-            true,
-            bytes,
-            File.ReadAllText(path, Encoding.UTF8),
-            Convert.ToHexString(SHA256.HashData(bytes)));
+            snapshot.Exists,
+            snapshot.Bytes,
+            snapshot.Exists ? ProtectedFileTransaction.DecodeUtf8(snapshot) : string.Empty,
+            snapshot.SourceSha256);
     }
 
     private static string HashPlannedContent(string content)
@@ -389,28 +427,6 @@ public sealed class AgentsOverrideManager
         }
     }
 
-    private static void AssertSnapshotUnchanged(string path, string expectedSourceSha256)
-    {
-        var current = ReadSnapshot(path).SourceSha256;
-        if (!string.Equals(current, expectedSourceSha256, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                "AGENTS.override.md changed while the managed update was being prepared. No update was applied; review a fresh diff.");
-        }
-    }
-
-    private static void RestoreOriginal(string path, bool existed, byte[] bytes)
-    {
-        if (existed)
-        {
-            WriteAtomic(path, bytes);
-        }
-        else if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-    }
-
     private static bool TryGetExactOriginalBytes(
         string target,
         string? originalBackupPath,
@@ -424,7 +440,13 @@ public sealed class AgentsOverrideManager
             return false;
         }
 
-        var original = File.ReadAllText(originalBackupPath!, Encoding.UTF8);
+        var backupSnapshot = ProtectedFileTransaction.Capture(originalBackupPath!);
+        if (!backupSnapshot.Exists)
+        {
+            return false;
+        }
+
+        var original = ProtectedFileTransaction.DecodeUtf8(backupSnapshot);
         if (original.Contains(ProductInfo.ManagedAgentsStart, StringComparison.Ordinal)
             || original.Contains(ProductInfo.ManagedAgentsEnd, StringComparison.Ordinal)
             || original.Contains(ProductInfo.ManagedReliabilityStart, StringComparison.Ordinal)
@@ -438,7 +460,7 @@ public sealed class AgentsOverrideManager
             return false;
         }
 
-        exactOriginalBytes = File.ReadAllBytes(originalBackupPath!);
+        exactOriginalBytes = backupSnapshot.Bytes;
         return true;
     }
 
@@ -532,16 +554,6 @@ public sealed class AgentsOverrideManager
                 Path.GetFileName(targetFull) + ".thalen-helper.",
                 StringComparison.OrdinalIgnoreCase)
             && backupFull.EndsWith(".bak", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void WriteAtomic(string path, string content)
-        => WriteAtomic(path, new UTF8Encoding(false).GetBytes(content));
-
-    private static void WriteAtomic(string path, byte[] content)
-    {
-        var temporary = path + ".tmp";
-        File.WriteAllBytes(temporary, content);
-        File.Move(temporary, path, true);
     }
 
     private sealed record MergePlan(

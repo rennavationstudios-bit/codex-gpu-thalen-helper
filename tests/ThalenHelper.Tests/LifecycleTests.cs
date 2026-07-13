@@ -327,7 +327,7 @@ public sealed class LifecycleTests
         var outcome = await manager.ConfigureAsync(new InstallationOptions(
             paths,
             RequestedModel: "qwen2.5-coder:1.5b",
-            RequestedModelDirectory: models,
+            RequestedModelDirectory: @"Z:\models-that-must-not-be-validated",
             AutoStartOllama: true,
             PullAndValidateModel: true,
             CodexStartupValidator: _ => throw new InvalidOperationException("Validator must not run."),
@@ -388,6 +388,82 @@ public sealed class LifecycleTests
         {
             cancellationEvent.Reset();
         }
+    }
+
+    [Fact]
+    public async Task ExistingIntegrationDriftFailsBeforeAnyProtectedFileWrite()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var existingConfig = Encoding.UTF8.GetBytes(
+            "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"existing-reviewer.exe\"\r\n");
+        var concurrentConfig = Encoding.UTF8.GetBytes(
+            "model = \"concurrent-user-edit\"\r\n# preserve exactly\r\n");
+        var existingAgents = Encoding.UTF8.GetBytes("# Existing instructions\r\n");
+        await File.WriteAllBytesAsync(paths.CodexConfigFile, existingConfig);
+        await File.WriteAllBytesAsync(paths.AgentsOverrideFile, existingAgents);
+        var manager = new InstallationManager(hardwareProvider: () =>
+        {
+            File.WriteAllBytes(paths.CodexConfigFile, concurrentConfig);
+            return CreateProfile(temporary.Path);
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ConfigureAsync(
+            new InstallationOptions(
+                paths,
+                RequestedModel: "model-that-must-not-be-validated",
+                RequestedModelDirectory: @"Z:\models-that-must-not-be-validated")));
+
+        Assert.Contains("changed after", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(concurrentConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(existingAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.False(File.Exists(paths.StateFile));
+    }
+
+    [Fact]
+    public async Task ExistingIntegrationAddsOnlyMissingGuidanceIdempotentlyAndUninstallsExactly()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var preamble = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true).GetPreamble();
+        var originalConfig = preamble.Concat(Encoding.UTF8.GetBytes(
+            "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"existing-reviewer.exe\"\r\nenabled = true\r\n\r\n"))
+            .ToArray();
+        var originalAgents = preamble.Concat(Encoding.UTF8.GetBytes(
+            "# Existing unrelated instructions\r\nKeep comments and whitespace.\r\n\r\n"))
+            .ToArray();
+        await File.WriteAllBytesAsync(paths.CodexConfigFile, originalConfig);
+        await File.WriteAllBytesAsync(paths.AgentsOverrideFile, originalAgents);
+        var manager = new InstallationManager(hardwareProvider: () => CreateProfile(temporary.Path));
+        var options = new InstallationOptions(
+            paths,
+            RequestedModel: "model-that-must-not-be-validated",
+            RequestedModelDirectory: @"Z:\models-that-must-not-be-validated",
+            AutoStartOllama: true,
+            PullAndValidateModel: true);
+
+        var first = await manager.ConfigureAsync(options);
+        var agentsAfterFirst = await File.ReadAllBytesAsync(paths.AgentsOverrideFile);
+        var second = await manager.ConfigureAsync(options);
+
+        Assert.Equal("EXISTING_INTEGRATION_PRESERVED", first.Code);
+        Assert.Equal("EXISTING_INTEGRATION_PRESERVED", second.Code);
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(agentsAfterFirst, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        var installedAgents = Encoding.UTF8.GetString(agentsAfterFirst);
+        Assert.Equal(1, Count(installedAgents, ProductInfo.ManagedAgentsStart));
+        Assert.DoesNotContain(ProductInfo.ManagedReliabilityStart, installedAgents, StringComparison.Ordinal);
+        Assert.Null(second.State.SelectedModel);
+        Assert.Null(second.State.ModelStorageLocation);
+        Assert.False(second.State.StartupEntryOwnedByHelper);
+
+        var uninstall = await new UninstallManager(paths, new StateStore(paths.StateFile))
+            .UninstallAsync(removeOwnedModel: true);
+
+        Assert.True(uninstall.Success);
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.False(File.Exists(paths.StateFile));
     }
 
     [Fact]
@@ -500,6 +576,19 @@ public sealed class LifecycleTests
         Assert.Equal(0, platform.MutationCount);
         Assert.Equal("unowned startup", platform.RunEntry);
         Assert.Equal("unowned environment", platform.UserEnvironment["OLLAMA_MODELS"]);
+    }
+
+    private static int Count(string text, string value)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
     }
 
     private static HardwareProfile CreateProfile(string root)

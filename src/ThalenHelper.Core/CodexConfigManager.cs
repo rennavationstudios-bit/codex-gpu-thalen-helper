@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using Tomlyn;
@@ -6,29 +5,63 @@ using Tomlyn.Model;
 
 namespace ThalenHelper.Core;
 
+internal sealed record ExistingIntegrationInspection(
+    bool ShouldPreserve,
+    ProtectedFileSnapshot Snapshot,
+    string Content);
+
 public sealed partial class CodexConfigManager
 {
+    internal ExistingIntegrationInspection InspectExistingUnmanagedIntegration(ProductPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var snapshot = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+        var original = snapshot.Exists
+            ? ProtectedFileTransaction.DecodeUtf8(snapshot)
+            : string.Empty;
+        ValidateToml(original, allowEmpty: true);
+        var withoutManaged = RemoveManagedBlock(original, out var hadManagedBlock);
+        return new ExistingIntegrationInspection(
+            !hadManagedBlock && ContainsExistingIntegration(withoutManaged),
+            snapshot,
+            original);
+    }
+
+    internal ManagedFileResult PreserveExistingUnmanagedIntegration(
+        ProductPaths paths,
+        ExistingIntegrationInspection expected)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(expected);
+        var current = InspectExistingUnmanagedIntegration(paths);
+        if (!expected.ShouldPreserve
+            || !current.ShouldPreserve
+            || !string.Equals(
+                current.Snapshot.SourceSha256,
+                expected.Snapshot.SourceSha256,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Codex config.toml changed after the existing integration preservation check. No update was applied; review the current file and retry.");
+        }
+
+        return PreservedExistingResult(paths);
+    }
+
     public ManagedFileResult InstallOrRepair(
         ProductPaths paths,
         bool enabled,
         Func<string, bool>? startupValidator = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        var originalExists = File.Exists(paths.CodexConfigFile);
-        var originalBytes = originalExists ? File.ReadAllBytes(paths.CodexConfigFile) : [];
-        var original = originalExists ? File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8) : string.Empty;
-        ValidateToml(original, allowEmpty: true);
+        var inspection = InspectExistingUnmanagedIntegration(paths);
+        var originalExists = inspection.Snapshot.Exists;
+        var original = inspection.Content;
 
         var withoutManaged = RemoveManagedBlock(original, out var hadManagedBlock);
-        if (!hadManagedBlock && ContainsExistingIntegration(withoutManaged))
+        if (inspection.ShouldPreserve)
         {
-            return new ManagedFileResult(
-                paths.CodexConfigFile,
-                false,
-                false,
-                null,
-                "preserved-existing-unmanaged",
-                "An existing unmarked mcp_servers.local_gpu_reviewer table was preserved byte-for-byte. No duplicate TOML table was added, and this helper did not activate or reconfigure that integration.");
+            return PreservedExistingResult(paths);
         }
 
         var managed = BuildManagedBlock(paths, enabled);
@@ -40,14 +73,35 @@ public sealed partial class CodexConfigManager
         }
 
         Directory.CreateDirectory(paths.CodexHome);
-        var backup = originalExists ? CreateBackup(paths.CodexConfigFile) : null;
+        var backup = originalExists
+            ? ProtectedFileTransaction.CreateBackup(paths.CodexConfigFile, inspection.Snapshot)
+            : null;
+        var appliedBytes = new UTF8Encoding(false).GetBytes(merged);
+        var replaced = false;
         try
         {
-            WriteAtomic(paths.CodexConfigFile, merged);
-            ValidateToml(File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8), allowEmpty: false);
+            ProtectedFileTransaction.ReplaceIfUnchanged(
+                paths.CodexConfigFile,
+                inspection.Snapshot,
+                appliedBytes);
+            replaced = true;
+            var written = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+            if (!written.Bytes.AsSpan().SequenceEqual(appliedBytes))
+            {
+                throw new InvalidOperationException("Codex config.toml changed immediately after the helper update.");
+            }
+
+            ValidateToml(ProtectedFileTransaction.DecodeUtf8(written), allowEmpty: false);
             if (startupValidator is not null && !startupValidator(paths.CodexHome))
             {
                 throw new InvalidOperationException("A fresh Codex process rejected the managed MCP configuration.");
+            }
+
+            if (!ProtectedFileTransaction.Matches(
+                    paths.CodexConfigFile,
+                    new ProtectedFileSnapshot(true, appliedBytes, string.Empty)))
+            {
+                throw new InvalidOperationException("Codex config.toml changed during post-write validation.");
             }
 
             return new ManagedFileResult(
@@ -55,11 +109,24 @@ public sealed partial class CodexConfigManager
                 !originalExists,
                 true,
                 backup,
-                hadManagedBlock ? "updated" : "installed");
+                hadManagedBlock ? "updated" : "installed")
+            {
+                AppliedBytes = appliedBytes
+            };
         }
-        catch
+        catch (Exception exception)
         {
-            RestoreOriginal(paths.CodexConfigFile, originalExists, originalBytes);
+            if (replaced
+                && !ProtectedFileTransaction.TryRestoreIfUnchanged(
+                    paths.CodexConfigFile,
+                    appliedBytes,
+                    inspection.Snapshot))
+            {
+                throw new IOException(
+                    "Codex config.toml changed after the helper update. The newer bytes were preserved; use the timestamped backup and current-file diff for manual review.",
+                    exception);
+            }
+
             throw;
         }
     }
@@ -67,13 +134,13 @@ public sealed partial class CodexConfigManager
     public ManagedFileResult SetEnabled(ProductPaths paths, bool enabled)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        if (!File.Exists(paths.CodexConfigFile))
+        var snapshot = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+        if (!snapshot.Exists)
         {
             throw new FileNotFoundException("Codex config.toml was not found.", paths.CodexConfigFile);
         }
 
-        var originalBytes = File.ReadAllBytes(paths.CodexConfigFile);
-        var original = File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8);
+        var original = ProtectedFileTransaction.DecodeUtf8(snapshot);
         ValidateToml(original, allowEmpty: false);
         var start = original.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
         var end = original.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
@@ -92,15 +159,36 @@ public sealed partial class CodexConfigManager
 
         var updated = original[..start] + updatedBlock + original[blockEnd..];
         ValidateToml(updated, allowEmpty: false);
-        var backup = CreateBackup(paths.CodexConfigFile);
+        var backup = ProtectedFileTransaction.CreateBackup(paths.CodexConfigFile, snapshot);
+        var appliedBytes = EncodeUtf8PreservingPreamble(updated, snapshot.Bytes);
+        var replaced = false;
         try
         {
-            WriteAtomic(paths.CodexConfigFile, updated);
-            return new ManagedFileResult(paths.CodexConfigFile, false, true, backup, enabled ? "enabled" : "disabled");
+            ProtectedFileTransaction.ReplaceIfUnchanged(paths.CodexConfigFile, snapshot, appliedBytes);
+            replaced = true;
+            return new ManagedFileResult(
+                paths.CodexConfigFile,
+                false,
+                true,
+                backup,
+                enabled ? "enabled" : "disabled")
+            {
+                AppliedBytes = appliedBytes
+            };
         }
-        catch
+        catch (Exception exception)
         {
-            WriteAtomic(paths.CodexConfigFile, originalBytes);
+            if (replaced
+                && !ProtectedFileTransaction.TryRestoreIfUnchanged(
+                    paths.CodexConfigFile,
+                    appliedBytes,
+                    snapshot))
+            {
+                throw new IOException(
+                    "Codex config.toml changed after the helper control update. The newer bytes were preserved for manual review.",
+                    exception);
+            }
+
             throw;
         }
     }
@@ -111,13 +199,14 @@ public sealed partial class CodexConfigManager
         bool fileWasCreatedByProduct = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        if (!File.Exists(paths.CodexConfigFile))
+        var snapshot = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+        if (!snapshot.Exists)
         {
             return new ManagedFileResult(paths.CodexConfigFile, false, false, null, "not-present");
         }
 
-        var originalBytes = File.ReadAllBytes(paths.CodexConfigFile);
-        var original = File.ReadAllText(paths.CodexConfigFile, Encoding.UTF8);
+        var originalBytes = snapshot.Bytes;
+        var original = ProtectedFileTransaction.DecodeUtf8(snapshot);
         ValidateToml(original, allowEmpty: true);
         var updated = RemoveManagedBlock(original, out var removed);
         if (!removed)
@@ -126,7 +215,9 @@ public sealed partial class CodexConfigManager
         }
 
         ValidateToml(updated, allowEmpty: true);
-        var backup = CreateBackup(paths.CodexConfigFile);
+        var backup = ProtectedFileTransaction.CreateBackup(paths.CodexConfigFile, snapshot);
+        byte[]? appliedBytes = null;
+        var replaced = false;
         try
         {
             if (TryGetExactOriginalBytes(
@@ -136,33 +227,50 @@ public sealed partial class CodexConfigManager
                     original,
                     out var exactOriginalBytes))
             {
-                WriteAtomic(paths.CodexConfigFile, exactOriginalBytes);
+                appliedBytes = exactOriginalBytes;
+                ProtectedFileTransaction.ReplaceIfUnchanged(paths.CodexConfigFile, snapshot, appliedBytes);
+                replaced = true;
                 return new ManagedFileResult(
                     paths.CodexConfigFile,
                     false,
                     true,
                     backup,
-                    "restored-exact-original");
+                    "restored-exact-original")
+                {
+                    AppliedBytes = appliedBytes
+                };
             }
 
             if (fileWasCreatedByProduct
                 && string.IsNullOrWhiteSpace(updated)
                 && IsExactProductManagedRepresentation(originalBytes, original, string.Empty))
             {
-                File.Delete(paths.CodexConfigFile);
-            }
-            else
-            {
-                WriteAtomic(
-                    paths.CodexConfigFile,
-                    EncodeUtf8PreservingPreamble(updated, originalBytes));
+                ProtectedFileTransaction.DeleteIfUnchanged(paths.CodexConfigFile, snapshot);
+                return new ManagedFileResult(paths.CodexConfigFile, false, true, backup, "removed-product-file");
             }
 
-            return new ManagedFileResult(paths.CodexConfigFile, false, true, backup, "removed");
+            appliedBytes = EncodeUtf8PreservingPreamble(updated, originalBytes);
+            ProtectedFileTransaction.ReplaceIfUnchanged(paths.CodexConfigFile, snapshot, appliedBytes);
+            replaced = true;
+            return new ManagedFileResult(paths.CodexConfigFile, false, true, backup, "removed")
+            {
+                AppliedBytes = appliedBytes
+            };
         }
-        catch
+        catch (Exception exception)
         {
-            WriteAtomic(paths.CodexConfigFile, originalBytes);
+            if (replaced
+                && appliedBytes is not null
+                && !ProtectedFileTransaction.TryRestoreIfUnchanged(
+                    paths.CodexConfigFile,
+                    appliedBytes,
+                    snapshot))
+            {
+                throw new IOException(
+                    "Codex config.toml changed during uninstall. The newer bytes were preserved for manual review.",
+                    exception);
+            }
+
             throw;
         }
     }
@@ -175,22 +283,30 @@ public sealed partial class CodexConfigManager
             return;
         }
 
-        if (result.Created)
+        if (result.AppliedBytes is null)
         {
-            if (File.Exists(result.Path))
-            {
-                File.Delete(result.Path);
-            }
-
-            return;
+            throw new InvalidOperationException("The exact helper-produced bytes required for guarded rollback are unavailable.");
         }
 
-        if (string.IsNullOrWhiteSpace(result.BackupPath) || !File.Exists(result.BackupPath))
+        ProtectedFileSnapshot original;
+        if (result.Created)
+        {
+            original = new ProtectedFileSnapshot(false, [], "MISSING");
+        }
+        else if (string.IsNullOrWhiteSpace(result.BackupPath) || !File.Exists(result.BackupPath))
         {
             throw new InvalidOperationException("The exact Codex configuration backup required for rollback is unavailable.");
         }
+        else
+        {
+            original = ProtectedFileTransaction.Capture(result.BackupPath);
+        }
 
-        WriteAtomic(result.Path, File.ReadAllBytes(result.BackupPath));
+        if (!ProtectedFileTransaction.TryRestoreIfUnchanged(result.Path, result.AppliedBytes, original))
+        {
+            throw new InvalidOperationException(
+                "Codex config.toml changed after the helper update. Rollback left the newer bytes untouched; review the current file and timestamped backup manually.");
+        }
     }
 
     public static void ValidateToml(string content, bool allowEmpty)
@@ -281,38 +397,6 @@ public sealed partial class CodexConfigManager
     private static string EscapeTomlBasicString(string value)
         => value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
-    private static string CreateBackup(string path)
-    {
-        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
-        var backup = $"{path}.thalen-helper.{timestamp}.bak";
-        File.Copy(path, backup, false);
-        return backup;
-    }
-
-    private static void RestoreOriginal(string path, bool existed, byte[] content)
-    {
-        if (existed)
-        {
-            WriteAtomic(path, content);
-        }
-        else if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-    }
-
-    private static void WriteAtomic(string path, string content)
-        => WriteAtomic(path, new UTF8Encoding(false).GetBytes(content));
-
-    private static void WriteAtomic(string path, byte[] content)
-    {
-        var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Managed path has no directory.");
-        Directory.CreateDirectory(directory);
-        var temporary = path + ".tmp";
-        File.WriteAllBytes(temporary, content);
-        File.Move(temporary, path, true);
-    }
-
     private static bool ContainsExistingIntegration(string content)
     {
         if (string.IsNullOrWhiteSpace(content))
@@ -328,6 +412,15 @@ public sealed partial class CodexConfigManager
             && reviewerValue is TomlTable;
     }
 
+    private static ManagedFileResult PreservedExistingResult(ProductPaths paths)
+        => new(
+            paths.CodexConfigFile,
+            false,
+            false,
+            null,
+            "preserved-existing-unmanaged",
+            "An existing unmarked mcp_servers.local_gpu_reviewer table was preserved byte-for-byte. No duplicate TOML table was added, and this helper did not activate or reconfigure that integration.");
+
     private static bool TryGetExactOriginalBytes(
         string target,
         string? originalBackupPath,
@@ -341,7 +434,13 @@ public sealed partial class CodexConfigManager
             return false;
         }
 
-        var original = File.ReadAllText(originalBackupPath!, Encoding.UTF8);
+        var backupSnapshot = ProtectedFileTransaction.Capture(originalBackupPath!);
+        if (!backupSnapshot.Exists)
+        {
+            return false;
+        }
+
+        var original = ProtectedFileTransaction.DecodeUtf8(backupSnapshot);
         ValidateToml(original, allowEmpty: true);
         if (original.Contains(ProductInfo.ManagedConfigStart, StringComparison.Ordinal)
             || original.Contains(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal))
@@ -354,7 +453,7 @@ public sealed partial class CodexConfigManager
             return false;
         }
 
-        exactOriginalBytes = File.ReadAllBytes(originalBackupPath!);
+        exactOriginalBytes = backupSnapshot.Bytes;
         return true;
     }
 

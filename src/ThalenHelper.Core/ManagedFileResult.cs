@@ -6,4 +6,7 @@ public sealed record ManagedFileResult(
     bool Changed,
     string? BackupPath,
     string Operation,
-    string? Warning = null);
+    string? Warning = null)
+{
+    internal byte[]? AppliedBytes { get; init; }
+}

@@ -71,6 +71,28 @@ public sealed class ManagedFilesTests
     }
 
     [Fact]
+    public void CodexConfigConcurrentPostWriteEditIsNeverOverwrittenByRollback()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = Encoding.UTF8.GetBytes("model = \"before\"\r\n");
+        var concurrent = Encoding.UTF8.GetBytes("model = \"concurrent-user-edit\"\r\n# keep this\r\n");
+        File.WriteAllBytes(paths.CodexConfigFile, original);
+
+        var exception = Assert.Throws<IOException>(() =>
+            new CodexConfigManager().InstallOrRepair(paths, enabled: true, _ =>
+            {
+                File.WriteAllBytes(paths.CodexConfigFile, concurrent);
+                return false;
+            }));
+
+        Assert.Contains("newer bytes were preserved", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(concurrent, File.ReadAllBytes(paths.CodexConfigFile));
+        var backup = Directory.GetFiles(paths.CodexHome, "config.toml.thalen-helper.*.bak").Single();
+        Assert.Equal(original, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
     public void CodexConfigRefusesMalformedAndUnmanagedCollisions()
     {
         using var temporary = new TemporaryDirectory();
@@ -352,6 +374,30 @@ public sealed class ManagedFilesTests
             postWriteValidator: _ => false));
 
         Assert.Equal(original, File.ReadAllBytes(paths.AgentsOverrideFile));
+        var backup = Directory.GetFiles(paths.CodexHome, "AGENTS.override.md.thalen-helper.*.bak").Single();
+        Assert.Equal(original, File.ReadAllBytes(backup));
+    }
+
+    [Fact]
+    public void AgentsConcurrentPostWriteEditIsNeverOverwrittenByRollback()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = Encoding.UTF8.GetBytes("# Before\r\n");
+        var concurrent = Encoding.UTF8.GetBytes("# Concurrent user instructions\r\nKeep this exact text.\r\n");
+        File.WriteAllBytes(paths.AgentsOverrideFile, original);
+
+        var exception = Assert.Throws<IOException>(() => new AgentsOverrideManager().InstallOrRepair(
+            paths,
+            HardwareTier.Entry,
+            postWriteValidator: path =>
+            {
+                File.WriteAllBytes(path, concurrent);
+                return false;
+            }));
+
+        Assert.Contains("newer bytes were preserved", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(concurrent, File.ReadAllBytes(paths.AgentsOverrideFile));
         var backup = Directory.GetFiles(paths.CodexHome, "AGENTS.override.md.thalen-helper.*.bak").Single();
         Assert.Equal(original, File.ReadAllBytes(backup));
     }
