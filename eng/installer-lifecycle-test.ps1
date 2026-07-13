@@ -157,8 +157,15 @@ if ($installProcess.ExitCode -ne 0) { throw "Silent package install failed: $($i
 foreach ($name in @('thalen-helper.exe', 'local-gpu-reviewer.exe', 'ThalenHelper.ControlCenter.exe', 'README.md', 'LICENSE')) {
     if (-not (Test-Path -LiteralPath (Join-Path $install $name))) { throw "Installed file missing: $name" }
 }
-$versionJson = & (Join-Path $install 'thalen-helper.exe') version
-if ($LASTEXITCODE -ne 0 -or $versionJson -notmatch [regex]::Escape($ExpectedVersion)) { throw 'Installed CLI version check failed.' }
+$versionOutput = & (Join-Path $install 'thalen-helper.exe') version
+if ($LASTEXITCODE -ne 0) { throw 'Installed CLI version command failed.' }
+try {
+    $versionJson = ($versionOutput -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+}
+catch {
+    throw 'Installed CLI version output was not valid JSON.'
+}
+if ($versionJson.version -cne $ExpectedVersion) { throw 'Installed CLI version check failed.' }
 
 $uninstaller = Join-Path $install 'unins000.exe'
 if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Inno uninstaller was not installed.' }
