@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# The repository must also enforce an active tag ruleset that restricts creation,
+# update, and deletion of v* tags. Workflow checks are defense in depth because
+# a tag-triggered run uses the workflow version at the tagged commit.
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'rennavationstudios-bit/codex-gpu-thalen-helper'
+    runs-on: windows-2025
+    environment: release
+    timeout-minutes: 60
+    env:
+      EXPECTED_REPOSITORY: rennavationstudios-bit/codex-gpu-thalen-helper
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - name: Validate trusted release event
+        id: release_context
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne $env:EXPECTED_REPOSITORY) {
+            throw "Release repository mismatch: $($env:GITHUB_REPOSITORY)"
+          }
+          if ($env:GITHUB_REF_TYPE -cne 'tag' -or $env:GITHUB_REF -cne "refs/tags/$($env:RELEASE_TAG)") {
+            throw 'Release workflow requires an exact tag ref.'
+          }
+          if ($env:RELEASE_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Release event did not provide a full commit SHA.'
+          }
+          if ($env:RELEASE_TAG -cnotmatch '^v(?<version>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.(0|[1-9][0-9]*))$') {
+            throw 'Unsigned releases require a v<major>.<minor>.<patch>-beta.<number> tag.'
+          }
+          "version=$($Matches['version'])" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Check out exact release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify tag commit is on main
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & git fetch --no-tags --force origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch the protected main branch.' }
+
+          $headCommit = (& git rev-parse --verify 'HEAD^{commit}').Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the checked-out commit.' }
+          $tagRef = "refs/tags/$($env:RELEASE_TAG)"
+          $tagCommit = (& git rev-parse --verify "$tagRef^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to resolve the release tag to a commit.' }
+
+          if ($headCommit -cne $env:RELEASE_SHA -or $tagCommit -cne $env:RELEASE_SHA) {
+            throw 'The checked-out commit, peeled tag commit, and release event SHA do not match.'
+          }
+          & git merge-base --is-ancestor $headCommit refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Release tag commit is not reachable from main.' }
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Install verified packaging tools locally
+        shell: pwsh
+        run: ./eng/bootstrap-release-tools.ps1
+
+      - name: Run release audit, package, and disposable lifecycle
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release_context.outputs.version }}
+          THALEN_HELPER_ALLOW_INSTALLER_LIFECYCLE: '1'
+        run: ./eng/release-audit.ps1 -Version $env:RELEASE_VERSION -RunInstallerLifecycle
+
+      - name: Attest release artifacts
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: .artifacts/release/SHA256SUMS.txt
+
+      - name: Publish unsigned beta release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release_context.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE '.artifacts\release'
+          $assetNames = @(
+            'Codex-GPU-Thalen-Helper-Setup.exe'
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-win-x64-portable.zip"
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-sbom.zip"
+            'SHA256SUMS.txt'
+            'SIGNING_STATUS.txt'
+          )
+          $assetPaths = @($assetNames | ForEach-Object {
+            $path = Join-Path $releaseDirectory $_
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Release asset missing: $_" }
+            $path
+          })
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "docs\release-notes-v$($env:RELEASE_VERSION).md"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) { throw 'Versioned release notes are missing.' }
+
+          & gh release create $env:RELEASE_TAG @assetPaths `
+            --repo $env:EXPECTED_REPOSITORY `
+            --title "Codex GPU Thalen Helper $($env:RELEASE_TAG)" `
+            --notes-file $notesPath `
+            --verify-tag `
+            --prerelease `
+            --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release creation failed.' }
+
+      - name: Verify published release and attestations
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release_context.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedAssets = @(
+            'Codex-GPU-Thalen-Helper-Setup.exe'
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-win-x64-portable.zip"
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-sbom.zip"
+            'SHA256SUMS.txt'
+            'SIGNING_STATUS.txt'
+          ) | Sort-Object
+          $releaseJson = & gh release view $env:RELEASE_TAG --repo $env:EXPECTED_REPOSITORY --json tagName,isPrerelease,assets,url
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read the published GitHub release.' }
+          $published = $releaseJson | ConvertFrom-Json
+          if ($published.tagName -cne $env:RELEASE_TAG -or -not $published.isPrerelease) {
+            throw 'Published release tag or prerelease status is incorrect.'
+          }
+          $actualAssets = @($published.assets | ForEach-Object {
+            if ($_.size -le 0) { throw "Published release asset is empty: $($_.name)" }
+            $_.name
+          } | Sort-Object)
+          $assetDifference = @(Compare-Object -ReferenceObject $expectedAssets -DifferenceObject $actualAssets)
+          if ($assetDifference.Count -ne 0) {
+            throw 'Published release asset set does not match the audited package set.'
+          }
+
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE '.artifacts\release'
+          foreach ($name in $expectedAssets | Where-Object { $_ -notin @('SHA256SUMS.txt') }) {
+            & gh attestation verify (Join-Path $releaseDirectory $name) --repo $env:EXPECTED_REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw "Artifact attestation verification failed: $name" }
+          }
+          Write-Host "Published and verified $($published.url)"

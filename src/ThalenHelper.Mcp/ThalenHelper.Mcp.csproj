@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>local-gpu-reviewer</AssemblyName>
+    <RootNamespace>ThalenHelper.Mcp</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ThalenHelper.Core/ThalenHelper.Core.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="ModelContextProtocol" />
+  </ItemGroup>
+</Project>

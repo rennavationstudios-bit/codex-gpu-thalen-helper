@@ -1,0 +1,56 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          languages: csharp
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+      - name: Restore and build
+        run: |
+          dotnet restore CodexGpuThalenHelper.slnx --locked-mode
+          dotnet build CodexGpuThalenHelper.slnx --configuration Release --no-restore
+      - name: Analyze
+        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+
+  dependency-audit:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+      - name: Restore locked dependencies
+        run: dotnet restore CodexGpuThalenHelper.slnx --locked-mode
+      - name: Fail on vulnerable NuGet packages
+        shell: pwsh
+        run: ./eng/nuget-audit.ps1
+      - name: Run privacy and secret-pattern scan
+        shell: pwsh
+        run: ./eng/privacy-scan.ps1

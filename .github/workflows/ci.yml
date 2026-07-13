@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore locked dependencies
+        run: dotnet restore CodexGpuThalenHelper.slnx --locked-mode
+
+      - name: Verify formatting
+        run: dotnet format CodexGpuThalenHelper.slnx --no-restore --verify-no-changes --verbosity minimal
+
+      - name: Build Release
+        run: dotnet build CodexGpuThalenHelper.slnx --configuration Release --no-restore
+
+      - name: Run isolated tests
+        shell: pwsh
+        run: ./eng/test.ps1 -Configuration Release -LockedMode -Coverage
+
+      - name: Run privacy and secret-pattern scan
+        shell: pwsh
+        run: ./eng/privacy-scan.ps1
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results
+          path: .test-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  package-lifecycle:
+    needs: build-test
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Install verified packaging tools locally
+        shell: pwsh
+        run: ./eng/bootstrap-release-tools.ps1
+
+      - name: Build packages in isolated test directories
+        shell: pwsh
+        run: ./eng/package.ps1
+
+      - name: Exercise installer only on the disposable runner
+        shell: pwsh
+        env:
+          THALEN_HELPER_ALLOW_INSTALLER_LIFECYCLE: '1'
+        run: |
+          if ($env:GITHUB_ACTIONS -cne 'true' -or
+              $env:CI -cne 'true' -or
+              $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+              $env:THALEN_HELPER_ALLOW_INSTALLER_LIFECYCLE -cne '1' -or
+              [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'Installer lifecycle execution requires an explicitly authorized disposable GitHub-hosted runner.'
+          }
+          ./eng/installer-lifecycle-test.ps1
+
+      - name: Upload package evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-beta-packages
+          path: .artifacts/release
+          if-no-files-found: error
+          retention-days: 7

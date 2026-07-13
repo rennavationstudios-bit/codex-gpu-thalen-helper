@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="System.Management" />
+    <PackageReference Include="Tomlyn" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../model-catalog/models.v1.json" Link="model-catalog/models.v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../templates/AGENTS.override.md" Link="templates/AGENTS.override.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

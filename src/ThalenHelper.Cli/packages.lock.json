@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0-windows10.0.19041": {
+      "System.CodeDom": {
+        "type": "Transitive",
+        "resolved": "10.0.9",
+        "contentHash": "scH7O8oAuOMyZKOEiOQB3ZVz6x9XkrZNKNeWVCxdvkJHSy4SYXyinGK0o2Rn5LiGh+ovezziT2WCdqWKa7WMKA=="
+      },
+      "thalenhelper.core": {
+        "type": "Project",
+        "dependencies": {
+          "System.Management": "[10.0.9, )",
+          "Tomlyn": "[2.10.1, )"
+        }
+      },
+      "System.Management": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.9, )",
+        "resolved": "10.0.9",
+        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw==",
+        "dependencies": {
+          "System.CodeDom": "10.0.9"
+        }
+      },
+      "Tomlyn": {
+        "type": "CentralTransitive",
+        "requested": "[2.10.1, )",
+        "resolved": "2.10.1",
+        "contentHash": "ykjOY3IpYmC4SpPcAZRTl/w2jTmhPMDydHq8xcV7tTBAQ22nKBsOkPqauIrZlMjHm03cmKfV23UOPscKp+J4Og=="
+      }
+    },
+    "net10.0-windows10.0.19041/win-x64": {
+      "System.Management": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.9, )",
+        "resolved": "10.0.9",
+        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw==",
+        "dependencies": {
+          "System.CodeDom": "10.0.9"
+        }
+      }
+    }
+  }
+}

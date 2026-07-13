@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ThalenHelper.Core/ThalenHelper.Core.csproj" />
+    <Project Path="src/ThalenHelper.Cli/ThalenHelper.Cli.csproj" />
+    <Project Path="src/ThalenHelper.Mcp/ThalenHelper.Mcp.csproj" />
+    <Project Path="src/ThalenHelper.ControlCenter/ThalenHelper.ControlCenter.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ThalenHelper.Tests/ThalenHelper.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,26 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>low</NuGetAuditLevel>
+    <DebugType>embedded</DebugType>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionSuffix>beta.1</VersionSuffix>
+    <Authors>Codex GPU Thalen Helper contributors</Authors>
+    <Company>Codex GPU Thalen Helper contributors</Company>
+    <Product>Codex GPU Thalen Helper</Product>
+    <RepositoryUrl>https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Copyright>Copyright (c) 2026 Codex GPU Thalen Helper contributors</Copyright>
+  </PropertyGroup>
+</Project>

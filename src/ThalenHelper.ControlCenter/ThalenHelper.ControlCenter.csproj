@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>ThalenHelper.ControlCenter</AssemblyName>
+    <RootNamespace>ThalenHelper.ControlCenter</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ThalenHelper.Core/ThalenHelper.Core.csproj" />
+  </ItemGroup>
+</Project>

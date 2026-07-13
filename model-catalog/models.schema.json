@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper/model-catalog/models.schema.json",
+  "title": "Codex GPU Thalen Helper model catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "catalogVersion", "verifiedOn", "models"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "catalogVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "verifiedOn": { "type": "string", "format": "date" },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider", "tag", "expectedDownloadBytes", "family", "parameterBillions",
+          "intendedTasks", "minimumDedicatedVramGiB", "recommendedDedicatedVramGiB",
+          "minimumSystemRamGiB", "recommendedSystemRamGiB", "minimumFreeDiskGiB",
+          "safeDefaultContextTokens", "maximumContextTokens", "performanceTier",
+          "cpuFallbackReasonable", "automaticSelectionAllowed", "licenseName", "licenseUrl",
+          "commercialUseAllowed", "sourceUrl", "verifiedOn"
+        ],
+        "properties": {
+          "provider": { "const": "Ollama" },
+          "tag": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*:[a-z0-9][a-z0-9._-]*$" },
+          "expectedDigest": { "type": ["string", "null"], "pattern": "^[a-f0-9]{12,64}$" },
+          "expectedDownloadBytes": { "type": "integer", "minimum": 1 },
+          "family": { "type": "string", "minLength": 1 },
+          "parameterBillions": { "type": "number", "exclusiveMinimum": 0 },
+          "intendedTasks": { "type": "string", "minLength": 1 },
+          "minimumDedicatedVramGiB": { "type": "number", "minimum": 0 },
+          "recommendedDedicatedVramGiB": { "type": "number", "minimum": 0 },
+          "minimumSystemRamGiB": { "type": "number", "minimum": 1 },
+          "recommendedSystemRamGiB": { "type": "number", "minimum": 1 },
+          "minimumFreeDiskGiB": { "type": "number", "minimum": 1 },
+          "safeDefaultContextTokens": { "type": "integer", "minimum": 512 },
+          "maximumContextTokens": { "type": "integer", "minimum": 512 },
+          "performanceTier": { "enum": ["entry", "mid", "high", "enthusiast"] },
+          "cpuFallbackReasonable": { "type": "boolean" },
+          "automaticSelectionAllowed": { "type": "boolean" },
+          "licenseName": { "type": "string", "minLength": 1 },
+          "licenseUrl": { "type": "string", "format": "uri" },
+          "commercialUseAllowed": { "type": "boolean" },
+          "sourceUrl": { "type": "string", "format": "uri" },
+          "verifiedOn": { "type": "string", "format": "date" }
+        }
+      }
+    }
+  }
+}

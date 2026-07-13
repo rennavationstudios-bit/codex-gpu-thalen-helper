@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>thalen-helper</AssemblyName>
+    <RootNamespace>ThalenHelper.Cli</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ThalenHelper.Core/ThalenHelper.Core.csproj" />
+  </ItemGroup>
+</Project>
