@@ -16,11 +16,12 @@ public sealed class AgentsOverrideManager
     public AgentsOverridePreview PreviewInstall(
         ProductPaths paths,
         HardwareTier tier,
-        bool installReliabilityBaseline)
+        bool installReliabilityBaseline,
+        bool installLocalGpuGuidance = true)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var snapshot = ReadSnapshot(paths.AgentsOverrideFile);
-        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline);
+        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline, installLocalGpuGuidance);
         return new AgentsOverridePreview(
             BuildDiff(snapshot.Content, plan.Merged),
             !string.Equals(snapshot.Content, plan.Merged, StringComparison.Ordinal),
@@ -36,11 +37,12 @@ public sealed class AgentsOverrideManager
         bool installReliabilityBaseline = false,
         string? expectedSourceSha256 = null,
         string? expectedPlannedSha256 = null,
-        Func<string, bool>? postWriteValidator = null)
+        Func<string, bool>? postWriteValidator = null,
+        bool installLocalGpuGuidance = true)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var snapshot = ReadSnapshot(paths.AgentsOverrideFile);
-        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline);
+        var plan = BuildPlan(snapshot.Content, tier, installReliabilityBaseline, installLocalGpuGuidance);
         ValidatePreviewBinding(snapshot, plan.Merged, expectedSourceSha256, expectedPlannedSha256);
         if (string.Equals(snapshot.Content, plan.Merged, StringComparison.Ordinal))
         {
@@ -220,7 +222,11 @@ public sealed class AgentsOverrideManager
         => content.Contains(ProductInfo.ManagedReliabilityStart, StringComparison.Ordinal)
             && content.Contains(ProductInfo.ManagedReliabilityEnd, StringComparison.Ordinal);
 
-    private static MergePlan BuildPlan(string original, HardwareTier tier, bool installReliabilityBaseline)
+    private static MergePlan BuildPlan(
+        string original,
+        HardwareTier tier,
+        bool installReliabilityBaseline,
+        bool installLocalGpuGuidance)
     {
         ValidateAllMarkers(original);
         var localTemplate = ReadTemplate("AGENTS.local-gpu-reviewer.md")
@@ -239,10 +245,11 @@ public sealed class AgentsOverrideManager
             ProductInfo.ManagedReliabilityStart,
             ProductInfo.ManagedReliabilityEnd,
             out var hadReliability);
-        var preserveExisting = !hadLocalGpu
+        var preserveExisting = installLocalGpuGuidance
+            && !hadLocalGpu
             && baseContent.Contains(ProductInfo.IntegrationName, StringComparison.OrdinalIgnoreCase);
         var merged = baseContent;
-        if (!preserveExisting)
+        if (installLocalGpuGuidance && !preserveExisting)
         {
             merged = AppendManagedSection(merged, ExtractManagedSection(
                 localTemplate,
@@ -258,7 +265,10 @@ public sealed class AgentsOverrideManager
                 ProductInfo.ManagedReliabilityEnd));
         }
 
-        var preserveExactBytes = preserveExisting && !installReliabilityBaseline && !hadLocalGpu && !hadReliability;
+        var preserveExactBytes = !installReliabilityBaseline
+            && !hadLocalGpu
+            && !hadReliability
+            && (preserveExisting || !installLocalGpuGuidance);
         if (preserveExactBytes)
         {
             merged = original;

@@ -7,6 +7,397 @@ namespace ThalenHelper.Tests;
 public sealed class LifecycleTests
 {
     [Fact]
+    public async Task ConfigureRejectsCodexHomeMismatchBeforeAnyTargetStateOrContextMutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var originalConfig = Encoding.UTF8.GetBytes("model = \"preserve-original\"\r\n");
+        var originalAgents = Encoding.UTF8.GetBytes("# Preserve original instructions\r\n");
+        await File.WriteAllBytesAsync(paths.CodexConfigFile, originalConfig);
+        await File.WriteAllBytesAsync(paths.AgentsOverrideFile, originalAgents);
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            HardwareTier = HardwareTier.NoModel,
+            Availability = HelperAvailability.Disabled
+        });
+        InstallContextStore.Save(paths);
+
+        var differentCodexHome = Path.Combine(temporary.Path, "Different configure Codex home");
+        Directory.CreateDirectory(differentCodexHome);
+        var mismatchedPaths = ProductPaths.Resolve(paths.InstallDirectory, paths.StateDirectory, differentCodexHome);
+        var differentConfig = Encoding.UTF8.GetBytes("model = \"preserve-different\"\r\n");
+        var differentAgents = Encoding.UTF8.GetBytes("# Preserve different instructions\r\n");
+        await File.WriteAllBytesAsync(mismatchedPaths.CodexConfigFile, differentConfig);
+        await File.WriteAllBytesAsync(mismatchedPaths.AgentsOverrideFile, differentAgents);
+        var contextPath = InstallContextStore.GetPath(paths.InstallDirectory);
+        var contextBefore = await File.ReadAllBytesAsync(contextPath);
+        var stateBefore = await File.ReadAllBytesAsync(paths.StateFile);
+        var manager = new InstallationManager(hardwareProvider: () =>
+            throw new InvalidOperationException("Hardware inspection must not run after a route mismatch."));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ConfigureAsync(
+            new InstallationOptions(mismatchedPaths, DeferModelSelection: true)));
+
+        Assert.Contains("does not match", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(contextBefore, await File.ReadAllBytesAsync(contextPath));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(paths.StateFile));
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(differentConfig, await File.ReadAllBytesAsync(mismatchedPaths.CodexConfigFile));
+        Assert.Equal(differentAgents, await File.ReadAllBytesAsync(mismatchedPaths.AgentsOverrideFile));
+        Assert.False(File.Exists(contextPath + ".tmp"));
+        Assert.False(File.Exists(paths.StateFile + ".tmp"));
+    }
+
+    [Fact]
+    public async Task ReliabilityBaselineRejectsCodexHomeMismatchBeforeAnyTargetStateOrContextMutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var originalConfig = Encoding.UTF8.GetBytes("model = \"preserve-original\"\r\n");
+        var originalAgents = Encoding.UTF8.GetBytes("# Preserve original instructions\r\n");
+        await File.WriteAllBytesAsync(paths.CodexConfigFile, originalConfig);
+        await File.WriteAllBytesAsync(paths.AgentsOverrideFile, originalAgents);
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            ManagedCodexHome = paths.CodexHome,
+            HardwareTier = HardwareTier.NoModel,
+            Availability = HelperAvailability.Disabled
+        });
+        InstallContextStore.Save(paths);
+
+        var differentCodexHome = Path.Combine(temporary.Path, "Different baseline Codex home");
+        Directory.CreateDirectory(differentCodexHome);
+        var mismatchedPaths = ProductPaths.Resolve(paths.InstallDirectory, paths.StateDirectory, differentCodexHome);
+        var differentConfig = Encoding.UTF8.GetBytes("model = \"preserve-different\"\r\n");
+        var differentAgents = Encoding.UTF8.GetBytes("# Preserve different instructions\r\n");
+        await File.WriteAllBytesAsync(mismatchedPaths.CodexConfigFile, differentConfig);
+        await File.WriteAllBytesAsync(mismatchedPaths.AgentsOverrideFile, differentAgents);
+        var contextPath = InstallContextStore.GetPath(paths.InstallDirectory);
+        var contextBefore = await File.ReadAllBytesAsync(contextPath);
+        var stateBefore = await File.ReadAllBytesAsync(paths.StateFile);
+        var manager = new InstallationManager();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            manager.ConfigureReliabilityBaselineAsync(mismatchedPaths, true, "unused", "unused"));
+
+        Assert.Contains("does not match", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(contextBefore, await File.ReadAllBytesAsync(contextPath));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(paths.StateFile));
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(differentConfig, await File.ReadAllBytesAsync(mismatchedPaths.CodexConfigFile));
+        Assert.Equal(differentAgents, await File.ReadAllBytesAsync(mismatchedPaths.AgentsOverrideFile));
+        Assert.False(File.Exists(contextPath + ".tmp"));
+        Assert.False(File.Exists(paths.StateFile + ".tmp"));
+    }
+
+    [Fact]
+    public async Task RepairRejectsCodexHomeMismatchBeforeAnyTargetOrContextMutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var originalConfig = Encoding.UTF8.GetBytes("model = \"preserve-original\"\r\n");
+        var originalAgents = Encoding.UTF8.GetBytes("# Preserve original instructions\r\n");
+        await File.WriteAllBytesAsync(paths.CodexConfigFile, originalConfig);
+        await File.WriteAllBytesAsync(paths.AgentsOverrideFile, originalAgents);
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            ManagedCodexHome = paths.CodexHome,
+            HardwareTier = HardwareTier.NoModel,
+            Availability = HelperAvailability.Disabled
+        });
+        InstallContextStore.Save(paths);
+
+        var differentCodexHome = Path.Combine(temporary.Path, "Different Codex home");
+        Directory.CreateDirectory(differentCodexHome);
+        var mismatchedPaths = ProductPaths.Resolve(
+            paths.InstallDirectory,
+            paths.StateDirectory,
+            differentCodexHome);
+        var differentConfig = Encoding.UTF8.GetBytes("model = \"preserve-different\"\r\n");
+        var differentAgents = Encoding.UTF8.GetBytes("# Preserve different instructions\r\n");
+        await File.WriteAllBytesAsync(mismatchedPaths.CodexConfigFile, differentConfig);
+        await File.WriteAllBytesAsync(mismatchedPaths.AgentsOverrideFile, differentAgents);
+
+        var contextPath = InstallContextStore.GetPath(paths.InstallDirectory);
+        var contextBefore = await File.ReadAllBytesAsync(contextPath);
+        var stateBefore = await File.ReadAllBytesAsync(paths.StateFile);
+        var manager = new InstallationManager(hardwareProvider: () =>
+            throw new InvalidOperationException("Hardware inspection must not run after a route mismatch."));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            manager.RepairAsync(mismatchedPaths, _ =>
+                throw new InvalidOperationException("Codex validation must not run after a route mismatch.")));
+
+        Assert.Contains("does not match", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("No managed files or install context were changed", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(contextBefore, await File.ReadAllBytesAsync(contextPath));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(paths.StateFile));
+        Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(differentConfig, await File.ReadAllBytesAsync(mismatchedPaths.CodexConfigFile));
+        Assert.Equal(differentAgents, await File.ReadAllBytesAsync(mismatchedPaths.AgentsOverrideFile));
+        Assert.False(File.Exists(contextPath + ".tmp"));
+        Assert.False(File.Exists(paths.StateFile + ".tmp"));
+    }
+
+    [Fact]
+    public async Task MatchingRepairRouteRemainsIdempotent()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            ManagedCodexHome = paths.CodexHome,
+            HardwareTier = HardwareTier.NoModel,
+            Availability = HelperAvailability.Disabled
+        });
+        InstallContextStore.Save(paths);
+        var manager = new InstallationManager(hardwareProvider: () => CreateProfile(temporary.Path));
+
+        var first = await manager.RepairAsync(paths, _ => true);
+        var configAfterFirst = await File.ReadAllBytesAsync(paths.CodexConfigFile);
+        var agentsAfterFirst = await File.ReadAllBytesAsync(paths.AgentsOverrideFile);
+        var second = await manager.RepairAsync(paths, _ => true);
+
+        Assert.True(first.Success);
+        Assert.True(second.Success);
+        Assert.False(second.CodexConfig.Changed);
+        Assert.False(second.AgentsOverride.Changed);
+        Assert.Equal(configAfterFirst, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(agentsAfterFirst, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+    }
+
+    [Fact]
+    public async Task GuidedNoFallbackPolicyNeverPullsASecondModelAfterValidationFailure()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var runtime = new FakeOllamaRuntime(models) { FailValidation = true };
+        var autoStart = new OllamaAutoStartManager(
+            runtime.CreateClient,
+            new FakeStartupPlatform { LoopbackOnly = true, Executable = "ollama.exe" });
+        var manager = new InstallationManager(
+            autoStart: autoStart,
+            clientFactory: runtime.CreateClient,
+            hardwareProvider: () => CreateProfile(temporary.Path),
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
+
+        var outcome = await manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            RequestedModel: "qwen2.5-coder:1.5b",
+            RequestedModelDirectory: models,
+            PullAndValidateModel: true,
+            CodexStartupValidator: _ => true,
+            AllowAutomaticModelFallback: false));
+
+        Assert.False(outcome.Success);
+        Assert.Equal("MODEL_VALIDATION_FAILED", outcome.Code);
+        Assert.Equal("qwen2.5-coder:1.5b", outcome.State.SelectedModel);
+        Assert.Equal(1, runtime.PullCount);
+        Assert.Contains("No fallback model was attempted", outcome.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(outcome.Warnings, warning =>
+            warning.Contains("downgrade", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task PullRefusesOwnershipDriftDetectedAfterInventoryWithoutPullOrGeneration()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var runtime = new FakeOllamaRuntime(models);
+        var platform = new FakeStartupPlatform { LoopbackOnly = true, Executable = "ollama.exe" };
+        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+        var manager = new InstallationManager(
+            autoStart: autoStart,
+            clientFactory: runtime.CreateClient,
+            hardwareProvider: () => CreateProfile(temporary.Path),
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
+        var tagsRequested = 0;
+        runtime.OnTagsRequested = () =>
+        {
+            tagsRequested++;
+            if (tagsRequested == 3)
+            {
+                File.WriteAllText(
+                    paths.CodexConfigFile,
+                    "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external-reviewer.exe\"\r\nenabled = true\r\n");
+            }
+        };
+
+        var outcome = await manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            RequestedModel: "qwen2.5-coder:1.5b",
+            RequestedModelDirectory: models,
+            PullAndValidateModel: true,
+            CodexStartupValidator: _ => true,
+            AllowAutomaticModelFallback: false));
+
+        Assert.False(outcome.Success);
+        Assert.Equal("MODEL_VALIDATION_FAILED", outcome.Code);
+        Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", outcome.State.LastHealthCheckCode);
+        Assert.Equal(0, runtime.PullCount);
+        Assert.Equal(0, runtime.ValidationGenerationCount);
+    }
+
+    [Fact]
+    public async Task PublicValidationRefusesOwnershipDriftAfterInventoryBeforeGeneration()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        _ = new CodexConfigManager().InstallOrRepair(paths, enabled: false, startupValidator: _ => true);
+        var state = new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            ModelStorageLocation = models,
+            ManagedCodexHome = paths.CodexHome,
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Disabled
+        };
+        var runtime = new FakeOllamaRuntime(models);
+        runtime.SeedModel();
+        runtime.OnTagsRequested = () => File.WriteAllText(
+            paths.CodexConfigFile,
+            "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external-reviewer.exe\"\r\nenabled = true\r\n");
+        var manager = new InstallationManager(
+            clientFactory: runtime.CreateClient,
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
+
+        var result = await manager.ValidateSelectedModelAsync(paths, state);
+
+        Assert.False(result.Success);
+        Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", result.Code);
+        Assert.Equal(0, runtime.PullCount);
+        Assert.Equal(0, runtime.ValidationGenerationCount);
+    }
+
+    [Fact]
+    public async Task PublicValidationRechecksOwnershipBeforeSecondGenerationBoundary()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        _ = new CodexConfigManager().InstallOrRepair(paths, enabled: false, startupValidator: _ => true);
+        var state = new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            ModelStorageLocation = models,
+            ManagedCodexHome = paths.CodexHome,
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Disabled
+        };
+        var runtime = new FakeOllamaRuntime(models);
+        runtime.SeedModel();
+        runtime.OnValidationGenerationCompleted = count =>
+        {
+            if (count == 1)
+            {
+                File.WriteAllText(
+                    paths.CodexConfigFile,
+                    "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external-reviewer.exe\"\r\nenabled = true\r\n");
+            }
+        };
+        var manager = new InstallationManager(
+            clientFactory: runtime.CreateClient,
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
+
+        var result = await manager.ValidateSelectedModelAsync(paths, state);
+
+        Assert.False(result.Success);
+        Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", result.Code);
+        Assert.Equal(1, runtime.ValidationGenerationCount);
+    }
+
+    [Fact]
+    public async Task FinalEnableRefusalLeavesPersistedAvailabilityDisabled()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var runtime = new FakeOllamaRuntime(models);
+        var platform = new FakeStartupPlatform { LoopbackOnly = true, Executable = "ollama.exe" };
+        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+        var manager = new InstallationManager(
+            autoStart: autoStart,
+            clientFactory: runtime.CreateClient,
+            hardwareProvider: () => CreateProfile(temporary.Path),
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Test pressure is safe."));
+        var tagsRequested = 0;
+        runtime.OnTagsRequested = () =>
+        {
+            tagsRequested++;
+            if (tagsRequested == 6)
+            {
+                File.WriteAllText(
+                    paths.CodexConfigFile,
+                    "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external-reviewer.exe\"\r\nenabled = true\r\n");
+            }
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            RequestedModel: "qwen2.5-coder:1.5b",
+            RequestedModelDirectory: models,
+            PullAndValidateModel: true,
+            CodexStartupValidator: _ => true,
+            AllowAutomaticModelFallback: false)));
+
+        var persisted = await new StateStore(paths.StateFile).LoadAsync();
+        Assert.NotNull(persisted);
+        Assert.Equal(HelperAvailability.Disabled, persisted.Availability);
+        Assert.Equal(2, runtime.ValidationGenerationCount);
+        Assert.Contains("external-reviewer.exe", await File.ReadAllTextAsync(paths.CodexConfigFile), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExternalAutoStartIsPreservedButBlocksAutomaticCertificationWithoutInference()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var runtime = new FakeOllamaRuntime(models);
+        runtime.SeedModel();
+        var platform = new FakeStartupPlatform
+        {
+            ExternalAutoStartArtifact = "Ollama telemetry bootstrap",
+            LoopbackOnly = true,
+            Executable = "ollama.exe"
+        };
+        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+        var manager = new InstallationManager(
+            autoStart: autoStart,
+            clientFactory: runtime.CreateClient,
+            hardwareProvider: () => CreateProfile(temporary.Path));
+
+        var outcome = await manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            RequestedModel: "qwen2.5-coder:1.5b",
+            RequestedModelDirectory: models,
+            AutoStartOllama: true,
+            PullAndValidateModel: false,
+            CodexStartupValidator: _ => true));
+
+        Assert.True(outcome.Success);
+        Assert.Equal("CONFIGURED_VALIDATION_REQUIRED", outcome.Code);
+        Assert.Equal("EXTERNAL_AUTOSTART_UNVERIFIED", outcome.OllamaStartup?.Code);
+        Assert.False(outcome.OllamaStartup!.AutoStartConfigured);
+        Assert.False(outcome.State.StartupEntryOwnedByHelper);
+        Assert.Equal(HelperAvailability.Disabled, outcome.State.Availability);
+        Assert.Null(platform.RunEntry);
+        Assert.Equal("Ollama telemetry bootstrap", platform.ExternalAutoStartArtifact);
+        Assert.Equal(0, runtime.PullCount);
+        Assert.Equal(0, runtime.ValidationGenerationCount);
+    }
+
+    [Fact]
     public async Task MockedInstallValidationReinstallRepairPauseResumeReleaseAndDisableStayIsolated()
     {
         using var temporary = new TemporaryDirectory();
@@ -295,7 +686,7 @@ public sealed class LifecycleTests
         Assert.True(File.Exists(paths.StateFile));
         Assert.All(result.ManagedFiles, item => Assert.Equal("manual-cleanup-required", item.Operation));
         Assert.All(result.ManagedFiles, item => Assert.True(File.Exists(item.BackupPath)));
-        Assert.Equal(HelperAvailability.Disabled, (await store.LoadAsync())?.Availability);
+        Assert.Equal(HelperAvailability.Enabled, (await store.LoadAsync())?.Availability);
         GpuCoordination.ClearCancellation();
     }
 
@@ -421,7 +812,7 @@ public sealed class LifecycleTests
     }
 
     [Fact]
-    public async Task ExistingIntegrationAddsOnlyMissingGuidanceIdempotentlyAndUninstallsExactly()
+    public async Task ExistingIntegrationAddsNoInvocationGuidanceAndUninstallsExactly()
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
@@ -449,9 +840,10 @@ public sealed class LifecycleTests
         Assert.Equal("EXISTING_INTEGRATION_PRESERVED", first.Code);
         Assert.Equal("EXISTING_INTEGRATION_PRESERVED", second.Code);
         Assert.Equal(originalConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
-        Assert.Equal(agentsAfterFirst, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(originalAgents, agentsAfterFirst);
+        Assert.Equal(originalAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
         var installedAgents = Encoding.UTF8.GetString(agentsAfterFirst);
-        Assert.Equal(1, Count(installedAgents, ProductInfo.ManagedAgentsStart));
+        Assert.Equal(0, Count(installedAgents, ProductInfo.ManagedAgentsStart));
         Assert.DoesNotContain(ProductInfo.ManagedReliabilityStart, installedAgents, StringComparison.Ordinal);
         Assert.Null(second.State.SelectedModel);
         Assert.Null(second.State.ModelStorageLocation);
@@ -578,6 +970,61 @@ public sealed class LifecycleTests
         Assert.Equal("unowned environment", platform.UserEnvironment["OLLAMA_MODELS"]);
     }
 
+    [Fact]
+    public async Task ManagedStateWithExternalConfigDriftCannotMutateRuntime()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var externalConfig = "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external-reviewer.exe\"\r\nenabled = true\r\n";
+        await File.WriteAllTextAsync(paths.CodexConfigFile, externalConfig);
+        var state = new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            SelectedModelOwnedByHelper = true,
+            ModelStorageLocation = models,
+            ManagedCodexHome = paths.CodexHome,
+            Availability = HelperAvailability.Enabled,
+            StartupEntryOwnedByHelper = true,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection]
+        };
+        var store = new StateStore(paths.StateFile);
+        await store.SaveAsync(state);
+        var runtime = new FakeOllamaRuntime(models);
+        var platform = new FakeStartupPlatform { RunEntry = "helper-owned-looking startup" };
+        platform.UserEnvironment["OLLAMA_MODELS"] = models;
+        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+
+        using (var client = runtime.CreateClient())
+        {
+            var reviewer = new ReviewerService(paths, store, client);
+            Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", (await reviewer.GetHealthAsync()).ErrorCode);
+            Assert.Equal(
+                "INTEGRATION_OWNERSHIP_DRIFT",
+                (await reviewer.ReviewAsync(new ReviewRequest("Do not run"))).ErrorCode);
+        }
+
+        var control = new ControlService(paths, store, runtime.CreateClient, autoStart: autoStart);
+        Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", (await control.PauseAsync()).Code);
+        Assert.Equal(HelperAvailability.Enabled, (await store.LoadAsync())?.Availability);
+        Assert.Equal(0, runtime.RequestCount);
+        Assert.Equal(0, platform.MutationCount);
+
+        using var cancellationEvent = GpuCoordination.OpenCancellationEvent();
+        cancellationEvent.Reset();
+        var uninstall = await new UninstallManager(paths, store, autoStart: autoStart, clientFactory: runtime.CreateClient)
+            .UninstallAsync(removeOwnedModel: true);
+
+        Assert.False(uninstall.Success);
+        Assert.Equal("UNINSTALL_MANUAL_CLEANUP_REQUIRED", uninstall.Code);
+        Assert.Equal(externalConfig, await File.ReadAllTextAsync(paths.CodexConfigFile));
+        Assert.True(File.Exists(paths.StateFile));
+        Assert.Equal(0, runtime.RequestCount);
+        Assert.Equal(0, platform.MutationCount);
+        Assert.False(cancellationEvent.WaitOne(0));
+    }
+
     private static int Count(string text, string value)
     {
         var count = 0;
@@ -628,8 +1075,11 @@ internal sealed class FakeOllamaRuntime
     }
 
     public bool BlockPullUntilCancelled { get; set; }
+    public bool FailValidation { get; set; }
     public TaskCompletionSource<bool> PullStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Action? OnTagsRequested { get; set; }
+    public Action<int>? OnValidationGenerationCompleted { get; set; }
+    public int PullCount { get; private set; }
     public int ValidationGenerationCount { get; private set; }
     public int UnloadCount { get; private set; }
     public int RequestCount { get; private set; }
@@ -656,6 +1106,7 @@ internal sealed class FakeOllamaRuntime
 
             if (path == "/api/pull")
             {
+                PullCount++;
                 PullStarted.TrySetResult(true);
                 if (BlockPullUntilCancelled)
                 {
@@ -686,9 +1137,12 @@ internal sealed class FakeOllamaRuntime
 
                 _modelLoaded = true;
                 ValidationGenerationCount++;
-                var response = body.Contains("THALEN_HELPER_OK", StringComparison.Ordinal)
-                    ? "THALEN_HELPER_OK"
-                    : "OFF_BY_ONE";
+                OnValidationGenerationCompleted?.Invoke(ValidationGenerationCount);
+                var response = FailValidation
+                    ? "VALIDATION_FAILED"
+                    : body.Contains("THALEN_HELPER_OK", StringComparison.Ordinal)
+                        ? "THALEN_HELPER_OK"
+                        : "OFF_BY_ONE";
                 return FakeHttpMessageHandler.Json($"{{\"model\":\"qwen2.5-coder:1.5b\",\"response\":\"{response}\",\"done\":true}}");
             }
 

@@ -13,7 +13,9 @@ public sealed record InstallationOptions(
     bool InstallReliabilityBaseline = false,
     string? ExpectedAgentsSourceSha256 = null,
     string? ExpectedAgentsPlannedSha256 = null,
-    Func<CancellationToken, Task>? EnsureOllamaInstalledAsync = null);
+    Func<CancellationToken, Task>? EnsureOllamaInstalledAsync = null,
+    bool DeferModelSelection = false,
+    bool AllowAutomaticModelFallback = true);
 
 public sealed record InstallationOutcome(
     bool Success,
@@ -89,6 +91,15 @@ public sealed class InstallationManager
             throw new InvalidOperationException("Both AGENTS.override.md preview hashes are required together.");
         }
 
+        var store = new StateStore(options.Paths.StateFile);
+        var priorState = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
+        ValidateCodexHomeRoute(options.Paths, priorState, "Configuration");
+        if (options.DeferModelSelection && priorState?.SelectedModel is not null)
+        {
+            throw new InvalidOperationException(
+                "Deferred model bootstrap is only valid before model setup. Use repair for an existing configured installation.");
+        }
+
         InstallContextStore.Save(options.Paths);
 
         var existingIntegration = _codexConfig.InspectExistingUnmanagedIntegration(options.Paths);
@@ -97,7 +108,7 @@ public sealed class InstallationManager
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
         var recommendation = _modelSelector.Recommend(hardware, catalog, options.AllowCpuFallback);
-        var selected = preserveExistingIntegration
+        var selected = preserveExistingIntegration || options.DeferModelSelection
             ? null
             : SelectRequestedModel(options, catalog, recommendation);
         StorageRecommendation? storage = null;
@@ -112,8 +123,6 @@ public sealed class InstallationManager
             }
         }
 
-        var store = new StateStore(options.Paths.StateFile);
-        var priorState = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
         var hasAgentsPreviewBinding = options.ExpectedAgentsSourceSha256 is not null;
         var installReliabilityBaseline = hasAgentsPreviewBinding
             ? options.InstallReliabilityBaseline
@@ -174,7 +183,8 @@ public sealed class InstallationManager
             var previewCheck = _agentsOverride.PreviewInstall(
                 options.Paths,
                 state.HardwareTier,
-                installReliabilityBaseline);
+                installReliabilityBaseline,
+                installLocalGpuGuidance: !preserveExistingIntegration);
             if (!string.Equals(
                     previewCheck.SourceSha256,
                     options.ExpectedAgentsSourceSha256,
@@ -213,7 +223,8 @@ public sealed class InstallationManager
                 state.HardwareTier,
                 installReliabilityBaseline,
                 options.ExpectedAgentsSourceSha256,
-                options.ExpectedAgentsPlannedSha256);
+                options.ExpectedAgentsPlannedSha256,
+                installLocalGpuGuidance: !state.ExistingIntegrationPreserved);
         }
         catch
         {
@@ -257,7 +268,7 @@ public sealed class InstallationManager
             return new InstallationOutcome(
                 true,
                 "EXISTING_INTEGRATION_PRESERVED",
-                "The existing local_gpu_reviewer integration was preserved unchanged. Only missing, non-conflicting managed instruction sections were considered; Ollama, models, startup, and integration activation were not changed.",
+                "An existing unmarked local_gpu_reviewer entry was detected and preserved unchanged. It was not inspected, tested, activated, or given helper invocation guidance. Ollama, models, startup, and environment were not changed.",
                 hardware,
                 recommendation,
                 null,
@@ -277,6 +288,7 @@ public sealed class InstallationManager
         OllamaStartupVerification? startup = null;
         if (selected is not null && state.ModelStorageLocation is not null)
         {
+            ThrowIfOwnershipInvalid(options.Paths, state);
             Directory.CreateDirectory(state.ModelStorageLocation);
             startup = await _autoStart.ApplyConfigurationAsync(
                 options.Paths,
@@ -285,7 +297,6 @@ public sealed class InstallationManager
                 options.AutoStartOllama,
                 options.RestartOllamaForModelPath,
                 cancellationToken).ConfigureAwait(false);
-            state.StartupEntryOwnedByHelper = options.AutoStartOllama;
         }
 
         if (!options.AutoStartOllama)
@@ -298,8 +309,10 @@ public sealed class InstallationManager
             await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
             return new InstallationOutcome(
                 true,
-                "INSTALLED_NO_MODEL",
-                "The helper was installed in disabled/no-model mode because no safe model fit was available.",
+                options.DeferModelSelection ? "INSTALLED_MODEL_SETUP_REQUIRED" : "INSTALLED_NO_MODEL",
+                options.DeferModelSelection
+                    ? "The protected Codex integration and local GPU guidance were installed in disabled mode. Model selection was intentionally deferred; no model was downloaded or loaded."
+                    : "The helper was installed in disabled/no-model mode because no safe model fit was available.",
                 hardware,
                 recommendation,
                 storage,
@@ -347,7 +360,7 @@ public sealed class InstallationManager
             || !startup.EndpointReachable
             || !startup.ModelStorageConfigured
             || !startup.LoopbackOnly
-            || startup.Code is "OLLAMA_RESTART_REQUIRED" or "OLLAMA_RESTART_UNLOAD_FAILED" or "OLLAMA_RESTART_FAILED")
+            || startup.Code is "OLLAMA_RESTART_REQUIRED" or "OLLAMA_RESTART_UNLOAD_FAILED" or "OLLAMA_RESTART_FAILED" or "EXTERNAL_AUTOSTART_UNVERIFIED")
         {
             state.Availability = HelperAvailability.Disabled;
             state.LastHealthCheckAt = DateTimeOffset.UtcNow;
@@ -356,7 +369,9 @@ public sealed class InstallationManager
             return new InstallationOutcome(
                 false,
                 "OLLAMA_CONFIGURATION_FAILED",
-                "Ollama did not safely inherit and verify the configured loopback model directory. The helper remains disabled.",
+                startup?.Code == "EXTERNAL_AUTOSTART_UNVERIFIED"
+                    ? "An existing Ollama startup artifact was preserved to avoid creating a duplicate, but its target and next-login behavior were not verified. Review or remove it, or choose manual startup. The helper remains disabled."
+                    : "Ollama did not safely inherit and verify the configured loopback model directory. The helper remains disabled.",
                 hardware,
                 recommendation,
                 storage,
@@ -367,8 +382,9 @@ public sealed class InstallationManager
                 warnings);
         }
 
-        var validation = await PullAndValidateAsync(selected, state, cancellationToken).ConfigureAwait(false);
-        if (!validation.Success)
+        var validation = await PullAndValidateAsync(options.Paths, selected, state, cancellationToken).ConfigureAwait(false);
+        var fallbackAttempted = false;
+        if (!validation.Success && options.AllowAutomaticModelFallback)
         {
             var fallback = catalog.Models
                 .Where(model => model.AutomaticSelectionAllowed
@@ -378,10 +394,11 @@ public sealed class InstallationManager
                 .FirstOrDefault();
             if (fallback is not null)
             {
+                fallbackAttempted = true;
                 warnings.Add($"{selected.Tag} failed validation with {validation.Code}. One bounded downgrade to {fallback.Tag} was attempted.");
                 state.SelectedModel = fallback.Tag;
                 state.SelectedModelDigest = fallback.ExpectedDigest;
-                validation = await PullAndValidateAsync(fallback, state, cancellationToken).ConfigureAwait(false);
+                validation = await PullAndValidateAsync(options.Paths, fallback, state, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -394,7 +411,11 @@ public sealed class InstallationManager
             return new InstallationOutcome(
                 false,
                 "MODEL_VALIDATION_FAILED",
-                "The selected model and one safe fallback failed validation. The helper remains installed but disabled.",
+                options.AllowAutomaticModelFallback
+                    ? fallbackAttempted
+                        ? "The selected model and one safe fallback failed validation. The helper remains installed but disabled."
+                        : "The selected model failed validation and no eligible fallback was available. The helper remains installed but disabled."
+                    : "The selected model failed validation. No fallback model was attempted. The helper remains installed but disabled.",
                 hardware,
                 recommendation,
                 storage,
@@ -406,6 +427,7 @@ public sealed class InstallationManager
         }
 
         state.Acceleration = validation.Acceleration;
+        ThrowIfOwnershipInvalid(options.Paths, state);
         startup = await _autoStart.VerifyAsync(options.Paths, state, startup.StartedNewProcess, cancellationToken).ConfigureAwait(false);
         if (!ModelIntegrity.IsOperationallySafe(startup, state))
         {
@@ -427,11 +449,27 @@ public sealed class InstallationManager
                 warnings);
         }
 
+        var enabledConfig = _codexConfig.SetEnabled(options.Paths, true);
+        var previousAvailability = state.Availability;
+        var previousHealthCheckAt = state.LastHealthCheckAt;
+        var previousHealthCheckCode = state.LastHealthCheckCode;
         state.Availability = HelperAvailability.Enabled;
         state.LastHealthCheckAt = DateTimeOffset.UtcNow;
         state.LastHealthCheckCode = "OK";
-        await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-        _codexConfig.SetEnabled(options.Paths, true);
+        TrackManagedFile(state, enabledConfig);
+        try
+        {
+            await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            state.Availability = previousAvailability;
+            state.LastHealthCheckAt = previousHealthCheckAt;
+            state.LastHealthCheckCode = previousHealthCheckCode;
+            _codexConfig.Rollback(enabledConfig);
+            throw;
+        }
+
         GpuCoordination.ClearCancellation();
         return new InstallationOutcome(
             true,
@@ -453,10 +491,20 @@ public sealed class InstallationManager
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        InstallContextStore.Save(paths);
         var store = new StateStore(paths.StateFile);
         var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
+        ValidateCodexHomeRoute(paths, state, "Repair");
+
+        var ownership = IntegrationOwnership.Inspect(paths, state);
+        if (IntegrationOwnership.IsManagedByHelper(state)
+            && ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+        {
+            throw new InvalidOperationException(
+                "Repair refused because the helper ownership record no longer matches the current Codex reviewer entry. Review a fresh protected-file diff before changing it.");
+        }
+
+        InstallContextStore.Save(paths);
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
         var recommendation = _modelSelector.Recommend(hardware, catalog, state.Acceleration?.Processor == "CPU");
@@ -480,7 +528,8 @@ public sealed class InstallationManager
             agents = _agentsOverride.InstallOrRepair(
                 paths,
                 state.HardwareTier,
-                state.ReliabilityBaselineInstalled);
+                state.ReliabilityBaselineInstalled,
+                installLocalGpuGuidance: !state.ExistingIntegrationPreserved);
         }
         catch
         {
@@ -530,6 +579,7 @@ public sealed class InstallationManager
         OllamaStartupVerification? startup = null;
         if (state.ModelStorageLocation is not null)
         {
+            ThrowIfOwnershipInvalid(paths, state);
             var currentModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
             startup = await _autoStart.ApplyConfigurationAsync(
                 paths,
@@ -586,16 +636,18 @@ public sealed class InstallationManager
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        InstallContextStore.Save(paths);
         var store = new StateStore(paths.StateFile);
         var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
+        ValidateCodexHomeRoute(paths, state, "Reliability baseline configuration");
+        InstallContextStore.Save(paths);
         var result = _agentsOverride.InstallOrRepair(
             paths,
             state.HardwareTier,
             install,
             expectedAgentsSourceSha256,
-            expectedAgentsPlannedSha256);
+            expectedAgentsPlannedSha256,
+            installLocalGpuGuidance: IntegrationOwnership.Inspect(paths, state).Status == IntegrationOwnershipStatus.ManagedValid);
         TrackManagedFile(state, result);
         var content = File.Exists(paths.AgentsOverrideFile)
             ? File.ReadAllText(paths.AgentsOverrideFile)
@@ -613,31 +665,67 @@ public sealed class InstallationManager
         return result;
     }
 
-    public async Task<ModelValidationResult> ValidateSelectedModelAsync(
+    public Task<ModelValidationResult> ValidateSelectedModelAsync(
+        ProductPaths paths,
+        InstallationState state,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(state);
+        var ownership = IntegrationOwnership.Inspect(paths, state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+        {
+            return Task.FromResult(new ModelValidationResult(
+                false,
+                ownership.Status == IntegrationOwnershipStatus.ExternalUnmarked
+                    ? "EXISTING_INTEGRATION_PRESERVED"
+                    : "INTEGRATION_OWNERSHIP_DRIFT",
+                ownership.Message + " No model was loaded or queried.",
+                null,
+                0,
+                0));
+        }
+
+        return ValidateSelectedModelCoreAsync(paths, state, cancellationToken);
+    }
+
+    internal Task<ModelValidationResult> ValidateSelectedModelForTestingAsync(
         InstallationState state,
         CancellationToken cancellationToken = default)
     {
         if (!IntegrationOwnership.IsManagedByHelper(state))
         {
-            return new ModelValidationResult(
+            return Task.FromResult(new ModelValidationResult(
                 false,
                 "EXISTING_INTEGRATION_PRESERVED",
                 "The existing unmarked local_gpu_reviewer integration is not controlled by this helper.",
                 null,
                 0,
-                0);
+                0));
         }
+
+        return ValidateSelectedModelCoreAsync(null, state, cancellationToken);
+    }
+
+    private async Task<ModelValidationResult> ValidateSelectedModelCoreAsync(
+        ProductPaths? paths,
+        InstallationState state,
+        CancellationToken cancellationToken)
+    {
 
         if (string.IsNullOrWhiteSpace(state.SelectedModel))
         {
             return new ModelValidationResult(false, "NO_MODEL", "No selected model is configured.", null, 0, 0);
         }
 
-        using var client = _clientFactory();
         var exactStart = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            ThrowIfOwnershipInvalid(paths, state);
+            using var client = _clientFactory();
+            ThrowIfOwnershipInvalid(paths, state);
             var models = await client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             var selected = ModelIntegrity.FindSelectedModel(models, state.SelectedModel);
             if (selected is null)
             {
@@ -651,7 +739,9 @@ public sealed class InstallationManager
 
             async Task CheckResourcePressureAsync(CancellationToken token)
             {
+                ThrowIfOwnershipInvalid(paths, state);
                 var runningModels = await client.GetRunningModelsAsync(token).ConfigureAwait(false);
+                ThrowIfOwnershipInvalid(paths, state);
                 var selectedAlreadyLoaded = runningModels.Any(model =>
                     ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
                 var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
@@ -661,6 +751,7 @@ public sealed class InstallationManager
                 }
             }
 
+            ThrowIfOwnershipInvalid(paths, state);
             var exact = await client.GenerateAsync(
                 state.SelectedModel,
                 "Reply with exactly this text and nothing else: THALEN_HELPER_OK",
@@ -669,14 +760,18 @@ public sealed class InstallationManager
                 TimeSpan.FromSeconds(30),
                 cancellationToken,
                 preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             exactStart.Stop();
             if (!string.Equals(exact.Response.Trim(), "THALEN_HELPER_OK", StringComparison.Ordinal))
             {
+                ThrowIfOwnershipInvalid(paths, state);
                 await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+                ThrowIfOwnershipInvalid(paths, state);
                 return new ModelValidationResult(false, "EXACT_RESPONSE_FAILED", "The exact-response smoke test failed.", null, exactStart.ElapsedMilliseconds, 0);
             }
 
             var reviewStart = System.Diagnostics.Stopwatch.StartNew();
+            ThrowIfOwnershipInvalid(paths, state);
             var review = await client.GenerateAsync(
                 state.SelectedModel,
                 "Inspect only this loop: for (int i = 0; i <= items.Length; i++) { Use(items[i]); }. Reply with exactly: OFF_BY_ONE",
@@ -685,14 +780,19 @@ public sealed class InstallationManager
                 TimeSpan.FromSeconds(30),
                 cancellationToken,
                 preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             reviewStart.Stop();
             if (!string.Equals(review.Response.Trim(), "OFF_BY_ONE", StringComparison.Ordinal))
             {
+                ThrowIfOwnershipInvalid(paths, state);
                 await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+                ThrowIfOwnershipInvalid(paths, state);
                 return new ModelValidationResult(false, "CODE_REVIEW_SMOKE_FAILED", "The bounded code-review smoke test failed.", null, exactStart.ElapsedMilliseconds, reviewStart.ElapsedMilliseconds);
             }
 
+            ThrowIfOwnershipInvalid(paths, state);
             var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             var loaded = running.FirstOrDefault(item => string.Equals(item.Name, state.SelectedModel, StringComparison.OrdinalIgnoreCase));
             var acceleration = loaded is null
                 ? null
@@ -701,8 +801,11 @@ public sealed class InstallationManager
                     loaded.SizeVramBytes,
                     loaded.ContextLength,
                     loaded.ExpiresAt);
+            ThrowIfOwnershipInvalid(paths, state);
             await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             var after = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             if (after.Any(item => string.Equals(item.Name, state.SelectedModel, StringComparison.OrdinalIgnoreCase)))
             {
                 return new ModelValidationResult(false, "GPU_RELEASE_FAILED", "The selected model did not unload after validation.", acceleration, exactStart.ElapsedMilliseconds, reviewStart.ElapsedMilliseconds);
@@ -717,18 +820,24 @@ public sealed class InstallationManager
     }
 
     private async Task<ModelValidationResult> PullAndValidateAsync(
+        ProductPaths paths,
         ModelCatalogEntry model,
         InstallationState state,
         CancellationToken cancellationToken)
     {
         try
         {
+            ThrowIfOwnershipInvalid(paths, state);
             using var client = _clientFactory();
+            ThrowIfOwnershipInvalid(paths, state);
             var existing = await client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             var alreadyPresent = existing.Any(item => string.Equals(item.Name, model.Tag, StringComparison.OrdinalIgnoreCase));
             if (!alreadyPresent)
             {
+                ThrowIfOwnershipInvalid(paths, state);
                 await client.PullAsync(model.Tag, cancellationToken).ConfigureAwait(false);
+                ThrowIfOwnershipInvalid(paths, state);
                 state.SelectedModelOwnedByHelper = true;
             }
             else
@@ -738,7 +847,9 @@ public sealed class InstallationManager
 
             state.SelectedModel = model.Tag;
             state.SelectedModelDigest = model.ExpectedDigest;
+            ThrowIfOwnershipInvalid(paths, state);
             var inventory = await client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfOwnershipInvalid(paths, state);
             var installed = ModelIntegrity.FindSelectedModel(inventory, model.Tag);
             if (installed is null)
             {
@@ -750,7 +861,7 @@ public sealed class InstallationManager
                 return new ModelValidationResult(false, "MODEL_DIGEST_MISMATCH", "The selected model digest does not match the audited catalog digest.", null, 0, 0);
             }
 
-            return await ValidateSelectedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            return await ValidateSelectedModelAsync(paths, state, cancellationToken).ConfigureAwait(false);
         }
         catch (OllamaException exception)
         {
@@ -816,6 +927,51 @@ public sealed class InstallationManager
             volume.FreeBytes - required,
             "The user selected a suitable fixed local model directory.",
             volume.MediaType == StorageMediaType.Hdd ? ["The selected directory is on an HDD."] : []);
+    }
+
+    private static string NormalizeDirectory(string path)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    private static void ValidateCodexHomeRoute(
+        ProductPaths paths,
+        InstallationState? state,
+        string operation)
+    {
+        var requested = NormalizeDirectory(paths.CodexHome);
+        var context = InstallContextStore.Load(paths.InstallDirectory);
+        var recordedHomes = new[]
+        {
+            state?.ManagedCodexHome,
+            context?.CodexHome
+        };
+        if (recordedHomes.Any(recorded =>
+                !string.IsNullOrWhiteSpace(recorded)
+                && !string.Equals(
+                    NormalizeDirectory(recorded),
+                    requested,
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"{operation} refused because the requested Codex home does not match the Codex home recorded by this installation. No managed files or install context were changed; state was also left untouched.");
+        }
+    }
+
+    private static void ThrowIfOwnershipInvalid(ProductPaths? paths, InstallationState state)
+    {
+        if (paths is null)
+        {
+            return;
+        }
+
+        var ownership = IntegrationOwnership.Inspect(paths, state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+        {
+            throw new OllamaException(
+                ownership.Status == IntegrationOwnershipStatus.ExternalUnmarked
+                    ? "EXISTING_INTEGRATION_PRESERVED"
+                    : "INTEGRATION_OWNERSHIP_DRIFT",
+                ownership.Message + " No further Ollama request was made.");
+        }
     }
 
     private static void TrackManagedFile(InstallationState state, ManagedFileResult result)

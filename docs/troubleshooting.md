@@ -9,13 +9,27 @@ thalen-helper ollama verify
 
 These checks call inventory/runtime endpoints only and do not run model inference.
 
+## Setup finished but local review is not ready
+
+The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads and loads no model, so the dashboard reports that model setup is still required. Choose **Choose model** to point to an existing Ollama model folder or explicitly approve a download and bounded validation.
+
+Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** only unloads the model.
+
+## The Control Center says no model is loaded
+
+This is normally the safe idle state. Low-impact mode uses `keep_alive=0`, so Ollama unloads the model after each bounded review. A model being installed or selected is different from a model being loaded in GPU memory. Use the explicitly confirmed **Test local review** action only when you want to run inference; passive status never loads a model.
+
+## The reviewer is labeled external
+
+Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Review a protected-file diff and perform a separate explicit migration before expecting packaged locking, pressure refusal, startup, or unload controls to apply.
+
 ## MCP tools are missing after install
 
 Restart every Codex process after setup. Confirm `config.toml` contains one marked helper block and the installed executable path exists. Run `thalen-helper repair`, then restart Codex again. An unmanaged table with the same integration name is intentionally not overwritten.
 
 ## Ollama does not start after sign-in
 
-Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROCESS_UNHEALTHY` means an Ollama process exists without a responsive endpoint; the helper did not create a duplicate. Close/restart Ollama or run repair. If automatic startup was declined, manually start Ollama after each sign-in.
+Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROCESS_UNHEALTHY` means an Ollama process exists without a responsive endpoint; the helper did not create a duplicate. `EXTERNAL_AUTOSTART_UNVERIFIED` means another Ollama-named Run or Startup-folder artifact was preserved to avoid duplication, but its executable and next-login behavior were not certified. Review or remove that launcher, or choose manual startup; the helper does not report it as configured merely because its name contains Ollama. If automatic startup was declined, manually start Ollama after each sign-in.
 
 ## Model path is not verified
 
@@ -23,7 +37,7 @@ Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROC
 
 ## Network exposure warning
 
-Stop Ollama immediately if `OLLAMA_NETWORK_EXPOSURE` appears. Remove any wildcard/LAN `OLLAMA_HOST` setting and firewall forwarding, set the user host to `127.0.0.1:11434`, restart Ollama, and rerun verification. The helper remains disabled until loopback-only status passes.
+Stop Ollama immediately if `OLLAMA_NETWORK_EXPOSURE` or **EXTERNAL RISK** appears. Remove any wildcard/LAN `OLLAMA_HOST` setting and firewall forwarding, set the user host to `127.0.0.1:11434`, restart Ollama, and rerun verification. The helper remains disabled until loopback-only status passes. An external reviewer remains outside packaged control even after its listener is corrected.
 
 ## GPU is needed by another application
 
@@ -31,7 +45,7 @@ Use `thalen-helper pause` for immediate call blocking/cancellation plus unload, 
 
 ## Model validation fails
 
-Review the specific error code. Update the GPU driver/Ollama, close heavy GPU workloads, verify free disk/RAM, then retest. Setup attempts at most one smaller safe fallback. It never deletes pre-existing models.
+Review the specific error code. Update the GPU driver/Ollama, close heavy GPU workloads, verify free disk/RAM, then retest. Guided setup does not switch to a different fallback model; select and confirm another supported model if needed. It never deletes pre-existing models.
 
 ## Safe diagnostics
 

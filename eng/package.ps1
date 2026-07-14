@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.1',
+    [string]$Version = '0.1.0-beta.3',
     [string]$InnoCompiler,
     [string]$SbomTool
 )
@@ -108,6 +108,20 @@ function Assert-NoLocalPathsInDecodedJson {
 }
 
 Assert-SafeReleaseVersion -Value $Version
+$betaVersionMatch = [System.Text.RegularExpressions.Regex]::Match(
+    $Version,
+    '^(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)-beta\.(?<beta>0|[1-9][0-9]*)$',
+    [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+if (-not $betaVersionMatch.Success) {
+    throw 'Unsigned packages require an exact <major>.<minor>.<patch>-beta.<number> version.'
+}
+$peParts = @('major', 'minor', 'patch', 'beta') | ForEach-Object {
+    [uint32]::Parse($betaVersionMatch.Groups[$_].Value, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+if (@($peParts | Where-Object { $_ -gt 65535 }).Count -ne 0) {
+    throw 'Each installer PE version component must be between 0 and 65535.'
+}
+$peVersion = $peParts -join '.'
 $artifacts = Join-Path $RepositoryRoot '.artifacts'
 $publish = Join-Path $artifacts 'publish'
 $stage = Join-Path $artifacts 'stage'
@@ -159,7 +173,7 @@ try {
     }
     $InnoCompiler = Assert-VerifiedInnoCompiler -Path $InnoCompiler
 
-    & $InnoCompiler "/DMyAppVersion=$Version" 'installer\ThalenHelper.iss'
+    & $InnoCompiler "/DMyAppVersion=$Version" "/DMyAppPeVersion=$peVersion" 'installer\ThalenHelper.iss'
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
     $setup = Join-Path $artifacts 'installer\Codex-GPU-Thalen-Helper-Setup.exe'
     if (-not (Test-Path -LiteralPath $setup)) { throw 'Expected setup executable was not created.' }

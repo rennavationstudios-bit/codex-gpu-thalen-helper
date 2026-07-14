@@ -270,7 +270,7 @@ public sealed record OllamaGenerationResult(
 public static class ProductInfo
 {
     public const string Name = "Codex GPU Thalen Helper";
-    public const string Version = "0.1.0-beta.1";
+    public const string Version = "0.1.0-beta.3";
     public const string IntegrationName = "local_gpu_reviewer";
     public const string ManagedConfigStart = "# BEGIN CODEX GPU THALEN HELPER (managed)";
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";

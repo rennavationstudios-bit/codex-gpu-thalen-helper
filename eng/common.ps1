@@ -25,8 +25,41 @@ function Reset-RepositoryDirectory {
 }
 
 function Invoke-Dotnet {
-    & $script:Dotnet @args
-    if ($LASTEXITCODE -ne 0) {
-        throw "dotnet failed with exit code $LASTEXITCODE"
+    $environmentNames = @(
+        'DOTNET_SKIP_FIRST_TIME_EXPERIENCE',
+        'DOTNET_GENERATE_ASPNET_CERTIFICATE',
+        'DOTNET_CLI_TELEMETRY_OPTOUT'
+    )
+    $originalEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $item = Get-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        $originalEnvironment[$name] = @{
+            Exists = $null -ne $item
+            Value = if ($null -eq $item) { $null } else { $item.Value }
+        }
+    }
+
+    try {
+        $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+        $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
+        $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+
+        & $script:Dotnet @args
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $environmentNames) {
+            $original = $originalEnvironment[$name]
+            if ($original.Exists) {
+                Set-Item -LiteralPath "Env:$name" -Value $original.Value
+            }
+            else {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        throw "dotnet failed with exit code $exitCode"
     }
 }

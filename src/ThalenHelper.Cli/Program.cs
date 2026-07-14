@@ -32,7 +32,7 @@ internal static class CliApplication
             {
                 "version" => Write(new { product = ProductInfo.Name, version = ProductInfo.Version }),
                 "hardware" => Write(new HardwareDetector().Detect()),
-                "status" => await StatusAsync(store).ConfigureAwait(false),
+                "status" => await StatusAsync(paths, store).ConfigureAwait(false),
                 "doctor" => await DoctorAsync(paths, store).ConfigureAwait(false),
                 "install" => await InstallAsync(parsed, paths).ConfigureAwait(false),
                 "repair" => await RepairAsync(paths).ConfigureAwait(false),
@@ -43,9 +43,9 @@ internal static class CliApplication
                 "release-gpu" => Write(await control.ReleaseGpuAsync().ConfigureAwait(false)),
                 "low-impact" => await ToggleLowImpactAsync(parsed, control).ConfigureAwait(false),
                 "keep-warm" => await ToggleKeepWarmAsync(parsed, control).ConfigureAwait(false),
-                "model" => await ModelAsync(parsed, store, control).ConfigureAwait(false),
+                "model" => await ModelAsync(parsed, paths, store, control).ConfigureAwait(false),
                 "models" => await ModelsAsync(parsed, paths, store, control).ConfigureAwait(false),
-                "test" => await TestAsync(store).ConfigureAwait(false),
+                "test" => await TestAsync(paths, store).ConfigureAwait(false),
                 "ollama" => await OllamaAsync(parsed, paths, store).ConfigureAwait(false),
                 "diagnostics" => await DiagnosticsAsync(parsed, paths, store).ConfigureAwait(false),
                 "update" => await UpdateAsync(parsed).ConfigureAwait(false),
@@ -62,7 +62,10 @@ internal static class CliApplication
     internal static ProductPaths ResolvePaths(ParsedArguments parsed, string command)
     {
         var requestedInstallDirectory = parsed.Get("install-dir");
-        if (!string.Equals(command, "uninstall", StringComparison.OrdinalIgnoreCase))
+        var usesPersistedInstallContext =
+            string.Equals(command, "repair", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(command, "uninstall", StringComparison.OrdinalIgnoreCase);
+        if (!usesPersistedInstallContext)
         {
             return ProductPaths.Resolve(
                 requestedInstallDirectory,
@@ -78,7 +81,7 @@ internal static class CliApplication
             parsed.Get("codex-home") ?? context?.CodexHome);
     }
 
-    private static async Task<int> StatusAsync(StateStore store)
+    private static async Task<int> StatusAsync(ProductPaths paths, StateStore store)
     {
         var state = await store.LoadAsync().ConfigureAwait(false);
         if (state is null)
@@ -86,8 +89,8 @@ internal static class CliApplication
             return Fail("NOT_CONFIGURED", "The helper is not configured.");
         }
 
-        using var client = new OllamaClient();
-        var health = await new ReviewerService(store, client).GetHealthAsync().ConfigureAwait(false);
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
+        var health = await new ReviewerService(paths, store, client).GetHealthAsync().ConfigureAwait(false);
         return Write(new { state, health });
     }
 
@@ -95,8 +98,8 @@ internal static class CliApplication
     {
         var hardware = new HardwareDetector().Detect();
         var state = await store.LoadAsync().ConfigureAwait(false);
-        using var client = new OllamaClient();
-        var health = await new ReviewerService(store, client).GetHealthAsync().ConfigureAwait(false);
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
+        var health = await new ReviewerService(paths, store, client).GetHealthAsync().ConfigureAwait(false);
         var autoStart = state is not null && new OllamaAutoStartManager().IsConfigured(paths);
         var checks = new
         {
@@ -137,7 +140,8 @@ internal static class CliApplication
             parsed.Has("accept-restricted-license"),
             autoStart,
             parsed.Has("pull-and-validate"),
-            InstallReliabilityBaseline: false);
+            InstallReliabilityBaseline: false,
+            DeferModelSelection: parsed.Has("defer-model"));
         if (options.PullAndValidateModel)
         {
             Console.Error.WriteLine("Integration: local_gpu_reviewer | Provider: Ollama | Purpose: installer exact-response and bounded code-review validation");
@@ -166,7 +170,11 @@ internal static class CliApplication
         return Write(await control.SetKeepWarmAsync(enabled).ConfigureAwait(false));
     }
 
-    private static async Task<int> ModelAsync(ParsedArguments parsed, StateStore store, ControlService control)
+    private static async Task<int> ModelAsync(
+        ParsedArguments parsed,
+        ProductPaths paths,
+        StateStore store,
+        ControlService control)
     {
         if (parsed.Positionals.Count < 2)
         {
@@ -191,7 +199,7 @@ internal static class CliApplication
 
                     var state = await store.LoadAsync().ConfigureAwait(false);
                     Console.Error.WriteLine($"Integration: local_gpu_reviewer | Provider: Ollama | Model: {parsed.Positionals[2]} | Purpose: bounded model-change validation");
-                    var service = new ModelChangeService(store, control, new InstallationManager());
+                    var service = new ModelChangeService(paths, store, control, new InstallationManager());
                     var result = await service.ChangeAsync(
                         parsed.Positionals[2],
                         parsed.Has("accept-restricted-license")).ConfigureAwait(false);
@@ -220,12 +228,12 @@ internal static class CliApplication
         return Write(result);
     }
 
-    private static async Task<int> TestAsync(StateStore store)
+    private static async Task<int> TestAsync(ProductPaths paths, StateStore store)
     {
         var state = await store.LoadAsync().ConfigureAwait(false)
             ?? throw new InvalidOperationException("The helper is not configured.");
         Console.Error.WriteLine($"Integration: local_gpu_reviewer | Provider: Ollama | Model: {state.SelectedModel ?? "none"} | Purpose: exact-response and bounded code-review test");
-        var validation = await new InstallationManager().ValidateSelectedModelAsync(state).ConfigureAwait(false);
+        var validation = await new InstallationManager().ValidateSelectedModelAsync(paths, state).ConfigureAwait(false);
         return Write(validation);
     }
 
@@ -237,7 +245,8 @@ internal static class CliApplication
         }
 
         var state = await store.LoadAsync().ConfigureAwait(false);
-        if (state is not null && !IntegrationOwnership.IsManagedByHelper(state))
+        if (state is not null
+            && IntegrationOwnership.Inspect(paths, state).Status != IntegrationOwnershipStatus.ManagedValid)
         {
             return Fail(
                 "EXISTING_INTEGRATION_PRESERVED",
@@ -308,8 +317,8 @@ internal static class CliApplication
 
         var hardware = new HardwareDetector().Detect();
         var state = await store.LoadAsync().ConfigureAwait(false);
-        using var client = new OllamaClient();
-        var health = await new ReviewerService(store, client).GetHealthAsync().ConfigureAwait(false);
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
+        var health = await new ReviewerService(paths, store, client).GetHealthAsync().ConfigureAwait(false);
         await new DiagnosticsExporter().ExportAsync(parsed.Positionals[2], paths, hardware, state, health).ConfigureAwait(false);
         return Write(new { success = true, code = "DIAGNOSTICS_EXPORTED", path = Path.GetFullPath(parsed.Positionals[2]) });
     }
@@ -395,6 +404,7 @@ internal static class CliApplication
             thalen-helper model recommend [--allow-cpu]
             thalen-helper model change <tag> --yes [--accept-restricted-license]
             thalen-helper models move <fixed-local-directory> --yes
+            thalen-helper install --yes --defer-model --codex-home <directory> [--auto-start true|false]
             thalen-helper repair
             thalen-helper test
             thalen-helper diagnostics export <output.json>
@@ -402,7 +412,8 @@ internal static class CliApplication
             thalen-helper ollama verify | autostart | install --yes
             thalen-helper uninstall --yes [--remove-owned-model]
 
-            Silent configuration requires --yes and explicit --codex-home/--model/--models-dir choices.
+            Silent model configuration requires --yes and explicit --codex-home/--model/--models-dir choices.
+            Installer bootstrap uses --defer-model to add protected disabled Codex sections without downloading or loading a model.
             The optional reliability baseline is installed only from the interactive wizard after its diff preview.
             Real inference occurs only for test, model change, or install --pull-and-validate.
             """);

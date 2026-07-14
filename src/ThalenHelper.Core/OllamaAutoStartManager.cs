@@ -18,6 +18,11 @@ public sealed record OllamaStartupVerification(
     string Code,
     string Message);
 
+public sealed record OllamaListenerStatus(
+    bool HasListeners,
+    bool LoopbackOnly,
+    int ListenerCount);
+
 public interface IOllamaStartupPlatform
 {
     string? GetUserEnvironmentVariable(string name);
@@ -25,6 +30,7 @@ public interface IOllamaStartupPlatform
     void SetProcessEnvironmentVariable(string name, string? value);
     string? GetRunEntry();
     void SetRunEntry(string? command);
+    bool HasExternalAutoStart();
     bool IsAnyOllamaProcessRunning();
     string? FindOllamaExecutable();
     bool StartOllama(string executable, string modelDirectory, HelperPreferences preferences);
@@ -63,17 +69,21 @@ public sealed class OllamaAutoStartManager
         _platform.SetProcessEnvironmentVariable("OLLAMA_MODELS", modelDirectory);
         _platform.SetProcessEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434");
         _platform.BroadcastEnvironmentChange();
-        _platform.SetRunEntry(enabled ? $"\"{paths.CliExecutable}\" ollama autostart --quiet" : null);
+        var externalAutoStart = _platform.HasExternalAutoStart();
+        var helperOwnsAutoStart = enabled && !externalAutoStart;
+        _platform.SetRunEntry(helperOwnsAutoStart ? GetCanonicalRunCommand(paths) : null);
         state.Preferences = state.Preferences with { AutoStartOllama = enabled };
+        state.StartupEntryOwnedByHelper = helperOwnsAutoStart;
     }
 
     public bool IsConfigured(ProductPaths paths)
     {
         var value = _platform.GetRunEntry();
-        return value is not null
-            && value.Contains(paths.CliExecutable, StringComparison.OrdinalIgnoreCase)
-            && value.Contains("ollama autostart --quiet", StringComparison.OrdinalIgnoreCase);
+        return string.Equals(value, GetCanonicalRunCommand(paths), StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string GetCanonicalRunCommand(ProductPaths paths)
+        => $"\"{paths.CliExecutable}\" ollama autostart --quiet";
 
     public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
         ProductPaths paths,
@@ -236,6 +246,9 @@ public sealed class OllamaAutoStartManager
         CancellationToken cancellationToken = default)
     {
         var autoStart = IsConfigured(paths);
+        var externalAutoStartUnverified = !autoStart
+            && state.Preferences.AutoStartOllama
+            && _platform.HasExternalAutoStart();
         var modelStorage = IsModelPathConfigured(state);
         var storedInConfiguredPath = IsSelectedModelManifestPresent(state);
         var loopback = _platform.IsPortLoopbackOnly(11434);
@@ -276,14 +289,17 @@ public sealed class OllamaAutoStartManager
                             ? "SELECTED_MODEL_UNAVAILABLE"
                             : selected is not null && !digestMatches
                                 ? "MODEL_DIGEST_MISMATCH"
-                                : !autoStart
-                                    ? "MANUAL_START_REQUIRED"
-                                    : complete
-                                        ? "OK"
-                                        : "VERIFICATION_INCOMPLETE";
+                                : externalAutoStartUnverified
+                                    ? "EXTERNAL_AUTOSTART_UNVERIFIED"
+                                    : !autoStart
+                                        ? "MANUAL_START_REQUIRED"
+                                        : complete
+                                            ? "OK"
+                                            : "VERIFICATION_INCOMPLETE";
             var message = code switch
             {
                 "OK" => "Ollama responded on loopback, the selected model is available from the configured model directory, and no duplicate process was started.",
+                "EXTERNAL_AUTOSTART_UNVERIFIED" => "An existing Ollama startup artifact was preserved to avoid creating a duplicate, but its target and behavior were not verified. Automatic startup is not certified.",
                 "MANUAL_START_REQUIRED" => "Ollama is healthy and loopback-only, but automatic startup was declined; local review requires manually starting Ollama after sign-in.",
                 "OLLAMA_NETWORK_EXPOSURE" => "Ollama is listening on a non-loopback address; local review must remain disabled.",
                 "MODEL_PATH_NOT_CONFIGURED" => "The persisted per-user OLLAMA_MODELS value does not match the selected model directory.",
@@ -329,7 +345,24 @@ public sealed class OllamaAutoStartManager
         _platform.BroadcastEnvironmentChange();
     }
 
-    public static bool IsPortLoopbackOnly(int port) => new WindowsOllamaStartupPlatform().IsPortLoopbackOnly(port);
+    public static bool IsPortLoopbackOnly(int port) => GetListenerStatus(port).LoopbackOnly;
+
+    public static OllamaListenerStatus GetListenerStatus(int port)
+    {
+        var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+            .Where(endpoint => endpoint.Port == port)
+            .ToArray();
+        return EvaluateListenerStatus(listeners);
+    }
+
+    internal static OllamaListenerStatus EvaluateListenerStatus(IEnumerable<IPEndPoint> listeners)
+    {
+        var endpoints = listeners.ToArray();
+        return new OllamaListenerStatus(
+            endpoints.Length > 0,
+            endpoints.Length > 0 && endpoints.All(endpoint => IPAddress.IsLoopback(endpoint.Address)),
+            endpoints.Length);
+    }
 
     public static bool IsSelectedModelManifestPresent(InstallationState state)
     {
@@ -439,6 +472,37 @@ internal sealed class WindowsOllamaStartupPlatform : IOllamaStartupPlatform
         {
             key.SetValue(RunValueName, command, RegistryValueKind.String);
         }
+    }
+
+    public bool HasExternalAutoStart()
+    {
+        using (var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
+        {
+            if (key is not null)
+            {
+                foreach (var name in key.GetValueNames())
+                {
+                    if (string.Equals(name, RunValueName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var value = key.GetValue(name)?.ToString() ?? string.Empty;
+                    if (name.Contains("Ollama", StringComparison.OrdinalIgnoreCase)
+                        || value.Contains("Ollama", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        var startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        return Directory.Exists(startupDirectory)
+            && Directory.EnumerateFiles(startupDirectory)
+                .Select(Path.GetFileName)
+                .Any(name => name is not null
+                    && name.Contains("Ollama", StringComparison.OrdinalIgnoreCase));
     }
 
     public bool IsAnyOllamaProcessRunning()
@@ -584,12 +648,7 @@ internal sealed class WindowsOllamaStartupPlatform : IOllamaStartupPlatform
     }
 
     public bool IsPortLoopbackOnly(int port)
-    {
-        var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
-            .Where(endpoint => endpoint.Port == port)
-            .ToArray();
-        return listeners.All(endpoint => IPAddress.IsLoopback(endpoint.Address));
-    }
+        => OllamaAutoStartManager.GetListenerStatus(port).LoopbackOnly;
 
     public void BroadcastEnvironmentChange()
     {

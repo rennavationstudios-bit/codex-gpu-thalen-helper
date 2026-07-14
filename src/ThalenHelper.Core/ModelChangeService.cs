@@ -10,17 +10,20 @@ public sealed record ModelChangeResult(
 
 public sealed class ModelChangeService
 {
+    private readonly ProductPaths _paths;
     private readonly StateStore _store;
     private readonly ControlService _control;
     private readonly InstallationManager _installation;
     private readonly Func<OllamaClient> _clientFactory;
 
     public ModelChangeService(
+        ProductPaths paths,
         StateStore store,
         ControlService control,
         InstallationManager installation,
         Func<OllamaClient>? clientFactory = null)
     {
+        _paths = paths;
         _store = store;
         _control = control;
         _installation = installation;
@@ -35,12 +38,15 @@ public sealed class ModelChangeService
         OllamaClient.ValidateModelIdentifier(modelTag);
         var state = await _store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
-        if (!IntegrationOwnership.IsManagedByHelper(state))
+        var ownership = IntegrationOwnership.Inspect(_paths, state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
         {
             return new ModelChangeResult(
                 false,
-                "EXISTING_INTEGRATION_PRESERVED",
-                "This helper does not own the existing local_gpu_reviewer integration, so the model was not changed.",
+                ownership.Status == IntegrationOwnershipStatus.ExternalUnmarked
+                    ? "EXISTING_INTEGRATION_PRESERVED"
+                    : "INTEGRATION_OWNERSHIP_DRIFT",
+                ownership.Message + " The model was not changed.",
                 state.SelectedModel,
                 state.SelectedModel,
                 null);
@@ -89,7 +95,7 @@ public sealed class ModelChangeService
             state.SelectedModelDigest = model.ExpectedDigest;
             state.HardwareTier = ParseTier(model.PerformanceTier);
             await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-            var validation = await _installation.ValidateSelectedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            var validation = await _installation.ValidateSelectedModelAsync(_paths, state, cancellationToken).ConfigureAwait(false);
             if (!validation.Success)
             {
                 throw new ModelValidationException(validation);

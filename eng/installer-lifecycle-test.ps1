@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$SetupPath,
-    [string]$ExpectedVersion = '0.1.0-beta.1'
+    [string]$ExpectedVersion = '0.1.0-beta.3'
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -154,7 +154,7 @@ $installProcess = Start-Process -FilePath $SetupPath -ArgumentList @(
 ) -Wait -PassThru -WindowStyle Hidden
 if ($installProcess.ExitCode -ne 0) { throw "Silent package install failed: $($installProcess.ExitCode)" }
 
-foreach ($name in @('thalen-helper.exe', 'local-gpu-reviewer.exe', 'ThalenHelper.ControlCenter.exe', 'README.md', 'LICENSE')) {
+foreach ($name in @('thalen-helper.exe', 'local-gpu-reviewer.exe', 'ThalenHelper.ControlCenter.exe', 'README.md', 'LICENSE', 'docs\CODEX-HANDOFF.md')) {
     if (-not (Test-Path -LiteralPath (Join-Path $install $name))) { throw "Installed file missing: $name" }
 }
 $versionOutput = & (Join-Path $install 'thalen-helper.exe') version

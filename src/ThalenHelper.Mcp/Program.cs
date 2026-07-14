@@ -6,9 +6,12 @@ using System.ComponentModel;
 using ThalenHelper.Core;
 
 var builder = Host.CreateEmptyApplicationBuilder(settings: null);
-var paths = ProductPaths.Resolve();
+var paths = ProductPaths.Resolve(installDirectory: AppContext.BaseDirectory);
 builder.Services.AddSingleton(paths);
 builder.Services.AddSingleton(new StateStore(paths.StateFile));
+// OllamaClient normalizes any configured loopback host to 127.0.0.1 and rejects
+// non-loopback endpoints before a request can be sent. The managed Codex block
+// pins OLLAMA_HOST to the default loopback port; tests may use another loopback port.
 builder.Services.AddSingleton(_ => new OllamaClient());
 builder.Services.AddSingleton<ReviewerService>();
 builder.Services

@@ -14,7 +14,13 @@ public sealed class McpProtocolTests
     {
         using var temporary = new TemporaryDirectory();
         await using var ollama = new LoopbackOllamaStub();
-        var paths = temporary.CreatePaths();
+        var paths = ProductPaths.Resolve(
+            AppContext.BaseDirectory,
+            Path.Combine(temporary.Path, "state"),
+            Path.Combine(temporary.Path, "codex-home"));
+        Directory.CreateDirectory(paths.StateDirectory);
+        Directory.CreateDirectory(paths.CodexHome);
+        new CodexConfigManager().InstallOrRepair(paths, enabled: true);
         var store = new StateStore(paths.StateFile);
         var modelDirectory = Path.Combine(temporary.Path, "Isolated models");
         var manifest = Path.Combine(

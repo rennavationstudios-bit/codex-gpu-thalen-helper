@@ -6,6 +6,73 @@ namespace ThalenHelper.Tests;
 public sealed class ManagedFilesTests
 {
     [Fact]
+    public void CodexOwnershipInspectionRequiresTheExactManagedContract()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+
+        Assert.Equal(CodexIntegrationOwnership.NotConfigured, manager.InspectOwnership(paths));
+
+        File.WriteAllText(
+            paths.CodexConfigFile,
+            "[mcp_servers.local_gpu_reviewer]\r\ncommand = \"external.exe\"\r\n");
+        Assert.Equal(CodexIntegrationOwnership.ExternalUnmarked, manager.InspectOwnership(paths));
+
+        File.Delete(paths.CodexConfigFile);
+        manager.InstallOrRepair(paths, enabled: false);
+        Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
+
+        var managed = File.ReadAllText(paths.CodexConfigFile);
+        File.WriteAllText(
+            paths.CodexConfigFile,
+            managed.Replace("tool_timeout_sec = 360", "tool_timeout_sec = 361", StringComparison.Ordinal));
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        Assert.Throws<InvalidOperationException>(() => manager.SetEnabled(paths, true));
+
+        File.WriteAllText(paths.CodexConfigFile, ProductInfo.ManagedConfigStart + "\r\n[[broken");
+        Assert.Equal(CodexIntegrationOwnership.Invalid, manager.InspectOwnership(paths));
+    }
+
+    [Fact]
+    public void CodexConfigRejectsDisplacedMarkersWithoutMutatingOrRemovingUnrelatedToml()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: false);
+
+        var generated = File.ReadAllText(paths.CodexConfigFile);
+        var exactReviewerOutsideMarkers = generated
+            .Replace(ProductInfo.ManagedConfigStart, string.Empty, StringComparison.Ordinal)
+            .Replace(ProductInfo.ManagedConfigEnd, string.Empty, StringComparison.Ordinal)
+            .TrimStart('\r', '\n');
+        var displaced =
+            $"{ProductInfo.ManagedConfigStart}\n" +
+            "[mcp_servers.unrelated]\n" +
+            "enabled = false\n" +
+            $"{ProductInfo.ManagedConfigEnd}\n\n" +
+            exactReviewerOutsideMarkers;
+        File.WriteAllText(paths.CodexConfigFile, displaced, new UTF8Encoding(false));
+        CodexConfigManager.ValidateToml(displaced, allowEmpty: false);
+        var expectedBytes = File.ReadAllBytes(paths.CodexConfigFile);
+
+        Assert.Equal(CodexIntegrationOwnership.Invalid, manager.InspectOwnership(paths));
+
+        Assert.Throws<InvalidOperationException>(() => manager.SetEnabled(paths, enabled: true));
+        Assert.Equal(expectedBytes, File.ReadAllBytes(paths.CodexConfigFile));
+
+        Assert.Throws<InvalidOperationException>(() => manager.InstallOrRepair(paths, enabled: true));
+        Assert.Equal(expectedBytes, File.ReadAllBytes(paths.CodexConfigFile));
+
+        Assert.Throws<InvalidDataException>(() => manager.Uninstall(paths));
+        Assert.Equal(expectedBytes, File.ReadAllBytes(paths.CodexConfigFile));
+        Assert.Contains("[mcp_servers.unrelated]\nenabled = false", displaced, StringComparison.Ordinal);
+        Assert.Equal(1, Count(displaced, "[mcp_servers.local_gpu_reviewer]"));
+        Assert.Empty(Directory.GetFiles(paths.CodexHome, "config.toml.thalen-helper.*.bak"));
+    }
+
+    [Fact]
     public void CodexConfigInstallRepairAndUninstallAreSurgicalAndIdempotent()
     {
         using var temporary = new TemporaryDirectory();
@@ -32,6 +99,12 @@ public sealed class ManagedFilesTests
         Assert.False(repaired.Changed);
         Assert.Equal(content, File.ReadAllText(paths.CodexConfigFile));
         Assert.Equal(1, Count(content, ProductInfo.ManagedConfigStart));
+
+        var alreadyDisabled = manager.SetEnabled(paths, false);
+        Assert.False(alreadyDisabled.Changed);
+        Assert.Null(alreadyDisabled.BackupPath);
+        Assert.Equal("unchanged", alreadyDisabled.Operation);
+        Assert.Equal(content, File.ReadAllText(paths.CodexConfigFile));
 
         manager.SetEnabled(paths, true);
         Assert.Contains("enabled = true", File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);

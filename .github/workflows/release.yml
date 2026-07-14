@@ -111,6 +111,7 @@ jobs:
             'Codex-GPU-Thalen-Helper-Setup.exe'
             "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-win-x64-portable.zip"
             "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-sbom.zip"
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-Friend-Installer.zip"
             'SHA256SUMS.txt'
             'SIGNING_STATUS.txt'
           )
@@ -142,6 +143,7 @@ jobs:
             'Codex-GPU-Thalen-Helper-Setup.exe'
             "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-win-x64-portable.zip"
             "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-sbom.zip"
+            "Codex-GPU-Thalen-Helper-$($env:RELEASE_VERSION)-Friend-Installer.zip"
             'SHA256SUMS.txt'
             'SIGNING_STATUS.txt'
           ) | Sort-Object

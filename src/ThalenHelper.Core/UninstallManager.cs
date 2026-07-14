@@ -46,14 +46,15 @@ public sealed class UninstallManager
             : ProductPaths.Resolve(_paths.InstallDirectory, _paths.StateDirectory, state.ManagedCodexHome);
         var managed = new List<ManagedFileResult>();
         var modelRemoved = false;
-        var ownsRuntime = IntegrationOwnership.IsManagedByHelper(state);
+        var ownership = IntegrationOwnership.Inspect(managedPaths, state, _codexConfig);
+        var ownsRuntime = ownership.Status == IntegrationOwnershipStatus.ManagedValid;
         var preservesUnownedRuntime = state is not null && !ownsRuntime;
         if (state is not null)
         {
-            state.Availability = HelperAvailability.Disabled;
-            await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
             if (ownsRuntime)
             {
+                state.Availability = HelperAvailability.Disabled;
+                await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
                 GpuCoordination.RequestCancellation();
                 if (!string.IsNullOrWhiteSpace(state.SelectedModel))
                 {
@@ -88,7 +89,10 @@ public sealed class UninstallManager
             var originalConfigBackup = GetOriginalBackup(state, managedPaths.CodexConfigFile);
             var originalAgentsBackup = GetOriginalBackup(state, managedPaths.AgentsOverrideFile);
             var configWasCreated = state.FilesCreated.Contains(managedPaths.CodexConfigFile, StringComparer.OrdinalIgnoreCase);
-            managed.Add(UninstallCodexConfigWithRecovery(managedPaths, originalConfigBackup, configWasCreated));
+            managed.Add(IntegrationOwnership.IsManagedByHelper(state)
+                && ownership.Status == IntegrationOwnershipStatus.ManagedDrift
+                    ? PreserveForManualCleanup(managedPaths.CodexConfigFile)
+                    : UninstallCodexConfigWithRecovery(managedPaths, originalConfigBackup, configWasCreated));
             var agentsWasCreated = state.FilesCreated.Contains(managedPaths.AgentsOverrideFile, StringComparer.OrdinalIgnoreCase);
             managed.Add(UninstallAgentsWithRecovery(managedPaths, agentsWasCreated, originalAgentsBackup));
         }

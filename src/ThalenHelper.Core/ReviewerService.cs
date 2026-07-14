@@ -11,8 +11,23 @@ public sealed class ReviewerService
     private readonly Func<int, bool> _listenerCheck;
     private readonly Func<InstallationState, ReviewerModelStorageVerification> _modelStorageValidator;
     private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
+    private readonly Func<InstallationState, IntegrationOwnershipInspection> _ownershipInspector;
 
     public ReviewerService(
+        ProductPaths paths,
+        StateStore stateStore,
+        OllamaClient ollama)
+        : this(
+            stateStore,
+            ollama,
+            null,
+            null,
+            null,
+            state => IntegrationOwnership.Inspect(paths, state))
+    {
+    }
+
+    internal ReviewerService(
         StateStore stateStore,
         OllamaClient ollama)
         : this(stateStore, ollama, null, null)
@@ -24,7 +39,8 @@ public sealed class ReviewerService
         OllamaClient ollama,
         Func<int, bool>? listenerCheck,
         Func<InstallationState, ReviewerModelStorageVerification>? modelStorageValidator = null,
-        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null)
+        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null,
+        Func<InstallationState, IntegrationOwnershipInspection>? ownershipInspector = null)
     {
         _stateStore = stateStore;
         _ollama = ollama;
@@ -34,6 +50,9 @@ public sealed class ReviewerService
             Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.Process)));
         var pressureGuard = new ResourcePressureGuard();
         _resourcePressureValidator = resourcePressureValidator ?? pressureGuard.Check;
+        _ownershipInspector = ownershipInspector ?? (state => IntegrationOwnership.IsManagedByHelper(state)
+            ? new IntegrationOwnershipInspection(IntegrationOwnershipStatus.ManagedValid, "Managed state accepted by the test seam.")
+            : new IntegrationOwnershipInspection(IntegrationOwnershipStatus.ExternalUnmarked, "External integration preserved."));
     }
 
     public async Task<ReviewerHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
@@ -50,12 +69,13 @@ public sealed class ReviewerService
             };
         }
 
-        if (!IntegrationOwnership.IsManagedByHelper(state))
+        var ownership = _ownershipInspector(state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
         {
             return HealthError(
                 state,
-                "EXISTING_INTEGRATION_PRESERVED",
-                "This helper does not have positive ownership of local_gpu_reviewer and did not probe Ollama.");
+                OwnershipErrorCode(ownership),
+                OwnershipErrorMessage(ownership, "probe Ollama"));
         }
 
         if (!_listenerCheck(_ollama.BaseUri.Port))
@@ -126,12 +146,16 @@ public sealed class ReviewerService
     {
         ArgumentNullException.ThrowIfNull(request);
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-        if (state is not null && !IntegrationOwnership.IsManagedByHelper(state))
+        if (state is not null)
         {
-            return Error(
-                "EXISTING_INTEGRATION_PRESERVED",
-                "This helper does not have positive ownership of local_gpu_reviewer and did not run local inference.",
-                false);
+            var ownership = _ownershipInspector(state);
+            if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+            {
+                return Error(
+                    OwnershipErrorCode(ownership),
+                    OwnershipErrorMessage(ownership, "run local inference"),
+                    false);
+            }
         }
 
         if (state is null || string.IsNullOrWhiteSpace(state.SelectedModel))
@@ -323,6 +347,18 @@ public sealed class ReviewerService
             };
         }
     }
+
+    private static string OwnershipErrorCode(IntegrationOwnershipInspection ownership)
+        => ownership.Status is IntegrationOwnershipStatus.ManagedDrift
+            or IntegrationOwnershipStatus.AmbiguousOrMalformed
+            ? "INTEGRATION_OWNERSHIP_DRIFT"
+            : "EXISTING_INTEGRATION_PRESERVED";
+
+    private static string OwnershipErrorMessage(IntegrationOwnershipInspection ownership, string operation)
+        => ownership.Status is IntegrationOwnershipStatus.ManagedDrift
+            or IntegrationOwnershipStatus.AmbiguousOrMalformed
+            ? $"The current Codex reviewer entry does not match helper-owned state. The helper did not {operation}."
+            : $"This helper does not own the external local_gpu_reviewer integration and did not {operation}.";
 
     internal static ReviewerModelStorageVerification ValidateModelStorage(
         InstallationState state,

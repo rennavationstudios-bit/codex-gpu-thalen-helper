@@ -37,6 +37,47 @@ public sealed class CliPolicyTests
     }
 
     [Fact]
+    public async Task DeferredInstallerBootstrapMergesOnceWithoutModelOrInference()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        await File.WriteAllTextAsync(paths.CodexConfigFile, "model = \"preserve\"\n");
+        await File.WriteAllTextAsync(paths.AgentsOverrideFile, "# Preserve this instruction\n");
+
+        var arguments = new[]
+        {
+            "install",
+            "--yes",
+            "--defer-model",
+            "--auto-start", "false",
+            "--install-dir", paths.InstallDirectory,
+            "--state-dir", paths.StateDirectory,
+            "--codex-home", paths.CodexHome
+        };
+        Assert.Equal(0, await CliApplication.RunAsync(arguments));
+        Assert.Equal(0, await CliApplication.RunAsync(arguments));
+
+        var state = await new StateStore(paths.StateFile).LoadAsync();
+        Assert.NotNull(state);
+        Assert.Null(state.SelectedModel);
+        Assert.Null(state.ModelStorageLocation);
+        Assert.Equal(HelperAvailability.Disabled, state.Availability);
+        Assert.False(state.Preferences.AutoStartOllama);
+        Assert.False(state.StartupEntryOwnedByHelper);
+        Assert.False(state.SelectedModelOwnedByHelper);
+        Assert.Contains(paths.CodexConfigFile, state.BackupLocations.Keys, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(paths.AgentsOverrideFile, state.BackupLocations.Keys, StringComparer.OrdinalIgnoreCase);
+
+        var config = await File.ReadAllTextAsync(paths.CodexConfigFile);
+        var agents = await File.ReadAllTextAsync(paths.AgentsOverrideFile);
+        Assert.StartsWith("model = \"preserve\"", config, StringComparison.Ordinal);
+        Assert.StartsWith("# Preserve this instruction", agents, StringComparison.Ordinal);
+        Assert.Equal(1, Count(config, ProductInfo.ManagedConfigStart));
+        Assert.Equal(1, Count(agents, ProductInfo.ManagedAgentsStart));
+        Assert.DoesNotContain(ProductInfo.ManagedReliabilityStart, agents, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void StartupVerificationExitPolicyRejectsReachableUnsafeStates()
     {
         var state = new InstallationState
@@ -73,4 +114,7 @@ public sealed class CliPolicyTests
                 safe with { LoopbackOnly = false, Code = "OLLAMA_NETWORK_EXPOSURE" },
                 state));
     }
+
+    private static int Count(string value, string marker)
+        => value.Split(marker, StringSplitOptions.None).Length - 1;
 }

@@ -30,6 +30,8 @@ public sealed class OllamaStartupTests
         Assert.Equal(Path.GetFullPath(state.ModelStorageLocation!), platform.UserEnvironment["OLLAMA_MODELS"]);
         Assert.Equal("127.0.0.1:11434", platform.UserEnvironment["OLLAMA_HOST"]);
         Assert.Contains("ollama autostart --quiet", platform.RunEntry, StringComparison.Ordinal);
+        Assert.True(state.StartupEntryOwnedByHelper);
+        Assert.True(manager.IsConfigured(paths));
         Assert.Equal(0, platform.StartCount);
     }
 
@@ -48,6 +50,8 @@ public sealed class OllamaStartupTests
 
         Assert.False(result.AutoStartConfigured);
         Assert.Null(platform.RunEntry);
+        Assert.False(state.StartupEntryOwnedByHelper);
+        Assert.False(manager.IsConfigured(paths));
         Assert.True(result.EndpointReachable);
         Assert.Equal("MANUAL_START_REQUIRED", result.Code);
         Assert.Contains("manually starting Ollama", result.Message, StringComparison.OrdinalIgnoreCase);
@@ -73,6 +77,82 @@ public sealed class OllamaStartupTests
         Assert.Equal("OLLAMA_PROCESS_UNHEALTHY", result.Code);
         Assert.Equal(0, platform.StartCount);
         Assert.Equal(15, platform.DelayCount);
+    }
+
+    [Fact]
+    public async Task MisleadingExternalAutoStartArtifactIsPreservedButNeverCertified()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var state = CreateState(temporary.Path);
+        CreateManifest(state);
+        var platform = new FakeStartupPlatform
+        {
+            ExternalAutoStartArtifact = "Ollama telemetry bootstrap",
+            LoopbackOnly = true
+        };
+        var manager = new OllamaAutoStartManager(() => CreateInventoryClient(reachable: true), platform);
+
+        manager.Configure(paths, state, enabled: true);
+        var result = await manager.VerifyAsync(paths, state, false);
+
+        Assert.Null(platform.RunEntry);
+        Assert.Equal("Ollama telemetry bootstrap", platform.ExternalAutoStartArtifact);
+        Assert.False(state.StartupEntryOwnedByHelper);
+        Assert.True(state.Preferences.AutoStartOllama);
+        Assert.False(manager.IsConfigured(paths));
+        Assert.False(result.AutoStartConfigured);
+        Assert.Equal("EXTERNAL_AUTOSTART_UNVERIFIED", result.Code);
+        Assert.Contains("preserved", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not verified", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, platform.StartCount);
+    }
+
+    [Fact]
+    public void AugmentedOrChainedHelperRunCommandsAreNeverCertified()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var state = CreateState(temporary.Path);
+        var platform = new FakeStartupPlatform { LoopbackOnly = true };
+        var manager = new OllamaAutoStartManager(() => CreateInventoryClient(reachable: true), platform);
+        manager.Configure(paths, state, enabled: true);
+        var canonical = platform.RunEntry!;
+
+        Assert.True(manager.IsConfigured(paths));
+        foreach (var altered in new[]
+                 {
+                     "cmd.exe /c " + canonical,
+                     "prefix " + canonical,
+                     canonical + " --extra",
+                     canonical + " & calc.exe",
+                     canonical + " && ollama serve",
+                     canonical + " ",
+                     canonical.Replace("\" ollama", "-wrapper.exe\" ollama", StringComparison.Ordinal)
+                 })
+        {
+            platform.RunEntry = altered;
+            Assert.False(manager.IsConfigured(paths));
+        }
+    }
+
+    [Fact]
+    public void ListenerPolicyRequiresAtLeastOneListenerAndRejectsWildcards()
+    {
+        var absent = OllamaAutoStartManager.EvaluateListenerStatus([]);
+        Assert.False(absent.HasListeners);
+        Assert.False(absent.LoopbackOnly);
+
+        var loopback = OllamaAutoStartManager.EvaluateListenerStatus(
+            [new IPEndPoint(IPAddress.Loopback, 11434), new IPEndPoint(IPAddress.IPv6Loopback, 11434)]);
+        Assert.True(loopback.HasListeners);
+        Assert.True(loopback.LoopbackOnly);
+        Assert.Equal(2, loopback.ListenerCount);
+
+        var exposed = OllamaAutoStartManager.EvaluateListenerStatus(
+            [new IPEndPoint(IPAddress.IPv6Any, 11434)]);
+        Assert.True(exposed.HasListeners);
+        Assert.False(exposed.LoopbackOnly);
     }
 
     [Fact]
@@ -252,6 +332,7 @@ internal sealed class FakeStartupPlatform : IOllamaStartupPlatform
     public Dictionary<string, string?> UserEnvironment { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string?> ProcessEnvironment { get; } = new(StringComparer.OrdinalIgnoreCase);
     public string? RunEntry { get; set; }
+    public string? ExternalAutoStartArtifact { get; set; }
     public bool ProcessRunning { get; set; }
     public bool LoopbackOnly { get; set; } = true;
     public string? Executable { get; set; }
@@ -279,6 +360,7 @@ internal sealed class FakeStartupPlatform : IOllamaStartupPlatform
         MutationCount++;
         RunEntry = command;
     }
+    public bool HasExternalAutoStart() => !string.IsNullOrWhiteSpace(ExternalAutoStartArtifact);
     public bool IsAnyOllamaProcessRunning() => ProcessRunning;
     public string? FindOllamaExecutable() => Executable;
 

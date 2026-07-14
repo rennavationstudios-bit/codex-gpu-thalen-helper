@@ -30,7 +30,7 @@ public sealed class ControlService
     public async Task<ControlResult> PauseAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -51,7 +51,7 @@ public sealed class ControlService
     public async Task<ControlResult> ResumeAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -76,7 +76,7 @@ public sealed class ControlService
     public async Task<ControlResult> ReleaseGpuAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -98,7 +98,7 @@ public sealed class ControlService
     public async Task<ControlResult> DisableAsync(bool disableCodexEntry, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -124,7 +124,7 @@ public sealed class ControlService
     public async Task<ControlResult> EnableAsync(CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -155,7 +155,7 @@ public sealed class ControlService
     public async Task<ControlResult> SetLowImpactAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -178,7 +178,7 @@ public sealed class ControlService
     public async Task<ControlResult> SetKeepWarmAsync(bool enabled, CancellationToken cancellationToken = default)
     {
         var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
-        if (PreservationGuard(state) is { } preserved)
+        if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
         }
@@ -207,15 +207,23 @@ public sealed class ControlService
         => await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The helper is not installed or configured.");
 
-    private static ControlResult? PreservationGuard(InstallationState state)
+    private ControlResult? OwnershipGuard(InstallationState state)
     {
-        return !IntegrationOwnership.IsManagedByHelper(state)
-            ? new ControlResult(
-                false,
-                "EXISTING_INTEGRATION_PRESERVED",
-                "This helper does not own the existing local_gpu_reviewer integration, so no configuration, Ollama, model, or GPU state was changed.",
-                state)
-            : null;
+        var ownership = IntegrationOwnership.Inspect(_paths, state, _codexConfig);
+        if (ownership.Status == IntegrationOwnershipStatus.ManagedValid)
+        {
+            return null;
+        }
+
+        var drift = ownership.Status is IntegrationOwnershipStatus.ManagedDrift
+            or IntegrationOwnershipStatus.AmbiguousOrMalformed;
+        return new ControlResult(
+            false,
+            drift ? "INTEGRATION_OWNERSHIP_DRIFT" : "EXISTING_INTEGRATION_PRESERVED",
+            drift
+                ? "The current Codex reviewer entry no longer matches helper-owned state. No configuration, Ollama, model, startup, or GPU state was changed."
+                : "This helper does not own the external local_gpu_reviewer integration, so no configuration, Ollama, model, startup, or GPU state was changed.",
+            state);
     }
 
     private async Task<bool> TryUnloadAsync(string? model, CancellationToken cancellationToken)

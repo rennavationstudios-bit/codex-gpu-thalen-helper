@@ -26,7 +26,7 @@ After a user-authorized pull, setup runs:
 4. Explicit unload through generation with `keep_alive=0`.
 5. A second `/api/ps` check proving unload.
 
-Durations and safe counters are recorded; prompts/responses are not. OOM, timeout, malformed response, wrong output, or unload failure keeps the integration disabled. Exactly one smaller automatic/commercial candidate may be attempted. Pre-existing models are not removed or marked as product-owned.
+Durations and safe counters are recorded; prompts/responses are not. OOM, timeout, malformed response, wrong output, or unload failure keeps the integration disabled. Guided setup never switches to a different fallback model after the user confirms a named selection. An explicitly configured noninteractive installation may attempt exactly one smaller automatic/commercial candidate. Pre-existing models are not removed or marked as product-owned.
 
 ## Limitations
 

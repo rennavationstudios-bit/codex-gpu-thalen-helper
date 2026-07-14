@@ -264,7 +264,7 @@ public sealed class OllamaAndReviewerTests
         var handler = InventoryHandler();
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
 
-        var health = await new ReviewerService(store, client, null, StorageOk).GetHealthAsync();
+        var health = await new ReviewerService(store, client, _ => true, StorageOk).GetHealthAsync();
 
         Assert.True(health.EndpointReachable);
         Assert.True(health.ModelAvailable);
@@ -546,7 +546,7 @@ public sealed class OllamaAndReviewerTests
             Availability = HelperAvailability.Disabled
         };
 
-        var result = await manager.ValidateSelectedModelAsync(state);
+        var result = await manager.ValidateSelectedModelForTestingAsync(state);
 
         Assert.False(result.Success);
         Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
@@ -569,7 +569,7 @@ public sealed class OllamaAndReviewerTests
         });
         var handler = InventoryHandler();
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
-        var reviewer = new ReviewerService(store, client, null, StorageOk);
+        var reviewer = new ReviewerService(store, client, _ => true, StorageOk);
 
         await Assert.ThrowsAsync<ArgumentException>(() => reviewer.ReviewAsync(new ReviewRequest(new string('x', 12_001))));
         Assert.Empty(handler.Requests);

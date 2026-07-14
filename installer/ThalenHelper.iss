@@ -1,5 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-beta.1"
+  #define MyAppVersion "0.1.0-beta.3"
+#endif
+
+#ifndef MyAppPeVersion
+  #define MyAppPeVersion "0.1.0.3"
 #endif
 
 #define MyAppName "Codex GPU Thalen Helper"
@@ -27,14 +31,20 @@ OutputDir=..\.artifacts\installer
 OutputBaseFilename=Codex-GPU-Thalen-Helper-Setup
 Compression=lzma2/fast
 SolidCompression=yes
-WizardStyle=modern
+WizardStyle=modern dark polar includetitlebar hidebevels
+WizardBackColor=#090D13
+WizardImageFile=
+WizardSmallImageFile=
+WizardSizePercent=125,125
+WizardKeepAspectRatio=yes
+DisableWelcomePage=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\ThalenHelper.ControlCenter.exe
-VersionInfoVersion=0.1.0.1
+VersionInfoVersion={#MyAppPeVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} community beta installer
 VersionInfoProductName={#MyAppName}
-VersionInfoProductVersion=0.1.0.1
+VersionInfoProductVersion={#MyAppPeVersion}
 VersionInfoCopyright=Copyright (c) 2026 Codex GPU Thalen Helper contributors
 LicenseFile=..\LICENSE
 InfoBeforeFile=..\installer-notice.txt
@@ -47,10 +57,12 @@ Source: "..\.artifacts\stage\*"; DestDir: "{app}"; Flags: ignoreversion recurses
 [Icons]
 Name: "{group}\Codex GPU Thalen Helper"; Filename: "{app}\ThalenHelper.ControlCenter.exe"; WorkingDir: "{app}"
 Name: "{group}\Documentation"; Filename: "{app}\README.md"
+Name: "{group}\Codex setup handoff"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\docs\CODEX-HANDOFF.md"""; WorkingDir: "{app}\docs"
 Name: "{userdesktop}\Codex GPU Thalen Helper"; Filename: "{app}\ThalenHelper.ControlCenter.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "ollamaautostart"; Description: "Start Ollama automatically after model setup (recommended)"; GroupDescription: "Local review behavior:"; Flags: checkedonce
 
 [Run]
 Filename: "{app}\ThalenHelper.ControlCenter.exe"; Description: "Open setup and Control Center"; Flags: nowait postinstall skipifsilent
@@ -163,6 +175,45 @@ begin
     Result := Result + ' --pull-and-validate';
 end;
 
+function DetectedCodexHome: String;
+begin
+  Result := Trim(GetEnv('CODEX_HOME'));
+  if Result = '' then
+    Result := ExpandConstant('{userprofile}\.codex');
+end;
+
+function InteractiveBootstrapArguments: String;
+var
+  CodexHome: String;
+  StateDir: String;
+  AutoStart: String;
+  InstallContext: String;
+begin
+  InstallContext := AddBackslash(ExpandConstant('{app}')) + '.thalen-helper-install-context.json';
+  if FileExists(InstallContext) then
+  begin
+    Result := 'repair --install-dir "' + ExpandConstant('{app}') + '"';
+    Exit;
+  end;
+
+  CodexHome := DetectedCodexHome;
+  StateDir := ExpandConstant('{localappdata}\CodexGPUThalenHelper');
+  if HasUnsafeQuotedArgumentCharacters(CodexHome) or
+     HasUnsafeQuotedArgumentCharacters(StateDir) then
+    RaiseException('The detected Codex or state path contains unsafe quoted argument characters.');
+
+  if FileExists(AddBackslash(StateDir) + 'state.json') then
+    Result := 'repair --install-dir "' + ExpandConstant('{app}') + '" --state-dir "' + StateDir + '" --codex-home "' + CodexHome + '"'
+  else
+  begin
+    if WizardIsTaskSelected('ollamaautostart') then
+      AutoStart := 'true'
+    else
+      AutoStart := 'false';
+    Result := 'install --yes --defer-model --install-dir "' + ExpandConstant('{app}') + '" --state-dir "' + StateDir + '" --codex-home "' + CodexHome + '" --auto-start ' + AutoStart;
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 var
   CodexHome: String;
@@ -234,9 +285,23 @@ begin
   end;
 end;
 
+procedure InitializeWizard;
+begin
+  WizardForm.Caption := '{#MyAppName} Setup';
+  WizardForm.WelcomeLabel1.Caption := 'Private AI review, configured safely';
+  WizardForm.WelcomeLabel2.Caption :=
+    'Setup installs the app and automatically adds only the protected managed Codex integration and local GPU guidance. ' +
+    'It never downloads or loads a model during installation.';
+  WizardForm.FinishedHeadingLabel.Caption := 'Your protected base setup is ready';
+  WizardForm.FinishedLabel.Caption :=
+    'The Control Center can now guide you to an existing Ollama model or ask before downloading one. ' +
+    'Existing unowned local_gpu_reviewer integrations are preserved instead of replaced.';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
+  Arguments: String;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -254,6 +319,21 @@ begin
         RaiseException('Windows could not start the explicit silent configuration command.')
       else if ResultCode <> 0 then
         RaiseException(Format('Explicit silent configuration failed with exit code %d.', [ResultCode]));
+    end
+    else
+    begin
+      Arguments := InteractiveBootstrapArguments;
+      Log('Applying protected interactive Codex bootstrap using persisted install routing when available.');
+      if not Exec(
+        ExpandConstant('{app}\thalen-helper.exe'),
+        Arguments,
+        ExpandConstant('{app}'),
+        SW_HIDE,
+        ewWaitUntilTerminated,
+        ResultCode) then
+        RaiseException('Windows could not start the protected Codex bootstrap command.')
+      else if ResultCode <> 0 then
+        RaiseException(Format('Protected Codex bootstrap failed with exit code %d. Existing files were preserved or rolled back.', [ResultCode]));
     end;
   end;
 end;

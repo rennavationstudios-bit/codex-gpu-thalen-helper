@@ -2,6 +2,35 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+## 0.1.0-beta.3 - 2026-07-14
+
+- Added exact live ownership validation before every managed control, model change, model move, inference test, repair, and runtime cleanup operation.
+- Made external unmarked reviewers an explicitly unverified, read-only status mode; managed-only controls are disabled and no invocation guidance is installed for an arbitrary external server.
+- Added passive non-loopback listener warnings and blocked enable/resume when any Ollama listener is exposed beyond loopback.
+- Detects existing user-owned Ollama autostart sources, does not create a duplicate helper Run entry, and reports unverified external sources without certifying them.
+- Structurally binds managed ownership to the exact reviewer table inside the unique marker span and fails closed on displaced markers.
+- Guards every mutating install route against a different recorded Codex home before context or protected-file writes, and makes final config/state enablement transactional.
+- Rechecks ownership around inventory, pull, validation generation, runtime inspection, unload, model-move activation, and rollback boundaries.
+- Requires the exact canonical helper Run command for startup certification; augmented or chained commands remain external and unverified.
+- Deletes quarantined model files only after individual revalidation and preserves late writer content instead of recursively deleting a changed tree.
+- Preserves drifted protected files for reviewed manual recovery instead of rewriting or surgically uninstalling an ownership contract that no longer matches.
+- Opens the required model-acquisition page automatically after the installer's deferred bootstrap and highlights required setup headings in orange.
+- Added the validated friend installer bundle with a clearly named root installer, exact checksum command, unsigned-build disclosure, beginner install/use guide, and sanitized Codex handoff.
+- Publishes the friend bundle as a checksummed, attested prerelease asset and enforces source, assembly, installer, notice, bundle, and PE version consistency.
+
+## 0.1.0-beta.2 - 2026-07-13
+
+- Rebuilt the Windows setup wizard and Control Center with a modern dark AI-inspired interface, stronger action hierarchy, plain-language status, and contextual primary actions.
+- Applied a matching native dark installer style and made interactive installation automatically discover the current Codex home and perform a protected, disabled, no-model bootstrap.
+- Added hover help and accessibility descriptions for every action button.
+- Added first-run model discovery, a model-folder browser, an explicit no-download setup-later path, and a separate model download/validation confirmation with expected size.
+- Clarified pause/resume versus persistent enable/disable behavior and made existing unmanaged reviewer preservation a friendly protected state.
+- Preserved custom state and Codex-home routing across interactive reinstalls and rejected repair drift before any protected-file or install-context mutation.
+- Bound guided acquisition consent to the exact selected model, disclosed possible same-model inventory repair/download, and disabled unapproved automatic fallback downloads.
+- Serialized Control Center actions and hardened build scripts against .NET first-run certificate generation and telemetry side effects.
+
 ## 0.1.0-beta.1 - 2026-07-13
 
 - Initial independent community beta for Windows x64.

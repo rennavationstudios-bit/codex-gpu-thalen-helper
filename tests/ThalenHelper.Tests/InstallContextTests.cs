@@ -52,6 +52,80 @@ public sealed class InstallContextTests
     }
 
     [Fact]
+    public void RepairUsesStoredContextAndExplicitPathsStillTakePrecedence()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        InstallContextStore.Save(paths);
+
+        var stored = CliApplication.ResolvePaths(
+            new ParsedArguments([
+                "repair",
+                "--install-dir", paths.InstallDirectory
+            ]),
+            "repair");
+
+        Assert.Equal(paths.StateDirectory, stored.StateDirectory);
+        Assert.Equal(paths.CodexHome, stored.CodexHome);
+
+        var explicitState = Path.Combine(temporary.Path, "explicit repair state");
+        var explicitCodex = Path.Combine(temporary.Path, "explicit repair codex");
+        var overridden = CliApplication.ResolvePaths(
+            new ParsedArguments([
+                "repair",
+                "--install-dir", paths.InstallDirectory,
+                "--state-dir", explicitState,
+                "--codex-home", explicitCodex
+            ]),
+            "repair");
+
+        Assert.Equal(Path.GetFullPath(explicitState), overridden.StateDirectory);
+        Assert.Equal(Path.GetFullPath(explicitCodex), overridden.CodexHome);
+    }
+
+    [Fact]
+    public async Task RepairReusesCustomContextIdempotently()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        Directory.CreateDirectory(paths.CodexHome);
+        await File.WriteAllTextAsync(paths.CodexConfigFile, "model = \"preserve\"\n");
+        await File.WriteAllTextAsync(paths.AgentsOverrideFile, "# Preserve this instruction\n");
+
+        var installArguments = new[]
+        {
+            "install",
+            "--yes",
+            "--defer-model",
+            "--auto-start", "false",
+            "--install-dir", paths.InstallDirectory,
+            "--state-dir", paths.StateDirectory,
+            "--codex-home", paths.CodexHome
+        };
+        Assert.Equal(0, await CliApplication.RunAsync(installArguments));
+
+        var repairArguments = new[]
+        {
+            "repair",
+            "--install-dir", paths.InstallDirectory
+        };
+        Assert.Equal(0, await CliApplication.RunAsync(repairArguments));
+        Assert.Equal(0, await CliApplication.RunAsync(repairArguments));
+
+        var context = InstallContextStore.Load(paths.InstallDirectory);
+        Assert.NotNull(context);
+        Assert.Equal(paths.StateDirectory, context.StateDirectory);
+        Assert.Equal(paths.CodexHome, context.CodexHome);
+
+        var config = await File.ReadAllTextAsync(paths.CodexConfigFile);
+        var agents = await File.ReadAllTextAsync(paths.AgentsOverrideFile);
+        Assert.StartsWith("model = \"preserve\"", config, StringComparison.Ordinal);
+        Assert.StartsWith("# Preserve this instruction", agents, StringComparison.Ordinal);
+        Assert.Equal(1, Count(config, ProductInfo.ManagedConfigStart));
+        Assert.Equal(1, Count(agents, ProductInfo.ManagedAgentsStart));
+    }
+
+    [Fact]
     public void UninstallWithoutExplicitInstallDirectoryProbesTheExecutableDirectory()
     {
         var resolved = CliApplication.ResolvePaths(
@@ -104,4 +178,7 @@ public sealed class InstallContextTests
         Assert.False(File.Exists(InstallContextStore.GetPath(paths.InstallDirectory)));
         Assert.Contains("left untouched", result.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static int Count(string value, string marker)
+        => value.Split(marker, StringSplitOptions.None).Length - 1;
 }

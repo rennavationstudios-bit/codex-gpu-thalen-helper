@@ -10,8 +10,60 @@ internal sealed record ExistingIntegrationInspection(
     ProtectedFileSnapshot Snapshot,
     string Content);
 
+public enum CodexIntegrationOwnership
+{
+    NotConfigured,
+    ExternalUnmarked,
+    ManagedValid,
+    ManagedDrift,
+    Invalid
+}
+
 public sealed partial class CodexConfigManager
 {
+    public CodexIntegrationOwnership InspectOwnership(ProductPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var snapshot = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+        if (!snapshot.Exists)
+        {
+            return CodexIntegrationOwnership.NotConfigured;
+        }
+
+        var content = ProtectedFileTransaction.DecodeUtf8(snapshot);
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return CodexIntegrationOwnership.NotConfigured;
+        }
+
+        try
+        {
+            ValidateToml(content, allowEmpty: true);
+            var hasStart = content.Contains(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
+            var hasEnd = content.Contains(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
+            if (hasStart || hasEnd)
+            {
+                if (!TryGetManagedBlock(content, out var managedBlock, out var withoutManaged)
+                    || !IsStructurallyBoundManagedReviewer(managedBlock, withoutManaged))
+                {
+                    return CodexIntegrationOwnership.Invalid;
+                }
+
+                return ManagedReviewerMatches(managedBlock, paths)
+                    ? CodexIntegrationOwnership.ManagedValid
+                    : CodexIntegrationOwnership.ManagedDrift;
+            }
+
+            return ContainsExistingIntegration(content)
+                ? CodexIntegrationOwnership.ExternalUnmarked
+                : CodexIntegrationOwnership.NotConfigured;
+        }
+        catch (Exception exception) when (exception is InvalidDataException or TomlException or ArgumentException)
+        {
+            return CodexIntegrationOwnership.Invalid;
+        }
+    }
+
     internal ExistingIntegrationInspection InspectExistingUnmanagedIntegration(ProductPaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -21,6 +73,16 @@ public sealed partial class CodexConfigManager
             : string.Empty;
         ValidateToml(original, allowEmpty: true);
         var withoutManaged = RemoveManagedBlock(original, out var hadManagedBlock);
+        if (hadManagedBlock)
+        {
+            _ = TryGetManagedBlock(original, out var managedBlock, out _);
+            if (!IsStructurallyBoundManagedReviewer(managedBlock, withoutManaged))
+            {
+                throw new InvalidOperationException(
+                    "The managed Codex markers are not structurally bound to an exclusive local_gpu_reviewer table. No update was applied; review the protected-file diff manually.");
+            }
+        }
+
         return new ExistingIntegrationInspection(
             !hadManagedBlock && ContainsExistingIntegration(withoutManaged),
             snapshot,
@@ -142,6 +204,14 @@ public sealed partial class CodexConfigManager
 
         var original = ProtectedFileTransaction.DecodeUtf8(snapshot);
         ValidateToml(original, allowEmpty: false);
+        if (!TryGetManagedBlock(original, out var managedBlock, out var withoutManaged)
+            || !IsStructurallyBoundManagedReviewer(managedBlock, withoutManaged)
+            || !ManagedReviewerMatches(managedBlock, paths))
+        {
+            throw new InvalidOperationException(
+                "The managed Codex reviewer entry has changed since installation. No enabled setting was modified; review a fresh protected-file diff first.");
+        }
+
         var start = original.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
         var end = original.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
         if (start < 0 || end < start)
@@ -151,10 +221,16 @@ public sealed partial class CodexConfigManager
 
         var blockEnd = end + ProductInfo.ManagedConfigEnd.Length;
         var block = original[start..blockEnd];
-        var updatedBlock = EnabledLineRegex().Replace(block, $"enabled = {enabled.ToString().ToLowerInvariant()}", 1);
-        if (string.Equals(block, updatedBlock, StringComparison.Ordinal))
+        var enabledLine = EnabledLineRegex();
+        if (!enabledLine.IsMatch(block))
         {
             throw new InvalidOperationException("The managed enabled setting was not found.");
+        }
+
+        var updatedBlock = enabledLine.Replace(block, $"enabled = {enabled.ToString().ToLowerInvariant()}", 1);
+        if (string.Equals(block, updatedBlock, StringComparison.Ordinal))
+        {
+            return new ManagedFileResult(paths.CodexConfigFile, false, false, null, "unchanged");
         }
 
         var updated = original[..start] + updatedBlock + original[blockEnd..];
@@ -208,10 +284,16 @@ public sealed partial class CodexConfigManager
         var originalBytes = snapshot.Bytes;
         var original = ProtectedFileTransaction.DecodeUtf8(snapshot);
         ValidateToml(original, allowEmpty: true);
-        var updated = RemoveManagedBlock(original, out var removed);
-        if (!removed)
+        if (!TryGetManagedBlock(original, out var managedBlock, out var updated))
         {
             return new ManagedFileResult(paths.CodexConfigFile, false, false, null, "not-managed");
+        }
+
+        if (!IsStructurallyBoundManagedReviewer(managedBlock, updated)
+            || !ManagedReviewerMatches(managedBlock, paths))
+        {
+            throw new InvalidDataException(
+                "The managed Codex markers are not structurally bound to the exact local_gpu_reviewer table. The current file was preserved for manual cleanup.");
         }
 
         ValidateToml(updated, allowEmpty: true);
@@ -394,6 +476,24 @@ public sealed partial class CodexConfigManager
         return content[..start] + content[removeEnd..];
     }
 
+    private static bool TryGetManagedBlock(
+        string content,
+        out string managedBlock,
+        out string withoutManaged)
+    {
+        withoutManaged = RemoveManagedBlock(content, out var removed);
+        if (!removed)
+        {
+            managedBlock = string.Empty;
+            return false;
+        }
+
+        var start = content.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
+        var end = content.IndexOf(ProductInfo.ManagedConfigEnd, start, StringComparison.Ordinal);
+        managedBlock = content[start..(end + ProductInfo.ManagedConfigEnd.Length)];
+        return true;
+    }
+
     private static string EscapeTomlBasicString(string value)
         => value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
@@ -412,6 +512,139 @@ public sealed partial class CodexConfigManager
             && reviewerValue is TomlTable;
     }
 
+    private static bool ManagedReviewerMatches(string content, ProductPaths paths)
+    {
+        var reviewer = GetExclusiveManagedReviewer(content);
+        if (reviewer is null)
+        {
+            return false;
+        }
+
+        var expectedReviewerKeys = new[]
+        {
+            "command",
+            "default_tools_approval_mode",
+            "enabled",
+            "enabled_tools",
+            "env",
+            "required",
+            "startup_timeout_sec",
+            "supports_parallel_tool_calls",
+            "tool_timeout_sec",
+            "tools"
+        };
+        if (!reviewer.Keys.Order(StringComparer.Ordinal).SequenceEqual(expectedReviewerKeys, StringComparer.Ordinal))
+        {
+            return false;
+        }
+
+        if (!TryString(reviewer, "command", out var command)
+            || !PathsEqual(command, paths.McpExecutable)
+            || !TryBoolean(reviewer, "enabled", out _)
+            || !TryBoolean(reviewer, "required", out var required)
+            || required
+            || !TryBoolean(reviewer, "supports_parallel_tool_calls", out var supportsParallel)
+            || supportsParallel
+            || !TryString(reviewer, "default_tools_approval_mode", out var defaultApproval)
+            || !string.Equals(defaultApproval, "prompt", StringComparison.Ordinal)
+            || !TryInteger(reviewer, "startup_timeout_sec", 20)
+            || !TryInteger(reviewer, "tool_timeout_sec", 360)
+            || !reviewer.TryGetValue("enabled_tools", out var enabledToolsValue)
+            || enabledToolsValue is not TomlArray enabledTools
+            || !enabledTools.OfType<string>().SequenceEqual(["local_gpu_health", "local_gpu_review"], StringComparer.Ordinal)
+            || !reviewer.TryGetValue("env", out var envValue)
+            || envValue is not TomlTable env
+            || !env.Keys.Order(StringComparer.Ordinal).SequenceEqual(["OLLAMA_HOST", "THALEN_HELPER_STATE_DIR"], StringComparer.Ordinal)
+            || !TryString(env, "OLLAMA_HOST", out var host)
+            || !string.Equals(host, "http://127.0.0.1:11434", StringComparison.Ordinal)
+            || !TryString(env, "THALEN_HELPER_STATE_DIR", out var stateDirectory)
+            || !PathsEqual(stateDirectory, paths.StateDirectory)
+            || !reviewer.TryGetValue("tools", out var toolsValue)
+            || toolsValue is not TomlTable tools
+            || !tools.Keys.Order(StringComparer.Ordinal).SequenceEqual(["local_gpu_health", "local_gpu_review"], StringComparer.Ordinal)
+            || !HasExactApprovalMode(tools, "local_gpu_health", "auto")
+            || !HasExactApprovalMode(tools, "local_gpu_review", "prompt"))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsStructurallyBoundManagedReviewer(string managedBlock, string withoutManaged)
+    {
+        ValidateToml(withoutManaged, allowEmpty: true);
+        return GetExclusiveManagedReviewer(managedBlock) is not null
+            && !ContainsExistingIntegration(withoutManaged);
+    }
+
+    private static TomlTable? GetExclusiveManagedReviewer(string content)
+    {
+        var document = TomlSerializer.Deserialize<TomlTable>(content);
+        if (document is null
+            || document.Count != 1
+            || !document.TryGetValue("mcp_servers", out var serversValue)
+            || serversValue is not TomlTable servers
+            || servers.Count != 1
+            || !servers.TryGetValue(ProductInfo.IntegrationName, out var reviewerValue)
+            || reviewerValue is not TomlTable reviewer)
+        {
+            return null;
+        }
+
+        return reviewer;
+    }
+
+    private static bool HasExactApprovalMode(TomlTable tools, string name, string expected)
+        => tools.TryGetValue(name, out var value)
+            && value is TomlTable tool
+            && tool.Count == 1
+            && TryString(tool, "approval_mode", out var approval)
+            && string.Equals(approval, expected, StringComparison.Ordinal);
+
+    private static bool TryString(TomlTable table, string key, out string value)
+    {
+        value = string.Empty;
+        if (!table.TryGetValue(key, out var raw) || raw is not string text)
+        {
+            return false;
+        }
+
+        value = text;
+        return true;
+    }
+
+    private static bool TryBoolean(TomlTable table, string key, out bool value)
+    {
+        value = false;
+        if (!table.TryGetValue(key, out var raw) || raw is not bool boolean)
+        {
+            return false;
+        }
+
+        value = boolean;
+        return true;
+    }
+
+    private static bool TryInteger(TomlTable table, string key, long expected)
+        => table.TryGetValue(key, out var raw)
+            && raw is long integer
+            && integer == expected;
+
+    private static bool PathsEqual(string left, string right)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(left),
+                Path.GetFullPath(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
     private static ManagedFileResult PreservedExistingResult(ProductPaths paths)
         => new(
             paths.CodexConfigFile,

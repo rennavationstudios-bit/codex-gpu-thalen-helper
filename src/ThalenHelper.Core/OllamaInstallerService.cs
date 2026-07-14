@@ -40,7 +40,7 @@ public sealed partial class OllamaInstallerService : IDisposable
             AllowAutoRedirect = true,
             ConnectTimeout = TimeSpan.FromSeconds(15)
         });
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Codex-GPU-Thalen-Helper/0.1.0-beta.1");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"Codex-GPU-Thalen-Helper/{ProductInfo.Version}");
         _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
     }
 

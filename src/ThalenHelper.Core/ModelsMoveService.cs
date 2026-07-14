@@ -12,6 +12,13 @@ public sealed record ModelsMoveResult(
     ulong BytesVerified,
     bool RolledBack);
 
+internal enum ModelsMoveCheckpoint
+{
+    DestinationVerified,
+    QuarantineVerified,
+    OwnedQuarantineFileDeleted
+}
+
 public sealed class ModelsMoveService
 {
     private readonly ProductPaths _paths;
@@ -19,6 +26,7 @@ public sealed class ModelsMoveService
     private readonly ControlService _control;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly Action<string, string> _destinationValidator;
+    private readonly Action<ModelsMoveCheckpoint>? _checkpoint;
 
     public ModelsMoveService(
         ProductPaths paths,
@@ -26,24 +34,39 @@ public sealed class ModelsMoveService
         ControlService control,
         OllamaAutoStartManager? autoStart = null,
         Action<string, string>? destinationValidator = null)
+        : this(paths, stateStore, control, autoStart, destinationValidator, null)
+    {
+    }
+
+    internal ModelsMoveService(
+        ProductPaths paths,
+        StateStore stateStore,
+        ControlService control,
+        OllamaAutoStartManager? autoStart,
+        Action<string, string>? destinationValidator,
+        Action<ModelsMoveCheckpoint>? checkpoint)
     {
         _paths = paths;
         _stateStore = stateStore;
         _control = control;
         _autoStart = autoStart ?? new OllamaAutoStartManager();
         _destinationValidator = destinationValidator ?? ValidateDestinationVolume;
+        _checkpoint = checkpoint;
     }
 
     public async Task<ModelsMoveResult> MoveAsync(string destination, CancellationToken cancellationToken = default)
     {
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
-        if (!IntegrationOwnership.IsManagedByHelper(state))
+        var ownership = IntegrationOwnership.Inspect(_paths, state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
         {
             return new ModelsMoveResult(
                 false,
-                "EXISTING_INTEGRATION_PRESERVED",
-                "This helper does not own the existing local_gpu_reviewer integration, so the model directory was not changed.",
+                ownership.Status == IntegrationOwnershipStatus.ExternalUnmarked
+                    ? "EXISTING_INTEGRATION_PRESERVED"
+                    : "INTEGRATION_OWNERSHIP_DRIFT",
+                ownership.Message + " The model directory was not changed.",
                 state.ModelStorageLocation ?? string.Empty,
                 destination,
                 0,
@@ -120,6 +143,8 @@ public sealed class ModelsMoveService
             destinationCreated = true;
             state.ModelStorageLocation = finalDestination;
             await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+            _checkpoint?.Invoke(ModelsMoveCheckpoint.DestinationVerified);
+            ThrowIfOwnershipInvalid(state);
             var verification = await _autoStart.ApplyConfigurationAsync(
                 _paths,
                 state,
@@ -132,16 +157,27 @@ public sealed class ModelsMoveService
                 throw new InvalidOperationException("Ollama did not validate the moved model directory.");
             }
 
-            var sourceRemoved = await TryQuarantineAndDeleteOwnedTreeAsync(source, ownedFiles, cancellationToken).ConfigureAwait(false);
             if (priorAvailability == HelperAvailability.Enabled)
             {
+                ThrowIfOwnershipInvalid(state);
                 var resume = await _control.ResumeAsync(cancellationToken).ConfigureAwait(false);
                 if (!resume.Success)
                 {
+                    if (IsOwnershipFailure(resume.Code))
+                    {
+                        throw new ModelsMoveOwnershipException(resume.Code, resume.Message);
+                    }
+
                     throw new InvalidOperationException($"The moved model directory could not be re-enabled safely: {resume.Code}");
                 }
             }
 
+            ThrowIfOwnershipInvalid(state);
+            var sourceRemoved = await TryQuarantineAndDeleteOwnedTreeAsync(
+                source,
+                ownedFiles,
+                finalDestination,
+                cancellationToken).ConfigureAwait(false);
             return new ModelsMoveResult(
                 true,
                 sourceRemoved ? "MODELS_MOVED" : "MODELS_MOVED_SOURCE_PRESERVED",
@@ -154,37 +190,112 @@ public sealed class ModelsMoveService
                 bytesVerified,
                 false);
         }
-        catch
+        catch (Exception exception)
         {
+            var ownershipFailure = exception as ModelsMoveOwnershipException;
             state.ModelStorageLocation = priorLocation;
             state.Availability = priorAvailability == HelperAvailability.Enabled
                 ? HelperAvailability.Paused
                 : priorAvailability;
-            _ = await _autoStart.ApplyConfigurationAsync(
-                _paths,
-                state,
-                finalDestination,
-                state.Preferences.AutoStartOllama,
-                allowSafeRestart: true,
-                CancellationToken.None).ConfigureAwait(false);
-            await _stateStore.SaveAsync(state, CancellationToken.None).ConfigureAwait(false);
-            if (destinationCreated && Directory.Exists(finalDestination))
+            if (ownershipFailure is null)
             {
-                _ = await TryDeleteOwnedTreeAsync(finalDestination, ownedFiles, CancellationToken.None).ConfigureAwait(false);
-            }
-            else if (Directory.Exists(staging))
-            {
-                _ = await TryDeleteOwnedTreeAsync(staging, ownedFiles, CancellationToken.None).ConfigureAwait(false);
+                // This ownership check intentionally sits directly before the rollback's
+                // first Ollama environment/startup/process mutation.
+                ownershipFailure = GetOwnershipFailure(state);
+                if (ownershipFailure is null)
+                {
+                    _ = await _autoStart.ApplyConfigurationAsync(
+                        _paths,
+                        state,
+                        finalDestination,
+                        state.Preferences.AutoStartOllama,
+                        allowSafeRestart: true,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
             }
 
-            if (priorAvailability == HelperAvailability.Enabled)
+            await _stateStore.SaveAsync(state, CancellationToken.None).ConfigureAwait(false);
+            ownershipFailure ??= GetOwnershipFailure(state);
+
+            if (priorAvailability == HelperAvailability.Enabled && ownershipFailure is null)
             {
-                _ = await _control.ResumeAsync(CancellationToken.None).ConfigureAwait(false);
+                ownershipFailure = GetOwnershipFailure(state);
+                if (ownershipFailure is null)
+                {
+                    var rollbackResume = await _control.ResumeAsync(CancellationToken.None).ConfigureAwait(false);
+                    if (!rollbackResume.Success && IsOwnershipFailure(rollbackResume.Code))
+                    {
+                        ownershipFailure = new ModelsMoveOwnershipException(rollbackResume.Code, rollbackResume.Message);
+                    }
+                }
+            }
+
+            if (ownershipFailure is null)
+            {
+                var sourceStillVerified = await TreeMatchesAsync(source, ownedFiles, CancellationToken.None).ConfigureAwait(false);
+                if (sourceStillVerified && destinationCreated && Directory.Exists(finalDestination))
+                {
+                    _ = await TryQuarantineAndDeleteOwnedTreeAsync(
+                        finalDestination,
+                        ownedFiles,
+                        source,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                else if (sourceStillVerified && Directory.Exists(staging))
+                {
+                    _ = await TryQuarantineAndDeleteOwnedTreeAsync(
+                        staging,
+                        ownedFiles,
+                        source,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+
+            if (ownershipFailure is not null)
+            {
+                return new ModelsMoveResult(
+                    false,
+                    ownershipFailure.Code,
+                    ownershipFailure.Message
+                        + " No further Ollama environment, startup, or process changes were made. "
+                        + "Any verified source, destination, or staging copies were preserved for manual reconciliation.",
+                    source,
+                    finalDestination,
+                    filesVerified,
+                    bytesVerified,
+                    false);
             }
 
             throw;
         }
     }
+
+    private void ThrowIfOwnershipInvalid(InstallationState state)
+    {
+        var failure = GetOwnershipFailure(state);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    private ModelsMoveOwnershipException? GetOwnershipFailure(InstallationState state)
+    {
+        var ownership = IntegrationOwnership.Inspect(_paths, state);
+        if (ownership.Status == IntegrationOwnershipStatus.ManagedValid)
+        {
+            return null;
+        }
+
+        var code = ownership.Status == IntegrationOwnershipStatus.ExternalUnmarked
+            ? "EXISTING_INTEGRATION_PRESERVED"
+            : "INTEGRATION_OWNERSHIP_DRIFT";
+        return new ModelsMoveOwnershipException(code, ownership.Message);
+    }
+
+    private static bool IsOwnershipFailure(string code)
+        => string.Equals(code, "INTEGRATION_OWNERSHIP_DRIFT", StringComparison.Ordinal)
+            || string.Equals(code, "EXISTING_INTEGRATION_PRESERVED", StringComparison.Ordinal);
 
     private static string ValidateModelDirectory(string? path, string label)
     {
@@ -243,9 +354,10 @@ public sealed class ModelsMoveService
         return await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<bool> TryQuarantineAndDeleteOwnedTreeAsync(
+    private async Task<bool> TryQuarantineAndDeleteOwnedTreeAsync(
         string path,
         IReadOnlyList<FileSnapshot> expected,
+        string recoverySource,
         CancellationToken cancellationToken)
     {
         var full = ValidateModelDirectory(path, "cleanup");
@@ -256,13 +368,32 @@ public sealed class ModelsMoveService
 
         var quarantine = full + ".thalen-helper-remove-" + Guid.NewGuid().ToString("N");
         Directory.Move(full, quarantine);
+        var deletedFiles = new List<FileSnapshot>();
         if (await TreeMatchesAsync(quarantine, expected, cancellationToken).ConfigureAwait(false))
         {
-            Directory.Delete(quarantine, true);
-            return true;
+            _checkpoint?.Invoke(ModelsMoveCheckpoint.QuarantineVerified);
+            if (await TryDeleteOwnedFilesAndEmptyDirectoriesAsync(
+                    quarantine,
+                    expected,
+                    recoverySource,
+                    deletedFiles,
+                    cancellationToken).ConfigureAwait(false))
+            {
+                return true;
+            }
         }
 
-        if (!Directory.Exists(full))
+        var quarantineCanBeRestored = deletedFiles.Count == 0;
+        if (!quarantineCanBeRestored)
+        {
+            quarantineCanBeRestored = await TryRestoreDeletedFilesAsync(
+                quarantine,
+                recoverySource,
+                deletedFiles,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (quarantineCanBeRestored && !Directory.Exists(full))
         {
             Directory.Move(quarantine, full);
         }
@@ -270,19 +401,292 @@ public sealed class ModelsMoveService
         return false;
     }
 
-    private static async Task<bool> TryDeleteOwnedTreeAsync(
-        string path,
+    private async Task<bool> TryDeleteOwnedFilesAndEmptyDirectoriesAsync(
+        string quarantine,
         IReadOnlyList<FileSnapshot> expected,
+        string recoverySource,
+        ICollection<FileSnapshot> deletedFiles,
         CancellationToken cancellationToken)
     {
-        var full = ValidateModelDirectory(path, "cleanup");
-        if (!await TreeMatchesAsync(full, expected, cancellationToken).ConfigureAwait(false))
+        // Recheck the complete tree after the verification checkpoint. A writer may
+        // have created content in the quarantine between verification and cleanup.
+        if (!await TreeMatchesAsync(quarantine, expected, cancellationToken).ConfigureAwait(false)
+            || !HasOnlyExpectedDirectories(quarantine, expected)
+            || !await TreeMatchesAsync(recoverySource, expected, cancellationToken).ConfigureAwait(false))
         {
             return false;
         }
 
-        Directory.Delete(full, true);
+        foreach (var expectedFile in expected.OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await TryDeleteVerifiedFileAsync(quarantine, expectedFile, cancellationToken).ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            deletedFiles.Add(expectedFile);
+            _checkpoint?.Invoke(ModelsMoveCheckpoint.OwnedQuarantineFileDeleted);
+        }
+
+        var quarantinePrefix = Path.GetFullPath(quarantine)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var ownedDirectories = expected
+            .SelectMany(file => GetParentDirectories(file.RelativePath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(item => item.Length);
+        foreach (var relativeDirectory in ownedDirectories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var directory = Path.GetFullPath(Path.Combine(quarantine, relativeDirectory));
+            if (!directory.StartsWith(quarantinePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!Directory.Exists(directory))
+                {
+                    continue;
+                }
+
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return false;
+                }
+
+                Directory.Delete(directory, false);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            Directory.Delete(quarantine, false);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TryRestoreDeletedFilesAsync(
+        string quarantine,
+        string recoverySource,
+        IReadOnlyCollection<FileSnapshot> deletedFiles,
+        CancellationToken cancellationToken)
+    {
+        var quarantinePrefix = Path.GetFullPath(quarantine)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var recoveryPrefix = Path.GetFullPath(recoverySource)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+
+        foreach (var expected in deletedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var target = Path.GetFullPath(Path.Combine(quarantine, expected.RelativePath));
+            var source = Path.GetFullPath(Path.Combine(recoverySource, expected.RelativePath));
+            if (!target.StartsWith(quarantinePrefix, StringComparison.OrdinalIgnoreCase)
+                || !source.StartsWith(recoveryPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (File.Exists(target))
+            {
+                if (!await FileMatchesAsync(target, expected, cancellationToken).ConfigureAwait(false))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            var targetDirectory = Path.GetDirectoryName(target)!;
+            Directory.CreateDirectory(targetDirectory);
+            var temporary = target + ".thalen-helper-restore-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                await using (var sourceStream = new FileStream(
+                                 source,
+                                 FileMode.Open,
+                                 FileAccess.Read,
+                                 FileShare.Read,
+                                 1024 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await using (var targetStream = new FileStream(
+                                 temporary,
+                                 FileMode.CreateNew,
+                                 FileAccess.Write,
+                                 FileShare.None,
+                                 1024 * 1024,
+                                 FileOptions.Asynchronous | FileOptions.SequentialScan))
+                {
+                    await sourceStream.CopyToAsync(targetStream, cancellationToken).ConfigureAwait(false);
+                    await targetStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (!await FileMatchesAsync(temporary, expected, cancellationToken).ConfigureAwait(false))
+                {
+                    File.Delete(temporary);
+                    return false;
+                }
+
+                File.Move(temporary, target, false);
+            }
+            catch (IOException)
+            {
+                TryDeleteOwnedTemporaryFile(temporary);
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                TryDeleteOwnedTemporaryFile(temporary);
+                return false;
+            }
+        }
+
         return true;
+    }
+
+    private static async Task<bool> FileMatchesAsync(
+        string path,
+        FileSnapshot expected,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists
+                || info.Length != expected.Length
+                || (info.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            var hash = Convert.ToHexString(await HashFileAsync(path, cancellationToken).ConfigureAwait(false));
+            return string.Equals(hash, expected.Sha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void TryDeleteOwnedTemporaryFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static bool HasOnlyExpectedDirectories(string root, IReadOnlyList<FileSnapshot> expected)
+    {
+        var expectedDirectories = expected
+            .SelectMany(file => GetParentDirectories(file.RelativePath))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(root, directory);
+            if (!expectedDirectories.Contains(relative)
+                || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static IEnumerable<string> GetParentDirectories(string relativePath)
+    {
+        var current = Path.GetDirectoryName(relativePath);
+        while (!string.IsNullOrEmpty(current))
+        {
+            yield return current;
+            current = Path.GetDirectoryName(current);
+        }
+    }
+
+    private static async Task<bool> TryDeleteVerifiedFileAsync(
+        string root,
+        FileSnapshot expected,
+        CancellationToken cancellationToken)
+    {
+        var rootPrefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var path = Path.GetFullPath(Path.Combine(root, expected.RelativePath));
+        if (!path.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                1024 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (stream.Length != expected.Length)
+            {
+                return false;
+            }
+
+            var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false));
+            if (!string.Equals(hash, expected.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // Delete this one verified path while the read handle still denies new
+            // writers. Never recursively delete the containing quarantine.
+            File.Delete(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static async Task<bool> TreeMatchesAsync(
@@ -328,4 +732,9 @@ public sealed class ModelsMoveService
     }
 
     private sealed record FileSnapshot(string RelativePath, long Length, string Sha256);
+
+    private sealed class ModelsMoveOwnershipException(string code, string message) : Exception(message)
+    {
+        public string Code { get; } = code;
+    }
 }

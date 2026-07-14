@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.1',
+    [string]$Version = '0.1.0-beta.3',
     [switch]$SkipPackage,
     [switch]$RunInstallerLifecycle
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 if ($Version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.(0|[1-9][0-9]*)$') {
-    throw "Release version must be an unsigned beta semantic version such as 0.1.0-beta.1: $Version"
+    throw "Release version must be an unsigned beta semantic version such as 0.1.0-beta.3: $Version"
 }
 
 if ($SkipPackage -and $RunInstallerLifecycle) {
@@ -43,10 +43,72 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
 
         $release = Join-Path $RepositoryRoot '.artifacts\release'
+        $versionMatch = [System.Text.RegularExpressions.Regex]::Match(
+            $Version,
+            '^(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)-beta\.(?<beta>0|[1-9][0-9]*)$',
+            [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        $expectedPeVersion = (@('major', 'minor', 'patch', 'beta') |
+            ForEach-Object { $versionMatch.Groups[$_].Value }) -join '.'
+
+        [xml]$buildProps = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'Directory.Build.props') -Raw
+        $sourceAssemblyVersion = "$($buildProps.Project.PropertyGroup.VersionPrefix)-$($buildProps.Project.PropertyGroup.VersionSuffix)"
+        if ($sourceAssemblyVersion -cne $Version) {
+            throw "Directory.Build.props version mismatch: $sourceAssemblyVersion"
+        }
+        $domainSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'src\ThalenHelper.Core\Domain.cs') -Raw
+        if ($domainSource -cnotmatch 'public const string Version = "(?<version>[^"]+)";' -or $Matches['version'] -cne $Version) {
+            throw 'ProductInfo.Version does not match the release version.'
+        }
+        $installerSource = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'installer\ThalenHelper.iss') -Raw
+        if ($installerSource -cnotmatch '#define MyAppVersion "(?<version>[^"]+)"' -or $Matches['version'] -cne $Version) {
+            throw 'The installer source default version does not match the release version.'
+        }
+        if ($installerSource -cnotmatch '#define MyAppPeVersion "(?<version>[^"]+)"' -or $Matches['version'] -cne $expectedPeVersion) {
+            throw 'The installer source PE version does not match the release version.'
+        }
+        $installerNotice = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'installer-notice.txt') -Raw
+        if ($installerNotice.IndexOf("v$Version", [System.StringComparison]::Ordinal) -lt 0) {
+            throw 'The installer unsigned-build notice does not name the exact release version.'
+        }
+
+        foreach ($executable in @('thalen-helper.exe', 'local-gpu-reviewer.exe', 'ThalenHelper.ControlCenter.exe')) {
+            $productVersion = (Get-Item -LiteralPath (Join-Path $RepositoryRoot ".artifacts\stage\$executable")).VersionInfo.ProductVersion
+            $normalizedProductVersion = ($productVersion -split '\+', 2)[0]
+            if ($normalizedProductVersion -cne $Version) {
+                throw "Published executable version mismatch for ${executable}: $productVersion"
+            }
+        }
+        $setupPath = Join-Path $release 'Codex-GPU-Thalen-Helper-Setup.exe'
+        $setupVersion = (Get-Item -LiteralPath $setupPath).VersionInfo
+        $setupFileVersion = $setupVersion.FileVersion.Trim()
+        $setupProductVersion = $setupVersion.ProductVersion.Trim()
+        if ($setupFileVersion -cne $expectedPeVersion -or $setupProductVersion -cne $expectedPeVersion) {
+            throw "Installer version metadata mismatch: file=$($setupVersion.FileVersion), product=$($setupVersion.ProductVersion)"
+        }
+
+        & (Join-Path $PSScriptRoot 'friend-bundle.ps1') -Version $Version -ReleaseDirectory $release
+        if ($LASTEXITCODE -ne 0) { throw 'Friend installer bundle validation failed.' }
+        $friendName = "Codex-GPU-Thalen-Helper-$Version-Friend-Installer.zip"
+        $friendZip = Join-Path $RepositoryRoot ".artifacts\friend\$friendName"
+        if (-not (Test-Path -LiteralPath $friendZip -PathType Leaf)) {
+            throw 'Validated friend installer bundle was not created.'
+        }
+        Copy-Item -LiteralPath $friendZip -Destination (Join-Path $release $friendName)
+
+        $checksumPath = Join-Path $release 'SHA256SUMS.txt'
+        Get-ChildItem -LiteralPath $release -File |
+            Where-Object Name -ne 'SHA256SUMS.txt' |
+            Sort-Object Name |
+            ForEach-Object {
+                $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                "$hash  $($_.Name)"
+            } | Set-Content -LiteralPath $checksumPath -Encoding ascii
+
         $required = @(
             'Codex-GPU-Thalen-Helper-Setup.exe',
             "Codex-GPU-Thalen-Helper-$Version-win-x64-portable.zip",
             "Codex-GPU-Thalen-Helper-$Version-sbom.zip",
+            $friendName,
             'SHA256SUMS.txt',
             'SIGNING_STATUS.txt'
         )
@@ -64,7 +126,6 @@ try {
         }
 
         $checksumSubjects = @($required | Where-Object { $_ -ne 'SHA256SUMS.txt' } | Sort-Object)
-        $checksumPath = Join-Path $release 'SHA256SUMS.txt'
         $seenChecksums = @{}
         foreach ($line in @(Get-Content -LiteralPath $checksumPath)) {
             if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\/:*?"<>|]+)$') {
