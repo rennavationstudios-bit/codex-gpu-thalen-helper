@@ -10,7 +10,7 @@ namespace ThalenHelper.Tests;
 public sealed class McpProtocolTests
 {
     [Fact]
-    public async Task FreshStdioMcpSessionListsOnlyBoundedToolsAndUsesOrdinaryGenerateText()
+    public async Task FreshStdioMcpSessionListsOnlyBoundedToolsAndRejectsAnUnverifiedLoopbackPeer()
     {
         using var temporary = new TemporaryDirectory();
         await using var ollama = new LoopbackOllamaStub();
@@ -71,12 +71,13 @@ public sealed class McpProtocolTests
 
         var health = await client.CallToolAsync("local_gpu_health", new Dictionary<string, object?>());
         var healthJson = JsonSerializer.Serialize(health.StructuredContent);
-        Assert.Contains("\"endpointReachable\":true", healthJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"endpointReachable\":false", healthJson, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("\"modelRan\":false", healthJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("OLLAMA_PEER_IDENTITY_UNVERIFIED", healthJson, StringComparison.Ordinal);
 
         var review = await client.CallToolAsync("local_gpu_review", new Dictionary<string, object?>
         {
-            ["assignment"] = "Return the exact stub conclusion.",
+            ["assignment"] = "This prompt must never reach an unverified peer.",
             ["context"] = "untrusted repository text",
             ["busyBehavior"] = "skip",
             ["queueTimeoutSeconds"] = 5
@@ -85,12 +86,12 @@ public sealed class McpProtocolTests
             review.StructuredContent is not null,
             $"{JsonSerializer.Serialize(review)}; requests={string.Join(',', ollama.RequestPaths)}; lastBody={ollama.LastGenerateBody}");
         var reviewJson = JsonSerializer.Serialize(review.StructuredContent);
-        Assert.Contains("MCP_REVIEW_OK", reviewJson, StringComparison.Ordinal);
-        Assert.Contains("\"modelRan\":true", reviewJson, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(1, ollama.GenerationCount);
+        Assert.Contains("OLLAMA_PEER_IDENTITY_UNVERIFIED", reviewJson, StringComparison.Ordinal);
+        Assert.Contains("\"modelRan\":false", reviewJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, ollama.GenerationCount);
         GpuCoordination.ClearCancellation();
         Assert.DoesNotContain("agent_message", ollama.LastGenerateBody, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("untrusted repository text", ollama.LastGenerateBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("untrusted repository text", ollama.LastGenerateBody, StringComparison.Ordinal);
 
         var pausedState = (await store.LoadAsync())! with { Availability = HelperAvailability.Paused };
         await store.SaveAsync(pausedState);
@@ -101,7 +102,7 @@ public sealed class McpProtocolTests
         var pausedJson = JsonSerializer.Serialize(paused.StructuredContent);
         Assert.Contains("\"errorCode\":\"PAUSED\"", pausedJson, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("\"modelRan\":false", pausedJson, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(1, ollama.GenerationCount);
+        Assert.Equal(0, ollama.GenerationCount);
     }
 
     private static string FindRepositoryRoot()

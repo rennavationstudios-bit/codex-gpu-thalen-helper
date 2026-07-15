@@ -22,7 +22,7 @@ flowchart LR
 - Local-model output is untrusted advice.
 - The reviewer cannot independently read the repository or use a shell.
 - Ollama requests are limited to documented `/api/tags`, `/api/ps`, `/api/generate`, `/api/pull`, and `/api/delete` paths; the reviewer itself uses inventory/runtime/generate only.
-- The base URI must be unauthenticated loopback HTTP. Redirects are disabled.
+- The base URI must be unauthenticated loopback HTTP. Redirects and proxies are disabled. Before sending HTTP bytes, the production transport maps the exact TCP connection to its owning Windows process and requires a current-user, validly signed `Ollama Inc.` `ollama.exe` or `ollama app.exe` peer.
 - The MCP server opens no network listener; its only server transport is stdio.
 
 ## Resource coordination

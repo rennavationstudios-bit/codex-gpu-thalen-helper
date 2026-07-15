@@ -34,6 +34,7 @@ If setup finds an existing unmarked `local_gpu_reviewer`, it preserves that inte
 - **SETUP**: choose or validate a model before local review can run.
 - **EXTERNAL**: Codex may have another reviewer, but this app does not control or verify it.
 - **EXTERNAL RISK / NETWORK EXPOSED**: an Ollama listener is reachable beyond loopback. Stop Ollama and correct that external startup or host setting before local review.
+- **OLLAMA PEER NOT VERIFIED**: something owns the local Ollama port but is not the expected current-user, validly signed official Ollama process. The helper sends it no review prompt. Close the unknown listener and repair or install official Ollama for Windows.
 - **EXTERNAL AUTOSTART UNVERIFIED**: another Run/Startup artifact was preserved to avoid duplication, but its target and next-login environment were not certified. Review/remove it or use manual startup before enabling managed review.
 - **No model loaded**: normally the safe idle state. Installed models stay on disk while GPU memory is released.
 

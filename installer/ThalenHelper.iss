@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-beta.3"
+  #define MyAppVersion "0.1.0-beta.4"
 #endif
 
 #ifndef MyAppPeVersion
-  #define MyAppPeVersion "0.1.0.3"
+  #define MyAppPeVersion "0.1.0.4"
 #endif
 
 #define MyAppName "Codex GPU Thalen Helper"

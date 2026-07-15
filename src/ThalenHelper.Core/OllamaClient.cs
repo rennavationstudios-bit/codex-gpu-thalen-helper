@@ -13,16 +13,16 @@ public sealed partial class OllamaClient : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly Uri _baseUri;
 
-    public OllamaClient(Uri? baseUri = null, HttpClient? httpClient = null)
+    public OllamaClient(Uri? baseUri = null)
+        : this(baseUri, null)
+    {
+    }
+
+    internal OllamaClient(Uri? baseUri, HttpClient? httpClient)
     {
         _baseUri = ValidateBaseUri(baseUri ?? ResolveConfiguredBaseUri());
         _ownsHttpClient = httpClient is null;
-        _httpClient = httpClient ?? new HttpClient(new SocketsHttpHandler
-        {
-            AllowAutoRedirect = false,
-            ConnectTimeout = TimeSpan.FromSeconds(5),
-            UseProxy = false
-        });
+        _httpClient = httpClient ?? new HttpClient(CreateVerifiedHandler());
         _httpClient.BaseAddress = _baseUri;
     }
 
@@ -302,10 +302,46 @@ public sealed partial class OllamaClient : IDisposable
         {
             throw new OllamaException("OLLAMA_TIMEOUT", "The bounded Ollama request timed out.", true);
         }
+        catch (OllamaPeerIdentityException)
+        {
+            throw new OllamaException(
+                "OLLAMA_PEER_IDENTITY_UNVERIFIED",
+                "The loopback endpoint is not a verified current-user Ollama process.");
+        }
+        catch (HttpRequestException exception) when (ContainsPeerIdentityFailure(exception))
+        {
+            throw new OllamaException(
+                "OLLAMA_PEER_IDENTITY_UNVERIFIED",
+                "The loopback endpoint is not a verified current-user Ollama process.");
+        }
         catch (HttpRequestException)
         {
             throw new OllamaException("OLLAMA_UNAVAILABLE", "The loopback Ollama endpoint is unavailable.", true);
         }
+    }
+
+    private static SocketsHttpHandler CreateVerifiedHandler()
+        => new()
+        {
+            AllowAutoRedirect = false,
+            ConnectCallback = OllamaPeerVerifier.ConnectVerifiedAsync,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            UseProxy = false
+        };
+
+    private static bool ContainsPeerIdentityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is OllamaPeerIdentityException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static async Task<byte[]> ReadBoundedAsync(Stream stream, int maximumBytes, CancellationToken cancellationToken)

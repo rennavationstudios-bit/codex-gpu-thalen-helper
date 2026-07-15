@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$SetupPath,
-    [string]$ExpectedVersion = '0.1.0-beta.3'
+    [string]$ExpectedVersion = '0.1.0-beta.4'
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')

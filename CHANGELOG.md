@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.4 - 2026-07-14
+
+- Verify every production Ollama TCP peer as a current-user, validly signed `Ollama Inc.` process before sending any HTTP bytes or review prompt.
+- Resolve `nvidia-smi.exe` only from trusted absolute Windows/NVIDIA installation paths and never through the current directory or `PATH`.
+- Add isolated regression coverage proving an arbitrary loopback peer receives zero HTTP bytes and inert executable-search fixtures are never launched.
+
 ## 0.1.0-beta.3 - 2026-07-14
 
 - Added exact live ownership validation before every managed control, model change, model move, inference test, repair, and runtime cleanup operation.

@@ -31,6 +31,8 @@ Restart every Codex process after setup. Confirm `config.toml` contains one mark
 
 Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROCESS_UNHEALTHY` means an Ollama process exists without a responsive endpoint; the helper did not create a duplicate. `EXTERNAL_AUTOSTART_UNVERIFIED` means another Ollama-named Run or Startup-folder artifact was preserved to avoid duplication, but its executable and next-login behavior were not certified. Review or remove that launcher, or choose manual startup; the helper does not report it as configured merely because its name contains Ollama. If automatic startup was declined, manually start Ollama after each sign-in.
 
+`OLLAMA_PEER_IDENTITY_UNVERIFIED` means something is listening on the loopback port but the exact connected process was not a current-user, validly signed `Ollama Inc.` `ollama.exe` or `ollama app.exe`. The helper sends no HTTP request or review prompt to that process. Stop the unknown listener, install or repair the official Ollama for Windows build, and retry. Unsigned/self-built Ollama binaries are intentionally rejected by this release.
+
 ## Model path is not verified
 
 `MODEL_PATH_NOT_CONFIGURED` means the current user's `OLLAMA_MODELS` differs from product state. `MODEL_NOT_IN_CONFIGURED_PATH` means the selected manifest was not found there. Run repair to safely restart Ollama with the persisted path, then verify. Do not manually copy only blobs; use `models move` for a verified full move.

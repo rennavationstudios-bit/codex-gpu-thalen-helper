@@ -15,13 +15,14 @@ Maintainers will acknowledge a report when possible, validate it, coordinate rem
 ## Security boundaries
 
 - The MCP server is local stdio only and opens no listener.
-- Ollama endpoints must resolve to loopback HTTP and port 11434 is checked for non-loopback listeners.
+- Ollama endpoints must resolve to loopback HTTP, port 11434 is checked for non-loopback listeners, and every production HTTP connection verifies that its exact TCP peer is a current-user, validly signed Ollama process before sending request bytes.
 - Reviewer activation requires the selected model tag, manifest location, and catalog digest to match the configured model storage.
 - The reviewer accepts only supplied text, bounds input/output/context/response sizes, permits one generation at a time, and writes no prompts or responses.
 - MCP exposes no arbitrary file, shell, Git, patch, deployment, publishing, email, credential, or external-mutation capability.
 - Configuration edits are marked, backed up, parsed, idempotent, and surgically removable.
 - Update downloads are accepted only from approved HTTPS GitHub asset hosts and must match the release SHA-256 file.
 - Ollama installer downloads come from the official release, require the published checksum, and require a valid Windows signature with the expected publisher.
+- NVIDIA telemetry launches `nvidia-smi.exe` only from trusted absolute Windows or NVIDIA installation paths; the current directory and `PATH` are never searched.
 - Releases require a protected `v*` tag ruleset, a protected `release` environment, exact event/tag/commit equality, and `main` ancestry before privileged publication.
 
 Read the full [threat model](docs/threat-model.md) and [secure development notes](docs/secure-development.md).

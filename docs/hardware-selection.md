@@ -12,7 +12,7 @@ Immediately before optional inference, the helper requires current Windows physi
 
 Installed/available system RAM is measured separately. GPU adapters are enumerated through DXGI, which provides modern dedicated and shared memory values without relying on the unreliable `Win32_VideoController.AdapterRAM` field.
 
-For NVIDIA, `nvidia-smi` augments adapter data with total/free VRAM, driver version, and compute capability. AMD/Intel routes are labeled conservatively. Integrated adapters and adapters with unsupported routes are not treated as dedicated-accelerator candidates. Shared memory is never added to dedicated VRAM.
+For NVIDIA, `nvidia-smi` augments adapter data with total/free VRAM, driver version, and compute capability. It is resolved only from the Windows system directory or the established NVIDIA `Program Files` location and is launched by absolute path; the current directory and `PATH` are never searched. AMD/Intel routes are labeled conservatively. Integrated adapters and adapters with unsupported routes are not treated as dedicated-accelerator candidates. Shared memory is never added to dedicated VRAM.
 
 Usable VRAM is the lesser of free/total dedicated VRAM after display/runtime reserve. The reserve increases for larger cards. Laptop profiles reduce the usable budget by 20 percent.
 

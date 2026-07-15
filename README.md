@@ -88,7 +88,7 @@ gh attestation verify .\Codex-GPU-Thalen-Helper-Setup.exe --repo rennavationstud
 
 Local Ollama operation requires no OpenAI API key. Codex itself still requires ChatGPT sign-in or another supported Codex authentication method. The helper never asks for, inspects, transmits, or stores OpenAI authentication.
 
-Prompts and responses are not written to disk. Ollama traffic is restricted to an HTTP loopback URI. Hardware discovery collects no username, hostname, serial number, Windows product identifier, network identifier, or unrelated application inventory. Exported diagnostics are redacted and opt-in.
+Prompts and responses are not written to disk. Ollama traffic is restricted to an HTTP loopback URI, and the production transport verifies the exact connected process as a current-user, validly signed Ollama executable before it sends HTTP bytes. Hardware discovery collects no username, hostname, serial number, Windows product identifier, network identifier, or unrelated application inventory. Exported diagnostics are redacted and opt-in.
 
 See [PRIVACY.md](PRIVACY.md) and [docs/privacy-and-security.md](docs/privacy-and-security.md).
 

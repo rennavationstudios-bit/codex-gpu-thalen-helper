@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.3',
+    [string]$Version = '0.1.0-beta.4',
     [switch]$SkipPackage,
     [switch]$RunInstallerLifecycle
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 if ($Version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.(0|[1-9][0-9]*)$') {
-    throw "Release version must be an unsigned beta semantic version such as 0.1.0-beta.3: $Version"
+    throw "Release version must be an unsigned beta semantic version such as 0.1.0-beta.4: $Version"
 }
 
 if ($SkipPackage -and $RunInstallerLifecycle) {

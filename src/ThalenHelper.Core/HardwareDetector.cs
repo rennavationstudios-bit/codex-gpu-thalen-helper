@@ -199,17 +199,20 @@ public sealed class HardwareDetector
 
     private static IReadOnlyList<NvidiaMeasurement> ReadNvidiaSmi(List<string> warnings)
     {
+        var executable = ResolveNvidiaSmiPath(Environment.SystemDirectory, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles));
+        if (executable is null)
+        {
+            if (DxgiAdapterReader.HasNvidiaAdapter)
+            {
+                warnings.Add("NVIDIA was detected, but nvidia-smi was unavailable; free VRAM and compute capability are unknown.");
+            }
+
+            return [];
+        }
+
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = "nvidia-smi.exe",
-                Arguments = "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap --format=csv,noheader,nounits",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            });
+            using var process = Process.Start(CreateNvidiaSmiStartInfo(executable));
             if (process is null || !process.WaitForExit(5_000) || process.ExitCode != 0)
             {
                 if (process is { HasExited: false })
@@ -250,6 +253,50 @@ public sealed class HardwareDetector
 
             return [];
         }
+    }
+
+    internal static string? ResolveNvidiaSmiPath(string? systemDirectory, string? programFilesDirectory)
+    {
+        var candidates = new[]
+        {
+            CreateTrustedNvidiaSmiCandidate(systemDirectory, "nvidia-smi.exe"),
+            CreateTrustedNvidiaSmiCandidate(programFilesDirectory, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")
+        };
+
+        return candidates.FirstOrDefault(path => path is not null && File.Exists(path));
+    }
+
+    internal static ProcessStartInfo CreateNvidiaSmiStartInfo(string executablePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
+        if (!Path.IsPathFullyQualified(executablePath))
+        {
+            throw new ArgumentException("nvidia-smi must be launched from a trusted absolute path.", nameof(executablePath));
+        }
+
+        return new ProcessStartInfo
+        {
+            FileName = Path.GetFullPath(executablePath),
+            Arguments = "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap --format=csv,noheader,nounits",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+    }
+
+    private static string? CreateTrustedNvidiaSmiCandidate(string? trustedRoot, params string[] segments)
+    {
+        if (string.IsNullOrWhiteSpace(trustedRoot) || !Path.IsPathFullyQualified(trustedRoot))
+        {
+            return null;
+        }
+
+        var normalizedRoot = Path.GetFullPath(trustedRoot);
+        var candidate = Path.GetFullPath(Path.Combine([normalizedRoot, .. segments]));
+        return candidate.StartsWith(normalizedRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? candidate
+            : null;
     }
 
     private static IReadOnlyList<StorageVolume> DetectVolumes(List<string> warnings)

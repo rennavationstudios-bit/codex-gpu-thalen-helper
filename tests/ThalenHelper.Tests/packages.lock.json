@@ -386,13 +386,13 @@
         "dependencies": {
           "Microsoft.Extensions.Hosting": "[10.0.9, )",
           "ModelContextProtocol": "[1.4.1, )",
-          "ThalenHelper.Core": "[0.1.0-beta.3, )"
+          "ThalenHelper.Core": "[0.1.0-beta.4, )"
         }
       },
       "thalen-helper": {
         "type": "Project",
         "dependencies": {
-          "ThalenHelper.Core": "[0.1.0-beta.3, )"
+          "ThalenHelper.Core": "[0.1.0-beta.4, )"
         }
       },
       "thalenhelper.core": {
