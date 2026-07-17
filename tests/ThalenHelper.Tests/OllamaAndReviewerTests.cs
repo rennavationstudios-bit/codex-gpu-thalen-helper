@@ -315,7 +315,12 @@ public sealed class OllamaAndReviewerTests
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
         var checks = 0;
 
-        var result = await new ReviewerService(store, client, _ => ++checks == 1, StorageOk)
+        var result = await new ReviewerService(
+            store,
+            client,
+            _ => ++checks == 1,
+            StorageOk,
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("OLLAMA_NETWORK_EXPOSURE", result.ErrorCode);
@@ -341,7 +346,12 @@ public sealed class OllamaAndReviewerTests
             "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}")));
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
 
-        var result = await new ReviewerService(store, client, _ => true, StorageOk)
+        var result = await new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_DIGEST_MISMATCH", result.ErrorCode);
@@ -370,7 +380,8 @@ public sealed class OllamaAndReviewerTests
             store,
             client,
             _ => true,
-            _ => new ReviewerModelStorageVerification(false, "MODEL_PATH_NOT_CONFIGURED", "Path drift."))
+            _ => new ReviewerModelStorageVerification(false, "MODEL_PATH_NOT_CONFIGURED", "Path drift."),
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_PATH_NOT_CONFIGURED", result.ErrorCode);
@@ -402,7 +413,8 @@ public sealed class OllamaAndReviewerTests
             _ => true,
             _ => ++checks == 1
                 ? new ReviewerModelStorageVerification(true, "OK", "Storage verified.")
-                : new ReviewerModelStorageVerification(false, "MODEL_NOT_IN_CONFIGURED_PATH", "Manifest drift."))
+                : new ReviewerModelStorageVerification(false, "MODEL_NOT_IN_CONFIGURED_PATH", "Manifest drift."),
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_NOT_IN_CONFIGURED_PATH", result.ErrorCode);
@@ -516,7 +528,8 @@ public sealed class OllamaAndReviewerTests
             (_, _) => new ResourcePressureCheck(
                 false,
                 "WINDOWS_COMMIT_PRESSURE",
-                "Commit pressure is high."));
+                "Commit pressure is high."),
+            hardwareProvider: ReviewerHardware);
 
         var result = await reviewer.ReviewAsync(new ReviewRequest("Inspect."));
 
@@ -576,6 +589,69 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
+    public async Task AutomaticPlanIsPassiveAndReviewUsesItsTaskAwareModelInsideTheLock()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen3:8b",
+            SelectedModelDigest = "500a1f067a9f",
+            HardwareTier = HardwareTier.Mid,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Enabled,
+            Preferences = new HelperPreferences(ModelSelectionMode: ModelSelectionMode.Automatic)
+        });
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(request.RequestUri?.AbsolutePath switch
+        {
+            "/api/tags" => FakeHttpMessageHandler.Json("""
+                {"models":[
+                  {"name":"qwen3:8b","digest":"sha256:500a1f067a9f0000000000000000000000000000000000000000000000000000","details":{"quantization_level":"Q4_K_M"}},
+                  {"name":"qwen3:14b","digest":"sha256:bdbd181c33f20000000000000000000000000000000000000000000000000000","details":{"quantization_level":"Q4_K_M"}}
+                ]}
+                """),
+            "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+            "/api/generate" => FakeHttpMessageHandler.Json("{\"model\":\"qwen3:14b\",\"response\":\"ROUTED_OK\",\"done\":true}"),
+            _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+        }));
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var hardware = FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "nvidia-rtx3090-24gb"));
+        var reviewer = new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            (_, _) => new ResourcePressureCheck(true, "OK", "Safe."),
+            router: new TaskAwareModelRouter(),
+            catalogProvider: () => new ModelCatalogService().LoadBundled(),
+            hardwareProvider: () => hardware);
+
+        var request = new ReviewRequest("Review a multi-file diff.", Effort: ReviewEffort.Standard);
+        var plan = await reviewer.PlanAsync(request);
+
+        Assert.True(plan.Allowed, plan.ErrorMessage);
+        Assert.True(plan.Passive);
+        Assert.False(plan.ModelRan);
+        Assert.Equal("qwen3:14b", plan.Model);
+        Assert.Equal("Q4 required for automatic routing", plan.Tuning?.Quantization);
+        Assert.DoesNotContain(handler.Requests, item => item.Path == "/api/generate");
+
+        var result = await reviewer.ReviewAsync(request);
+
+        Assert.True(result.ModelRan, result.ErrorMessage);
+        Assert.Equal("qwen3:14b", result.Model);
+        Assert.Equal(ModelSelectionMode.Automatic, result.SelectionMode);
+        Assert.Equal(ReviewEffort.Standard, result.Effort);
+        Assert.Equal(16_384, result.ContextTokens);
+        var body = JsonDocument.Parse(handler.Requests.Single(item => item.Path == "/api/generate").Body!);
+        Assert.Equal("qwen3:14b", body.RootElement.GetProperty("model").GetString());
+        Assert.Equal(16_384, body.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
+        Assert.Equal("0s", body.RootElement.GetProperty("keep_alive").GetString());
+    }
+
+    [Fact]
     public async Task StateStoreRoundTripsAtomically()
     {
         using var temporary = new TemporaryDirectory();
@@ -607,4 +683,8 @@ public sealed class OllamaAndReviewerTests
 
     private static ReviewerModelStorageVerification StorageOk(InstallationState _)
         => new(true, "OK", "Storage verified.");
+
+    private static HardwareProfile ReviewerHardware()
+        => FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "nvidia-rtx3090-24gb"));
 }

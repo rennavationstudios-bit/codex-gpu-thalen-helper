@@ -122,9 +122,12 @@ internal sealed class ResourcePressureGuard
 
         if (gpu?.AvailableDedicatedMemoryBytes is ulong availableVram)
         {
+            var configuredReserve = (ulong)Math.Max(512, state.Preferences.VramReserveMiB) * MiB;
             var minimumVramReserve = selectedModelAlreadyLoaded
-                ? 512UL * MiB
-                : GiBToBytesSaturating(selectedModel.MinimumDedicatedVramGiB);
+                ? configuredReserve
+                : SaturatingAdd(
+                    GiBToBytesSaturating(selectedModel.MinimumDedicatedVramGiB),
+                    configuredReserve);
             if (availableVram < minimumVramReserve)
             {
                 return new ResourcePressureCheck(
@@ -147,6 +150,9 @@ internal sealed class ResourcePressureGuard
             ? ulong.MaxValue
             : (ulong)rounded * GiB;
     }
+
+    private static ulong SaturatingAdd(ulong left, ulong right)
+        => ulong.MaxValue - left < right ? ulong.MaxValue : left + right;
 
     private static WindowsMemorySnapshot? CaptureWindowsMemory()
     {

@@ -33,7 +33,7 @@ public sealed class ResourcePressureTests
     }
 
     [Fact]
-    public void LoadedModelUsesOnlyRuntimeHeadroomThreshold()
+    public void LoadedModelStillPreservesConfiguredRuntimeHeadroom()
     {
         var guard = CreateGuard(
             availableVram: 1UL * GiB,
@@ -41,8 +41,21 @@ public sealed class ResourcePressureTests
 
         var result = guard.Check(State(), selectedModelAlreadyLoaded: true);
 
-        Assert.True(result.Allowed);
-        Assert.Equal("RESOURCE_PRESSURE_OK", result.Code);
+        Assert.False(result.Allowed);
+        Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
+    }
+
+    [Fact]
+    public void ModelLoadIncludesConfiguredReserveAboveCatalogMinimum()
+    {
+        var guard = CreateGuard(
+            availableVram: 23UL * GiB,
+            new WindowsMemorySnapshot(40, 48UL * GiB, 96UL * GiB, 64UL * GiB));
+
+        var result = guard.Check(State(), selectedModelAlreadyLoaded: false);
+
+        Assert.False(result.Allowed);
+        Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
     }
 
     [Fact]

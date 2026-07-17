@@ -12,6 +12,10 @@ public sealed class ReviewerService
     private readonly Func<InstallationState, ReviewerModelStorageVerification> _modelStorageValidator;
     private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
     private readonly Func<InstallationState, IntegrationOwnershipInspection> _ownershipInspector;
+    private readonly TaskAwareModelRouter _router;
+    private readonly Func<ModelManifest> _catalogProvider;
+    private readonly Func<HardwareProfile> _hardwareProvider;
+    private readonly ActiveModelTracker _activeModelTracker;
 
     public ReviewerService(
         ProductPaths paths,
@@ -40,7 +44,10 @@ public sealed class ReviewerService
         Func<int, bool>? listenerCheck,
         Func<InstallationState, ReviewerModelStorageVerification>? modelStorageValidator = null,
         Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null,
-        Func<InstallationState, IntegrationOwnershipInspection>? ownershipInspector = null)
+        Func<InstallationState, IntegrationOwnershipInspection>? ownershipInspector = null,
+        TaskAwareModelRouter? router = null,
+        Func<ModelManifest>? catalogProvider = null,
+        Func<HardwareProfile>? hardwareProvider = null)
     {
         _stateStore = stateStore;
         _ollama = ollama;
@@ -53,6 +60,10 @@ public sealed class ReviewerService
         _ownershipInspector = ownershipInspector ?? (state => IntegrationOwnership.IsManagedByHelper(state)
             ? new IntegrationOwnershipInspection(IntegrationOwnershipStatus.ManagedValid, "Managed state accepted by the test seam.")
             : new IntegrationOwnershipInspection(IntegrationOwnershipStatus.ExternalUnmarked, "External integration preserved."));
+        _router = router ?? new TaskAwareModelRouter();
+        _catalogProvider = catalogProvider ?? (() => new ModelCatalogService().LoadBundled());
+        _hardwareProvider = hardwareProvider ?? (() => new HardwareDetector().Detect());
+        _activeModelTracker = new ActiveModelTracker(Path.GetDirectoryName(_stateStore.Path)!);
     }
 
     public async Task<ReviewerHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
@@ -95,11 +106,26 @@ public sealed class ReviewerService
             var running = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
             var selected = state.SelectedModel;
             var selectedModel = ModelIntegrity.FindSelectedModel(models, selected);
-            var available = selectedModel is not null;
+            var eligibleModelTags = _router.GetEligibleInstalledModelTags(
+                state,
+                _catalogProvider(),
+                _hardwareProvider(),
+                models);
+            var eligibleInstalledModels = eligibleModelTags.Count;
+            var available = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                ? eligibleInstalledModels > 0
+                : selectedModel is not null;
             var digestMatches = selected is null
                 || ModelIntegrity.DigestMatches(selectedModel?.Digest, state.SelectedModelDigest);
-            var runningModel = selected is null ? null : running.FirstOrDefault(model => ModelIntegrity.NamesMatch(model.Name, selected));
-            if (selected is not null && available && !digestMatches)
+            var runningModel = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                ? running.FirstOrDefault(model => eligibleModelTags.Any(tag => ModelIntegrity.NamesMatch(model.Name, tag)))
+                : selected is null
+                    ? null
+                    : running.FirstOrDefault(model => ModelIntegrity.NamesMatch(model.Name, selected));
+            if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+                && selected is not null
+                && available
+                && !digestMatches)
             {
                 return HealthError(
                     state,
@@ -113,6 +139,8 @@ public sealed class ReviewerService
             {
                 Model = selected,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                SelectionMode = state.Preferences.ModelSelectionMode,
+                EligibleInstalledModels = eligibleInstalledModels,
                 EndpointReachable = true,
                 ModelAvailable = available,
                 ModelLoaded = runningModel is not null,
@@ -132,6 +160,7 @@ public sealed class ReviewerService
             {
                 Model = state.SelectedModel,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                SelectionMode = state.Preferences.ModelSelectionMode,
                 EndpointReachable = false,
                 ModelRan = false,
                 Paused = state.Availability == HelperAvailability.Paused,
@@ -139,6 +168,87 @@ public sealed class ReviewerService
                 ErrorCode = exception.Code,
                 ErrorMessage = exception.Message
             };
+        }
+    }
+
+    public async Task<ReviewerPlanResult> PlanAsync(ReviewRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        if (state is null)
+        {
+            return PlanError("NOT_CONFIGURED", "The helper has not been configured.");
+        }
+        ValidateRequest(request, state.Preferences);
+
+        var ownership = _ownershipInspector(state);
+        if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+        {
+            return PlanError(OwnershipErrorCode(ownership), OwnershipErrorMessage(ownership, "plan a local review"));
+        }
+
+        if (state.Availability != HelperAvailability.Enabled)
+        {
+            return PlanError(
+                state.Availability == HelperAvailability.Paused ? "PAUSED" : "DISABLED",
+                state.Availability == HelperAvailability.Paused
+                    ? "The local reviewer is paused."
+                    : "The local reviewer is disabled.",
+                state);
+        }
+
+        if (!_listenerCheck(_ollama.BaseUri.Port))
+        {
+            return PlanError("OLLAMA_NETWORK_EXPOSURE", "Ollama is not loopback-only; routing is blocked.", state);
+        }
+
+        try
+        {
+            var models = await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models);
+            if (!route.Allowed)
+            {
+                return new ReviewerPlanResult
+                {
+                    Allowed = false,
+                    SelectionMode = route.SelectionMode,
+                    TaskKind = route.TaskKind,
+                    Effort = route.Effort,
+                    Model = route.Model,
+                    HardwareTier = route.HardwareTier.ToString().ToLowerInvariant(),
+                    ContextTokens = route.ContextTokens,
+                    Reason = route.Reason,
+                    Warnings = route.Warnings,
+                    Tuning = route.Tuning,
+                    ErrorCode = "MODEL_ROUTE_UNAVAILABLE",
+                    ErrorMessage = route.Reason
+                };
+            }
+
+            var routedState = StateForRoute(state, route);
+            var storage = _modelStorageValidator(routedState);
+            if (!storage.Success)
+            {
+                return PlanError(storage.Code, storage.Message, routedState, route);
+            }
+
+            return new ReviewerPlanResult
+            {
+                Allowed = true,
+                SelectionMode = route.SelectionMode,
+                TaskKind = route.TaskKind,
+                Effort = route.Effort,
+                Model = route.Model,
+                HardwareTier = route.HardwareTier.ToString().ToLowerInvariant(),
+                ContextTokens = route.ContextTokens,
+                Reason = route.Reason,
+                Warnings = route.Warnings,
+                Tuning = route.Tuning
+            };
+        }
+        catch (OllamaException exception)
+        {
+            return PlanError(exception.Code, exception.Message, state);
         }
     }
 
@@ -158,9 +268,9 @@ public sealed class ReviewerService
             }
         }
 
-        if (state is null || string.IsNullOrWhiteSpace(state.SelectedModel))
+        if (state is null)
         {
-            return Error("NOT_CONFIGURED", "No local reviewer model is configured.", false);
+            return Error("NOT_CONFIGURED", "The helper has not been configured.", false);
         }
 
         if (state.Availability != HelperAvailability.Enabled)
@@ -185,15 +295,18 @@ public sealed class ReviewerService
                 state.HardwareTier);
         }
 
-        var storage = _modelStorageValidator(state);
-        if (!storage.Success)
+        if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned)
         {
-            return Error(
-                storage.Code,
-                storage.Message,
-                false,
-                state.SelectedModel,
-                state.HardwareTier);
+            var pinnedStorage = _modelStorageValidator(state);
+            if (!pinnedStorage.Success)
+            {
+                return Error(
+                    pinnedStorage.Code,
+                    pinnedStorage.Message,
+                    false,
+                    state.SelectedModel,
+                    state.HardwareTier);
+            }
         }
 
         if (!_listenerCheck(_ollama.BaseUri.Port))
@@ -208,95 +321,99 @@ public sealed class ReviewerService
 
         ValidateRequest(request, state.Preferences);
         var boundedAssignment = request.Assignment.Trim();
-        var prompt = BuildPrompt(request, state.HardwareTier);
         var outputTokens = Math.Clamp(
             request.MaximumOutputTokens ?? state.Preferences.MaximumOutputTokens,
             64,
             2_048);
-        var keepAlive = state.Preferences.KeepWarm && !state.Preferences.LowImpactMode
+        var keepAlive = state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+            && state.Preferences.KeepWarm
+            && !state.Preferences.LowImpactMode
             ? TimeSpan.FromSeconds(Math.Clamp(state.Preferences.IdleUnloadSeconds, 60, 600))
             : TimeSpan.Zero;
-        var context = state.HardwareTier switch
-        {
-            HardwareTier.Entry => 4_096,
-            HardwareTier.Mid => 8_192,
-            HardwareTier.High => 12_288,
-            HardwareTier.Enthusiast => 16_384,
-            _ => 4_096
-        };
         var stopwatch = Stopwatch.StartNew();
+        ModelRouteDecision? route = null;
         try
         {
-            var models = await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false);
-            var selectedModel = ModelIntegrity.FindSelectedModel(models, state.SelectedModel);
-            if (selectedModel is null)
-            {
-                return Error(
-                    "SELECTED_MODEL_UNAVAILABLE",
-                    "The configured selected model is not available from Ollama.",
-                    false,
-                    state.SelectedModel,
-                    state.HardwareTier);
-            }
-
-            if (!ModelIntegrity.DigestMatches(selectedModel.Digest, state.SelectedModelDigest))
-            {
-                return Error(
-                    "MODEL_DIGEST_MISMATCH",
-                    "The selected model digest does not match the audited catalog digest.",
-                    false,
-                    state.SelectedModel,
-                    state.HardwareTier);
-            }
-
-            if (!_listenerCheck(_ollama.BaseUri.Port))
-            {
-                return Error(
-                    "OLLAMA_NETWORK_EXPOSURE",
-                    "Ollama listener state changed and is no longer loopback-only; local review is blocked.",
-                    false,
-                    state.SelectedModel,
-                    state.HardwareTier);
-            }
-
-            storage = _modelStorageValidator(state);
-            if (!storage.Success)
-            {
-                return Error(
-                    storage.Code,
-                    storage.Message,
-                    false,
-                    state.SelectedModel,
-                    state.HardwareTier);
-            }
-
-            async Task CheckResourcePressureAsync(CancellationToken token)
-            {
-                var running = await _ollama.GetRunningModelsAsync(token).ConfigureAwait(false);
-                var selectedAlreadyLoaded = running.Any(model =>
-                    ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
-                var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
-                if (!pressure.Allowed)
+            var routed = await _ollama.GenerateRoutedAsync(
+                async token =>
                 {
-                    throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
-                }
-            }
+                    var models = await _ollama.GetModelsAsync(token).ConfigureAwait(false);
+                    route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models);
+                    if (!route.Allowed || string.IsNullOrWhiteSpace(route.Model))
+                    {
+                        if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned)
+                        {
+                            var pinned = ModelIntegrity.FindSelectedModel(models, state.SelectedModel);
+                            if (pinned is null)
+                            {
+                                throw new OllamaException(
+                                    "SELECTED_MODEL_UNAVAILABLE",
+                                    "The configured selected model is not available from Ollama.");
+                            }
 
-            var generation = await _ollama.GenerateAsync(
-                state.SelectedModel,
-                prompt,
-                context,
-                outputTokens,
-                keepAlive,
-                cancellationToken,
+                            if (!ModelIntegrity.DigestMatches(pinned.Digest, state.SelectedModelDigest)
+                                || !ModelIntegrity.DigestMatches(pinned.Digest, route.ExpectedDigest))
+                            {
+                                throw new OllamaException(
+                                    "MODEL_DIGEST_MISMATCH",
+                                    "The selected model digest does not match the audited catalog digest.");
+                            }
+                        }
+
+                        throw new OllamaException("MODEL_ROUTE_UNAVAILABLE", route.Reason);
+                    }
+
+                    if (!_listenerCheck(_ollama.BaseUri.Port))
+                    {
+                        throw new OllamaException(
+                            "OLLAMA_NETWORK_EXPOSURE",
+                            "Ollama listener state changed and is no longer loopback-only; local review is blocked.");
+                    }
+
+                    var routedState = StateForRoute(state, route);
+                    var storage = _modelStorageValidator(routedState);
+                    if (!storage.Success)
+                    {
+                        throw new OllamaException(storage.Code, storage.Message);
+                    }
+
+                    var running = await _ollama.GetRunningModelsAsync(token).ConfigureAwait(false);
+                    var selectedAlreadyLoaded = running.Any(model =>
+                        ModelIntegrity.NamesMatch(model.Name, route.Model));
+                    var pressure = _resourcePressureValidator(routedState, selectedAlreadyLoaded);
+                    if (!pressure.Allowed)
+                    {
+                        throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
+                    }
+
+                    _activeModelTracker.Set(route.Model);
+                    return new OllamaGenerationSpec(
+                        route.Model,
+                        BuildPrompt(request, route.HardwareTier),
+                        route.ContextTokens,
+                        outputTokens,
+                        keepAlive);
+                },
                 request.BusyBehavior,
                 TimeSpan.FromSeconds(request.QueueTimeoutSeconds),
-                CheckResourcePressureAsync).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
             stopwatch.Stop();
+            var generation = routed.Generation;
+            var selectedRoute = route!;
+            if (routed.Spec.KeepAlive == TimeSpan.Zero)
+            {
+                _activeModelTracker.Clear(routed.Spec.Model);
+            }
             return new ReviewerResult
             {
-                Model = state.SelectedModel,
-                HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                Model = routed.Spec.Model,
+                HardwareTier = selectedRoute.HardwareTier.ToString().ToLowerInvariant(),
+                SelectionMode = selectedRoute.SelectionMode,
+                TaskKind = selectedRoute.TaskKind,
+                Effort = selectedRoute.Effort,
+                ContextTokens = routed.Spec.ContextTokens,
+                SelectionReason = selectedRoute.Reason,
+                Tuning = selectedRoute.Tuning,
                 BoundedAssignment = boundedAssignment,
                 Findings = generation.Response,
                 ConfirmedObservations = [],
@@ -310,7 +427,8 @@ public sealed class ReviewerService
                     ["eval_count"] = generation.EvalCount,
                     ["eval_duration_ns"] = generation.EvalDurationNanoseconds,
                     ["keep_alive_seconds"] = Math.Max(0, (int)keepAlive.TotalSeconds),
-                    ["busy_behavior"] = request.BusyBehavior.ToString().ToLowerInvariant()
+                    ["busy_behavior"] = request.BusyBehavior.ToString().ToLowerInvariant(),
+                    ["warnings"] = selectedRoute.Warnings
                 },
                 ModelRan = true,
                 Paused = false
@@ -321,8 +439,14 @@ public sealed class ReviewerService
             stopwatch.Stop();
             return new ReviewerResult
             {
-                Model = state.SelectedModel,
-                HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                Model = route?.Model ?? state.SelectedModel,
+                HardwareTier = (route?.HardwareTier ?? state.HardwareTier).ToString().ToLowerInvariant(),
+                SelectionMode = route?.SelectionMode ?? state.Preferences.ModelSelectionMode,
+                TaskKind = route?.TaskKind ?? request.TaskKind,
+                Effort = route?.Effort ?? request.Effort,
+                ContextTokens = route?.ContextTokens ?? 0,
+                SelectionReason = route?.Reason,
+                Tuning = route?.Tuning,
                 BoundedAssignment = boundedAssignment,
                 ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
                 ModelRan = false,
@@ -336,8 +460,14 @@ public sealed class ReviewerService
             stopwatch.Stop();
             return new ReviewerResult
             {
-                Model = state.SelectedModel,
-                HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                Model = route?.Model ?? state.SelectedModel,
+                HardwareTier = (route?.HardwareTier ?? state.HardwareTier).ToString().ToLowerInvariant(),
+                SelectionMode = route?.SelectionMode ?? state.Preferences.ModelSelectionMode,
+                TaskKind = route?.TaskKind ?? request.TaskKind,
+                Effort = route?.Effort ?? request.Effort,
+                ContextTokens = route?.ContextTokens ?? 0,
+                SelectionReason = route?.Reason,
+                Tuning = route?.Tuning,
                 BoundedAssignment = boundedAssignment,
                 ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
                 ModelRan = false,
@@ -359,6 +489,35 @@ public sealed class ReviewerService
             or IntegrationOwnershipStatus.AmbiguousOrMalformed
             ? $"The current Codex reviewer entry does not match helper-owned state. The helper did not {operation}."
             : $"This helper does not own the external local_gpu_reviewer integration and did not {operation}.";
+
+    private static InstallationState StateForRoute(InstallationState state, ModelRouteDecision route)
+        => state with
+        {
+            SelectedModel = route.Model,
+            SelectedModelDigest = route.ExpectedDigest,
+            HardwareTier = route.HardwareTier
+        };
+
+    private static ReviewerPlanResult PlanError(
+        string code,
+        string message,
+        InstallationState? state = null,
+        ModelRouteDecision? route = null)
+        => new()
+        {
+            Allowed = false,
+            SelectionMode = route?.SelectionMode ?? state?.Preferences.ModelSelectionMode ?? ModelSelectionMode.Pinned,
+            TaskKind = route?.TaskKind ?? ReviewTaskKind.Auto,
+            Effort = route?.Effort ?? ReviewEffort.Auto,
+            Model = route?.Model ?? state?.SelectedModel,
+            HardwareTier = (route?.HardwareTier ?? state?.HardwareTier ?? HardwareTier.NoModel).ToString().ToLowerInvariant(),
+            ContextTokens = route?.ContextTokens ?? 0,
+            Reason = route?.Reason ?? message,
+            Warnings = route?.Warnings ?? [],
+            Tuning = route?.Tuning,
+            ErrorCode = code,
+            ErrorMessage = message
+        };
 
     internal static ReviewerModelStorageVerification ValidateModelStorage(
         InstallationState state,
@@ -427,6 +586,16 @@ public sealed class ReviewerService
         {
             throw new ArgumentException("Queue timeout must be from 1 through 120 seconds.", nameof(request));
         }
+
+        if (request.DesiredContextTokens is < 512 or > 131_072)
+        {
+            throw new ArgumentException("Desired context must be from 512 through 131,072 tokens.", nameof(request));
+        }
+
+        if (request.EstimatedInputCharacters is < 0 or > 110_000)
+        {
+            throw new ArgumentException("Estimated input must be from 0 through 110,000 characters.", nameof(request));
+        }
     }
 
     private static string BuildPrompt(ReviewRequest request, HardwareTier tier)
@@ -483,6 +652,7 @@ public sealed class ReviewerService
         {
             Model = state.SelectedModel,
             HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+            SelectionMode = state.Preferences.ModelSelectionMode,
             EndpointReachable = endpointReachable,
             ModelAvailable = modelAvailable,
             ModelRan = false,

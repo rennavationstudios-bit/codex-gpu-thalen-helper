@@ -9,9 +9,9 @@ If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup trea
 The managed entry uses the exact installed executable path and includes:
 
 - `required = false`;
-- `enabled_tools = ["local_gpu_health", "local_gpu_review"]`;
+- `enabled_tools = ["local_gpu_health", "local_gpu_plan", "local_gpu_review"]`;
 - prompt approval by default;
-- automatic approval only for passive `local_gpu_health`;
+- automatic approval only for passive `local_gpu_health` and `local_gpu_plan`;
 - prompt approval for `local_gpu_review`;
 - no parallel tool calls;
 - bounded startup/tool timeouts;

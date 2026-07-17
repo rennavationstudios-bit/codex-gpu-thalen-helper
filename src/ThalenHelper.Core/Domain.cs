@@ -49,6 +49,34 @@ public enum HelperAvailability
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ModelSelectionMode
+{
+    Pinned,
+    Automatic
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ReviewTaskKind
+{
+    Auto,
+    General,
+    LogTriage,
+    TestFailure,
+    DiffReview,
+    RepositoryAnalysis,
+    EdgeCases
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ReviewEffort
+{
+    Auto,
+    Quick,
+    Standard,
+    Deep
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ReviewBusyBehavior
 {
     Skip,
@@ -158,7 +186,21 @@ public sealed record HelperPreferences(
     bool AutoStartOllama = true,
     int IdleUnloadSeconds = 0,
     int MaximumInputCharacters = 110_000,
-    int MaximumOutputTokens = 1_024);
+    int MaximumOutputTokens = 1_024,
+    ModelSelectionMode ModelSelectionMode = ModelSelectionMode.Pinned,
+    int VramReserveMiB = 2_048,
+    int QuickContextTokens = 8_192,
+    int StandardContextTokens = 16_384,
+    int DeepContextTokens = 65_536,
+    int MaximumContextTokens = 131_072,
+    bool PreferQ4Quantization = true,
+    bool PreferFlashAttention = true,
+    string KeyCacheQuantization = "Q8_0",
+    string ValueCacheQuantization = "Q8_0",
+    bool PreferGpuKvCache = true,
+    bool PreferModelProvidedChatTemplate = true,
+    bool AllowCpuMoeOffloadWhenSupported = true,
+    bool AllowExperimentalRuntimeOverrides = false);
 
 public sealed record AccelerationResult(
     string Processor,
@@ -216,7 +258,60 @@ public sealed record ReviewRequest(
     string? Focus = null,
     int? MaximumOutputTokens = null,
     ReviewBusyBehavior BusyBehavior = ReviewBusyBehavior.Skip,
-    int QueueTimeoutSeconds = 30);
+    int QueueTimeoutSeconds = 30,
+    ReviewTaskKind TaskKind = ReviewTaskKind.Auto,
+    ReviewEffort Effort = ReviewEffort.Auto,
+    bool GpuIntensiveWorkloadActive = false,
+    int? DesiredContextTokens = null,
+    int? EstimatedInputCharacters = null);
+
+public sealed record ModelRouteDecision(
+    bool Allowed,
+    ModelSelectionMode SelectionMode,
+    ReviewTaskKind TaskKind,
+    ReviewEffort Effort,
+    string? Model,
+    string? ExpectedDigest,
+    HardwareTier HardwareTier,
+    int ContextTokens,
+    string Reason,
+    IReadOnlyList<string> Warnings,
+    ReviewerTuningPlan Tuning);
+
+public sealed record ReviewerTuningPlan(
+    string Quantization,
+    int ContextTokens,
+    bool FlashAttentionPreferred,
+    string KeyCacheQuantization,
+    string ValueCacheQuantization,
+    int VramReserveMiB,
+    string GpuOffload,
+    string MoePlacement,
+    string KvCacheLocation,
+    string ChatTemplate,
+    string ProviderControl,
+    IReadOnlyList<string> ExperimentalOverrides);
+
+public sealed record ReviewerPlanResult
+{
+    public string IntegrationName { get; init; } = ProductInfo.IntegrationName;
+    public string IntegrationType { get; init; } = "read-only local stdio MCP reviewer";
+    public string Provider { get; init; } = "Ollama";
+    public bool Passive { get; init; } = true;
+    public bool ModelRan { get; init; }
+    public bool Allowed { get; init; }
+    public ModelSelectionMode SelectionMode { get; init; }
+    public ReviewTaskKind TaskKind { get; init; }
+    public ReviewEffort Effort { get; init; }
+    public string? Model { get; init; }
+    public string? HardwareTier { get; init; }
+    public int ContextTokens { get; init; }
+    public string? Reason { get; init; }
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+    public ReviewerTuningPlan? Tuning { get; init; }
+    public string? ErrorCode { get; init; }
+    public string? ErrorMessage { get; init; }
+}
 
 public sealed record ReviewerResult
 {
@@ -225,6 +320,12 @@ public sealed record ReviewerResult
     public string Provider { get; init; } = "Ollama";
     public string? Model { get; init; }
     public string? HardwareTier { get; init; }
+    public ModelSelectionMode SelectionMode { get; init; }
+    public ReviewTaskKind TaskKind { get; init; }
+    public ReviewEffort Effort { get; init; }
+    public int ContextTokens { get; init; }
+    public string? SelectionReason { get; init; }
+    public ReviewerTuningPlan? Tuning { get; init; }
     public string? BoundedAssignment { get; init; }
     public string? Findings { get; init; }
     public IReadOnlyList<string> ConfirmedObservations { get; init; } = [];
@@ -245,6 +346,8 @@ public sealed record ReviewerHealthResult
     public string Provider { get; init; } = "Ollama";
     public string? Model { get; init; }
     public string? HardwareTier { get; init; }
+    public ModelSelectionMode SelectionMode { get; init; }
+    public int EligibleInstalledModels { get; init; }
     public bool EndpointReachable { get; init; }
     public bool ModelAvailable { get; init; }
     public bool ModelLoaded { get; init; }
@@ -267,10 +370,21 @@ public sealed record OllamaGenerationResult(
     int EvalCount,
     long EvalDurationNanoseconds);
 
+public sealed record OllamaGenerationSpec(
+    string Model,
+    string Prompt,
+    int ContextTokens,
+    int OutputTokens,
+    TimeSpan KeepAlive);
+
+public sealed record OllamaRoutedGenerationResult(
+    OllamaGenerationSpec Spec,
+    OllamaGenerationResult Generation);
+
 public static class ProductInfo
 {
     public const string Name = "Codex GPU Thalen Helper";
-    public const string Version = "0.1.0-beta.4";
+    public const string Version = "0.1.0-beta.5";
     public const string IntegrationName = "local_gpu_reviewer";
     public const string ManagedConfigStart = "# BEGIN CODEX GPU THALEN HELPER (managed)";
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";

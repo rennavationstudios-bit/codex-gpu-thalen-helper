@@ -64,16 +64,29 @@ public sealed class McpProtocolTests
         await using var client = await McpClient.CreateAsync(transport);
 
         var tools = await client.ListToolsAsync();
-        Assert.Equal(["local_gpu_health", "local_gpu_review"], tools.Select(tool => tool.Name).Order());
+        Assert.Equal(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], tools.Select(tool => tool.Name).Order());
         var toolSchema = JsonSerializer.Serialize(tools);
         Assert.Contains("busyBehavior", toolSchema, StringComparison.Ordinal);
         Assert.Contains("queueTimeoutSeconds", toolSchema, StringComparison.Ordinal);
+        Assert.Contains("taskKind", toolSchema, StringComparison.Ordinal);
+        Assert.Contains("estimatedInputCharacters", toolSchema, StringComparison.Ordinal);
 
         var health = await client.CallToolAsync("local_gpu_health", new Dictionary<string, object?>());
         var healthJson = JsonSerializer.Serialize(health.StructuredContent);
         Assert.Contains("\"endpointReachable\":false", healthJson, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("\"modelRan\":false", healthJson, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("OLLAMA_PEER_IDENTITY_UNVERIFIED", healthJson, StringComparison.Ordinal);
+
+        var plan = await client.CallToolAsync("local_gpu_plan", new Dictionary<string, object?>
+        {
+            ["assignment"] = "Plan a small test-failure review.",
+            ["taskKind"] = "testFailure",
+            ["estimatedInputCharacters"] = 5_000
+        });
+        var planJson = JsonSerializer.Serialize(plan.StructuredContent);
+        Assert.Contains("OLLAMA_PEER_IDENTITY_UNVERIFIED", planJson, StringComparison.Ordinal);
+        Assert.Contains("\"modelRan\":false", planJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, ollama.GenerationCount);
 
         var review = await client.CallToolAsync("local_gpu_review", new Dictionary<string, object?>
         {

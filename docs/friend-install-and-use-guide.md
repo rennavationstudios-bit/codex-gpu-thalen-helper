@@ -49,12 +49,15 @@ Passive status never runs a model. **Test local review** is the explicit action 
 - **Release GPU** unloads the model without blocking a future review.
 - **Low impact** unloads immediately after each response and is recommended during emulator, Expo, graphics, or device work.
 - **Keep warm** retains the model for a bounded idle period when hardware headroom permits.
+- **Auto model** lets each Codex task passively choose the safest installed audited Q4 model for its task type, size, and current hardware headroom. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.
 
-The helper does not control Codex or its cloud model. It only offers Codex two optional local tools: passive health and one bounded read-only review. Codex decides whether to request a tool, and the local result remains advisory.
+The helper does not control Codex or its cloud model. It offers Codex three optional local tools: passive health, passive task/model planning, and one bounded read-only review. `local_gpu_plan` downloads, loads, and runs nothing; it tells Codex which installed model and context would be used before Codex announces and requests a review. Codex decides whether to request a tool, and the local result remains advisory.
 
 ## Models and automatic startup
 
 Setup never silently downloads a model. A missing model can be downloaded only after a named model choice and confirmation. A user with existing models can point setup to that Ollama model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables review.
+
+Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models. Hardware examples in the test suite are boundaries, not preferred devices. Models that exist only in LM Studio, including Qwythos or Qwen3.6 files, are not silently used by the current Ollama reviewer; a future provider adapter must first meet the same loopback, process-trust, locking, pressure, and unload rules.
 
 When automatic startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before local review works.
 
