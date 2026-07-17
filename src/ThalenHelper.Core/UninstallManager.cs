@@ -19,6 +19,7 @@ public sealed class UninstallManager
     private readonly AgentsOverrideManager _agentsOverride;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly Func<OllamaClient> _clientFactory;
+    private readonly Func<LmStudioClient> _lmStudioFactory;
 
     public UninstallManager(
         ProductPaths paths,
@@ -26,13 +27,15 @@ public sealed class UninstallManager
         CodexConfigManager? codexConfig = null,
         AgentsOverrideManager? agentsOverride = null,
         OllamaAutoStartManager? autoStart = null,
-        Func<OllamaClient>? clientFactory = null)
+        Func<OllamaClient>? clientFactory = null,
+        Func<LmStudioClient>? lmStudioFactory = null)
     {
         _paths = paths;
         _store = store;
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _agentsOverride = agentsOverride ?? new AgentsOverrideManager();
         _clientFactory = clientFactory ?? (() => new OllamaClient());
+        _lmStudioFactory = lmStudioFactory ?? (() => new LmStudioClient());
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
     }
 
@@ -53,20 +56,24 @@ public sealed class UninstallManager
         {
             if (ownsRuntime)
             {
-                state.Availability = HelperAvailability.Disabled;
-                await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-                GpuCoordination.RequestCancellation();
-                if (!string.IsNullOrWhiteSpace(state.SelectedModel))
+                _ = await new ControlService(
+                    managedPaths,
+                    _store,
+                    _clientFactory,
+                    _codexConfig,
+                    _autoStart,
+                    _lmStudioFactory)
+                    .DisableAsync(disableCodexEntry: false, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                if (removeOwnedModel
+                    && state.SelectedModelOwnedByHelper
+                    && !string.IsNullOrWhiteSpace(state.SelectedModel))
                 {
                     try
                     {
                         using var client = _clientFactory();
-                        await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                        if (removeOwnedModel && state.SelectedModelOwnedByHelper)
-                        {
-                            await client.DeleteAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                            modelRemoved = true;
-                        }
+                        await client.DeleteAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+                        modelRemoved = true;
                     }
                     catch (OllamaException)
                     {

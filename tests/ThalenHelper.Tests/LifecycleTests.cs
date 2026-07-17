@@ -597,8 +597,6 @@ public sealed class LifecycleTests
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
         var models = Path.Combine(temporary.Path, "models");
-        var runtime = new FakeOllamaRuntime(models);
-        runtime.SeedModel();
         var store = new StateStore(paths.StateFile);
         new CodexConfigManager().InstallOrRepair(paths, false);
         await store.SaveAsync(new InstallationState
@@ -613,13 +611,106 @@ public sealed class LifecycleTests
         });
         var tracker = new ActiveModelTracker(paths.StateDirectory);
         tracker.Set("qwen3:14b");
-        var control = new ControlService(paths, store, runtime.CreateClient);
+        var loaded = true;
+        var unloads = 0;
+        var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/api/ps")
+            {
+                return FakeHttpMessageHandler.Json(loaded
+                    ? "{\"models\":[{\"name\":\"qwen3:14b\",\"size_vram\":100,\"context_length\":2048}]}"
+                    : "{\"models\":[]}");
+            }
+
+            if (request.RequestUri?.AbsolutePath == "/api/generate")
+            {
+                _ = await request.Content!.ReadAsStringAsync(cancellationToken);
+                loaded = false;
+                unloads++;
+                return FakeHttpMessageHandler.Json("{}");
+            }
+
+            return FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+        });
+        OllamaClient ClientFactory()
+            => new(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var control = new ControlService(paths, store, ClientFactory);
 
         var result = await control.ReleaseGpuAsync();
 
         Assert.True(result.Success, result.Message);
         Assert.Null(tracker.Read());
-        Assert.True(runtime.UnloadCount >= 2);
+        Assert.Equal(1, unloads);
+    }
+
+    [Fact]
+    public async Task PauseDisableAndReleaseNeverUnloadAnUntrackedSelectedModel()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        new CodexConfigManager().InstallOrRepair(paths, false);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen3:14b",
+            HardwareTier = HardwareTier.High,
+            Availability = HelperAvailability.Enabled,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection]
+        });
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath == "/api/ps"
+                ? FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen3:14b\",\"size_vram\":100,\"context_length\":2048}]}")
+                : FakeHttpMessageHandler.Json("{}")));
+        OllamaClient ClientFactory()
+            => new(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var control = new ControlService(paths, store, ClientFactory);
+
+        try
+        {
+            Assert.Equal("PAUSED", (await control.PauseAsync()).Code);
+            Assert.Equal("GPU_RELEASED", (await control.ReleaseGpuAsync()).Code);
+            Assert.Equal("DISABLED", (await control.DisableAsync(disableCodexEntry: false)).Code);
+            Assert.Empty(handler.Requests);
+            Assert.Equal(ActiveModelTrackerStatus.Absent, new ActiveModelTracker(paths.StateDirectory).Inspect().Status);
+        }
+        finally
+        {
+            GpuCoordination.ClearCancellation();
+        }
+    }
+
+    [Fact]
+    public async Task StaleTrackedModelFailsClosedWithoutUnloadOrMarkerDeletion()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        new CodexConfigManager().InstallOrRepair(paths, false);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen3:14b",
+            HardwareTier = HardwareTier.High,
+            Availability = HelperAvailability.Enabled,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection]
+        });
+        var tracker = new ActiveModelTracker(paths.StateDirectory);
+        tracker.Set("qwen3:14b");
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath == "/api/ps"
+                ? FakeHttpMessageHandler.Json("{\"models\":[]}")
+                : FakeHttpMessageHandler.Json("{}")));
+        OllamaClient ClientFactory()
+            => new(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var control = new ControlService(paths, store, ClientFactory);
+
+        var result = await control.ReleaseGpuAsync();
+
+        Assert.False(result.Success);
+        Assert.Equal("GPU_RELEASE_UNCONFIRMED", result.Code);
+        Assert.Equal(["/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
+        Assert.Equal("qwen3:14b", tracker.Read());
+        GpuCoordination.ClearCancellation();
     }
 
     [Fact]

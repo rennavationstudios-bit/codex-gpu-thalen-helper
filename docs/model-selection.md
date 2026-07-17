@@ -22,11 +22,12 @@ Entry-tier context is reduced and low-impact mode is on. The MX330 fixture selec
 
 After a user-authorized pull, setup runs:
 
-1. An exact `THALEN_HELPER_OK` response check.
-2. A tiny off-by-one review expected to return `OFF_BY_ONE`.
-3. `/api/ps` inspection for loaded model, VRAM bytes, context, and expiry.
-4. Explicit unload through generation with `keep_alive=0`.
-5. A second `/api/ps` check proving unload.
+1. An ownership check that accepts an empty Ollama runtime or the single exact model already bound to the helper marker, and refuses every untracked loaded model without unloading it.
+2. An exact `THALEN_HELPER_OK` response check.
+3. A tiny off-by-one review expected to return `OFF_BY_ONE`.
+4. `/api/ps` inspection for loaded model, VRAM bytes, context, and expiry.
+5. Explicit unload of only the tracked helper-owned model through generation with `keep_alive=0`.
+6. A second `/api/ps` check proving unload.
 
 After both checks, runtime inspection, unload, and a post-unload check succeed, the helper records only the model tag, full digest, validation protocol, pass time, two durations, and bounded acceleration counters in `model-validations.json`. Prompts, responses, findings, paths, and user data are never recorded. A missing, corrupt, stale-protocol, or digest-mismatched record is ineligible for automatic routing. OOM, timeout, malformed response, wrong output, cancellation, or unload failure removes that model's prior pass and keeps it out of the automatic pool. Guided setup never switches to a different fallback model after the user confirms a named selection. An explicitly configured noninteractive installation may attempt exactly one smaller automatic/commercial candidate. Pre-existing models are not removed or marked as product-owned.
 

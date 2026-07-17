@@ -254,11 +254,11 @@ public sealed class MainForm : Form
         var left = ActionColumn();
         left.Controls.Add(UiTheme.SectionLabel("REVIEW CONTROLS"));
         var review = ActionFlow();
-        AddActionButton(review, "Pause reviews", "Temporarily rejects new helper-owned reviews, requests cancellation of an active review, and unloads the selected model. The Codex MCP entry remains configured.", async () => await Control().PauseAsync(), managedOnly: true);
+        AddActionButton(review, "Pause reviews", "Temporarily rejects new helper-owned reviews, requests cancellation of an active review, and unloads only a model currently tracked as helper-owned. The Codex MCP entry remains configured.", async () => await Control().PauseAsync(), managedOnly: true);
         AddActionButton(review, "Resume reviews", "Verifies Ollama, loopback networking, model storage, and model integrity before allowing reviews again. It does not preload the model.", async () => await Control().ResumeAsync(), managedOnly: true);
-        AddActionButton(review, "Release GPU", "Unloads the selected model without disabling future reviews. Use this before an emulator, graphics build, or other GPU-heavy work.", async () => await Control().ReleaseGpuAsync(), managedOnly: true);
+        AddActionButton(review, "Release GPU", "Unloads only a model currently tracked as helper-owned without disabling future reviews. Untracked Ollama models are left untouched.", async () => await Control().ReleaseGpuAsync(), managedOnly: true);
         AddActionButton(review, "Enable integration", "Persistently enables the helper-owned Codex MCP entry after safety checks. Restart Codex only if the tools are not already visible.", async () => await Control().EnableAsync(), managedOnly: true);
-        AddActionButton(review, "Disable integration", "Persistently disables the helper-owned MCP entry, cancels helper work, and unloads its model. Restart Codex to remove the tools from the current session.", async () => await Control().DisableAsync(true), AppButtonStyle.Danger, managedOnly: true);
+        AddActionButton(review, "Disable integration", "Persistently disables the helper-owned MCP entry, cancels helper work, and unloads only its tracked model. Restart Codex to remove the tools from the current session.", async () => await Control().DisableAsync(true), AppButtonStyle.Danger, managedOnly: true);
         left.Controls.Add(review);
         left.Controls.Add(UiTheme.SectionLabel("GPU BEHAVIOR"));
         var preferences = ActionFlow();
@@ -456,9 +456,9 @@ public sealed class MainForm : Form
                 _stateBadge.Text = "READY";
                 _heroTitle.Text = "Local review is ready";
                 _heroMessage.Text = health.ModelLoaded
-                    ? "The selected model is loaded. Release GPU when other workloads need headroom."
+                    ? "A routed model is reported loaded. Release GPU unloads it only when current helper ownership can be proven."
                     : "The model stays unloaded until Codex requests a review.";
-                ConfigurePrimary("Pause reviews", async () => await RunControlAsync(() => Control().PauseAsync()), "Pauses new reviews and unloads the selected model while leaving the MCP entry configured.");
+                ConfigurePrimary("Pause reviews", async () => await RunControlAsync(() => Control().PauseAsync()), "Pauses new reviews and unloads only a tracked helper-owned model while leaving the MCP entry configured.");
                 break;
             case HelperAvailability.Paused:
                 StyleBadge(_stateBadge, UiTheme.Warning);

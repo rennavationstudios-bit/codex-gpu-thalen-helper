@@ -43,13 +43,13 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Paused;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        var unload = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        var unload = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         return new ControlResult(
             true,
             unload ? "PAUSED" : "PAUSED_UNLOAD_UNCONFIRMED",
             unload
-                ? "New local reviews are paused and the selected model was released."
-                : "New local reviews are paused; the active provider was unavailable, so model unload could not be confirmed.",
+                ? "New local reviews are paused and any tracked helper-owned model was released."
+                : "New local reviews are paused; runtime ownership could not be proven, so the loaded state was left untouched.",
             state);
     }
 
@@ -96,7 +96,7 @@ public sealed class ControlService
         }
 
         GpuCoordination.RequestCancellation();
-        var unloaded = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        var unloaded = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         if (state.Availability == HelperAvailability.Enabled)
         {
             GpuCoordination.ClearCancellation();
@@ -105,7 +105,7 @@ public sealed class ControlService
         return new ControlResult(
             unloaded,
             unloaded ? "GPU_RELEASED" : "GPU_RELEASE_UNCONFIRMED",
-            unloaded ? "The selected model is no longer loaded." : "The active provider was unavailable, so release could not be confirmed.",
+            unloaded ? "No tracked helper-owned model remains loaded." : "The tracked runtime could not be proven helper-owned, so it was left untouched.",
             state);
     }
 
@@ -120,7 +120,7 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Disabled;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         if (disableCodexEntry)
         {
             _codexConfig.SetEnabled(_paths, false);
@@ -192,7 +192,7 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (enabled)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "LOW_IMPACT_ON" : "LOW_IMPACT_OFF", "Preferences updated.", state);
@@ -229,7 +229,7 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (!enabled)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "KEEP_WARM_ON" : "KEEP_WARM_OFF", "Preferences updated.", state);
@@ -259,7 +259,7 @@ public sealed class ControlService
         };
         if (mode == ModelSelectionMode.Automatic && wasKeepWarm)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         return new ControlResult(
@@ -294,44 +294,26 @@ public sealed class ControlService
             state);
     }
 
-    private async Task<bool> TryUnloadAsync(string? model, CancellationToken cancellationToken)
+    private async Task<bool> TryUnloadManagedModelAsync(
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(model))
+        var inspection = _activeModelTracker.Inspect();
+        if (inspection.Status == ActiveModelTrackerStatus.Absent)
         {
             return true;
         }
 
-        try
-        {
-            using var client = _clientFactory();
-            await client.UnloadAsync(model, cancellationToken).ConfigureAwait(false);
-            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            return !running.Any(item => string.Equals(item.Name, model, StringComparison.OrdinalIgnoreCase));
-        }
-        catch (OllamaException)
+        if (inspection.Status != ActiveModelTrackerStatus.Valid || inspection.Reference is null)
         {
             return false;
         }
-    }
 
-    private async Task<bool> TryUnloadManagedModelAsync(
-        InstallationState state,
-        CancellationToken cancellationToken)
-    {
-        var tracked = _activeModelTracker.ReadReference();
-        var success = tracked is null || await TryUnloadReferenceAsync(tracked, cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(state.SelectedModel)
-            && string.Equals(ModelProviders.Normalize(state.SelectedModelProvider), ModelProviders.Ollama, StringComparison.Ordinal)
-            && (tracked is null || !string.Equals(tracked.Model, state.SelectedModel, StringComparison.OrdinalIgnoreCase)))
-        {
-            success &= await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (success && tracked is not null)
+        var tracked = inspection.Reference;
+        var success = await TryUnloadReferenceAsync(tracked, cancellationToken).ConfigureAwait(false);
+        if (success)
         {
             _activeModelTracker.Clear(tracked.Model);
         }
-
         return success;
     }
 
@@ -341,7 +323,31 @@ public sealed class ControlService
     {
         if (string.Equals(ModelProviders.Normalize(reference.Provider), ModelProviders.Ollama, StringComparison.Ordinal))
         {
-            return await TryUnloadAsync(reference.Model, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var lease = await GpuCoordination.AcquireAsync(
+                    ReviewBusyBehavior.Queue,
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken).ConfigureAwait(false);
+                using var client = _clientFactory();
+                var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+                var ownership = OllamaRuntimeOwnership.Inspect(
+                    running,
+                    _activeModelTracker.Inspect(),
+                    reference.Model);
+                if (!ownership.Allowed || !ownership.SelectedModelAlreadyLoaded)
+                {
+                    return false;
+                }
+
+                await client.UnloadAsync(reference.Model, cancellationToken).ConfigureAwait(false);
+                var after = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+                return !after.Any(item => ModelIntegrity.NamesMatch(item.Name, reference.Model));
+            }
+            catch (OllamaException)
+            {
+                return false;
+            }
         }
 
         if (string.IsNullOrWhiteSpace(reference.InstanceId))

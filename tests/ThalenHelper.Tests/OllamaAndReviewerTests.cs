@@ -650,9 +650,121 @@ public sealed class OllamaAndReviewerTests
 
         Assert.False(result.Success);
         Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
-        Assert.Equal(["/api/tags", "/api/ps", "/api/generate"], handler.Requests.Select(request => request.Path));
-        var unload = JsonDocument.Parse(handler.Requests.Single(request => request.Path == "/api/generate").Body!);
-        Assert.False(unload.RootElement.TryGetProperty("prompt", out _));
+        Assert.Equal(["/api/tags", "/api/ps", "/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
+    }
+
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(4_000_000_000L)]
+    public async Task ReviewerRefusesDifferentNameCpuOrGpuForeignModelWithoutUnload(long sizeVramBytes)
+        => await AssertReviewerRuntimeRefusalAsync(
+            "foreign:latest",
+            sizeVramBytes,
+            trackSelectedModel: false,
+            trackerMustRemain: false);
+
+    [Fact]
+    public async Task ReviewerRefusesSameNameUntrackedModelWithoutUnload()
+        => await AssertReviewerRuntimeRefusalAsync(
+            "qwen2.5-coder:1.5b",
+            4_000_000_000,
+            trackSelectedModel: false,
+            trackerMustRemain: false);
+
+    [Fact]
+    public async Task ReviewerFailsClosedOnStaleOwnershipTrackerWithoutUnload()
+        => await AssertReviewerRuntimeRefusalAsync(
+            null,
+            0,
+            trackSelectedModel: true,
+            trackerMustRemain: true);
+
+    [Fact]
+    public void RuntimeOwnershipFailsClosedOnMalformedTracker()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        File.WriteAllText(tracker.Path, "{not-valid-json");
+
+        var result = OllamaRuntimeOwnership.Inspect(
+            [],
+            tracker.Inspect(),
+            "qwen2.5-coder:1.5b");
+
+        Assert.False(result.Allowed);
+        Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.Code);
+        Assert.Equal(ActiveModelTrackerStatus.Invalid, tracker.Inspect().Status);
+    }
+
+    [Theory]
+    [InlineData("foreign:latest", 0L)]
+    [InlineData("foreign:latest", 4_000_000_000L)]
+    [InlineData("qwen2.5-coder:1.5b", 4_000_000_000L)]
+    public async Task ValidationRefusesCpuGpuAndSameNameUntrackedModelsWithoutUnload(
+        string runningModel,
+        long sizeVramBytes)
+        => await AssertValidationRuntimeRefusalAsync(runningModel, sizeVramBytes, trackSelectedModel: false);
+
+    [Fact]
+    public async Task ValidationFailsClosedOnStaleOwnershipTrackerWithoutUnload()
+        => await AssertValidationRuntimeRefusalAsync(null, 0, trackSelectedModel: true);
+
+    [Fact]
+    public async Task ValidationAllowsAndUnloadsOnlyTheTrackedHelperModel()
+    {
+        using var temporary = new TemporaryDirectory();
+        var validations = new ModelValidationStore(temporary.Path);
+        var tracker = new ActiveModelTracker(temporary.Path);
+        tracker.Set("qwen2.5-coder:1.5b");
+        var loaded = true;
+        var unloads = 0;
+        var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            var path = request.RequestUri?.AbsolutePath;
+            if (path == "/api/tags")
+            {
+                return FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\"}]}");
+            }
+
+            if (path == "/api/ps")
+            {
+                return FakeHttpMessageHandler.Json(loaded
+                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}]}"
+                    : "{\"models\":[]}");
+            }
+
+            if (path == "/api/generate")
+            {
+                var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                using var document = JsonDocument.Parse(body);
+                if (!document.RootElement.TryGetProperty("prompt", out var prompt))
+                {
+                    loaded = false;
+                    unloads++;
+                    return FakeHttpMessageHandler.Json("{}");
+                }
+
+                var response = prompt.GetString()!.Contains("THALEN_HELPER_OK", StringComparison.Ordinal)
+                    ? "THALEN_HELPER_OK"
+                    : "OFF_BY_ONE";
+                return FakeHttpMessageHandler.Json($"{{\"model\":\"qwen2.5-coder:1.5b\",\"response\":\"{response}\",\"done\":true}}");
+            }
+
+            return FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+        });
+        var manager = new InstallationManager(
+            clientFactory: () => new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler)),
+            resourcePressureValidator: (_, _) => new ResourcePressureCheck(true, "OK", "Safe."),
+            validationStoreProvider: _ => validations,
+            activeModelTrackerProvider: _ => tracker);
+
+        var result = await manager.ValidateSelectedModelForTestingAsync(ValidationState());
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(1, unloads);
+        Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
+        Assert.Single((await validations.LoadAsync()).Entries);
     }
 
     [Fact]
@@ -870,7 +982,7 @@ public sealed class OllamaAndReviewerTests
             if (request.RequestUri?.AbsolutePath == "/api/ps")
             {
                 psCalls++;
-                return FakeHttpMessageHandler.Json(psCalls == 3
+                return FakeHttpMessageHandler.Json(psCalls is 2 or 3 or 4
                     ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}] }"
                     : "{\"models\":[]}");
             }
@@ -906,7 +1018,7 @@ public sealed class OllamaAndReviewerTests
 
         Assert.True(result.Success, result.Message);
         Assert.Equal(3, leaseBlockedAtEveryGenerate);
-        Assert.Equal(4, psCalls);
+        Assert.Equal(5, psCalls);
         var entry = Assert.Single((await validations.LoadAsync()).Entries);
         Assert.Equal(state.SelectedModel, entry.Tag);
         Assert.Equal("d7372fd828510000000000000000000000000000000000000000000000000000", entry.Digest);
@@ -930,7 +1042,7 @@ public sealed class OllamaAndReviewerTests
             if (request.RequestUri?.AbsolutePath == "/api/ps")
             {
                 psCalls++;
-                var loaded = psCalls is 3 or 4;
+                var loaded = psCalls is >= 2 and <= 5;
                 return FakeHttpMessageHandler.Json(loaded
                     ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}] }"
                     : "{\"models\":[]}");
@@ -959,7 +1071,7 @@ public sealed class OllamaAndReviewerTests
         var result = await manager.ValidateSelectedModelForTestingAsync(ValidationState());
 
         Assert.True(result.Success, result.Message);
-        Assert.Equal(5, psCalls);
+        Assert.Equal(6, psCalls);
         Assert.Single((await validations.LoadAsync()).Entries);
     }
 
@@ -1004,7 +1116,7 @@ public sealed class OllamaAndReviewerTests
 
         Assert.False(result.Success);
         Assert.Equal("EXACT_RESPONSE_FAILED", result.Code);
-        Assert.Equal(1, unloads);
+        Assert.Equal(0, unloads);
         Assert.Empty((await validations.LoadAsync()).Entries);
     }
 
@@ -1088,6 +1200,111 @@ public sealed class OllamaAndReviewerTests
         Assert.Equal(0, process.ExitCode);
         await store.SaveAsync(new InstallationState { ProductVersion = "after-release" });
         Assert.Equal("after-release", (await store.LoadAsync())!.ProductVersion);
+    }
+
+    private static async Task AssertReviewerRuntimeRefusalAsync(
+        string? runningModel,
+        long sizeVramBytes,
+        bool trackSelectedModel,
+        bool trackerMustRemain)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        var state = ValidationState();
+        state.Availability = HelperAvailability.Enabled;
+        await store.SaveAsync(state);
+        var tracker = new ActiveModelTracker(paths.StateDirectory);
+        if (trackSelectedModel)
+        {
+            tracker.Set(state.SelectedModel!);
+        }
+
+        var runningJson = runningModel is null
+            ? "{\"models\":[]}"
+            : $"{{\"models\":[{{\"name\":\"{runningModel}\",\"size_vram\":{sizeVramBytes},\"context_length\":2048}}]}}";
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size\":100}]}"),
+                "/api/ps" => FakeHttpMessageHandler.Json(runningJson),
+                "/api/generate" => FakeHttpMessageHandler.Json("{\"model\":\"qwen2.5-coder:1.5b\",\"response\":\"UNEXPECTED\",\"done\":true}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var validations = new ModelValidationStore(paths.StateDirectory);
+        await validations.UpsertAsync(Validation("qwen2.5-coder:1.5b", "d7372fd82851"));
+        var pressureChecks = 0;
+        var reviewer = new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            (_, _) =>
+            {
+                pressureChecks++;
+                return new ResourcePressureCheck(true, "OK", "Safe.");
+            },
+            hardwareProvider: ReviewerHardware,
+            validationStore: validations);
+
+        var result = await reviewer.ReviewAsync(new ReviewRequest("Inspect."));
+
+        Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal(0, pressureChecks);
+        Assert.Equal(["/api/tags", "/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
+        Assert.Equal(
+            trackerMustRemain ? ActiveModelTrackerStatus.Valid : ActiveModelTrackerStatus.Absent,
+            tracker.Inspect().Status);
+    }
+
+    private static async Task AssertValidationRuntimeRefusalAsync(
+        string? runningModel,
+        long sizeVramBytes,
+        bool trackSelectedModel)
+    {
+        using var temporary = new TemporaryDirectory();
+        var validations = new ModelValidationStore(temporary.Path);
+        var tracker = new ActiveModelTracker(temporary.Path);
+        if (trackSelectedModel)
+        {
+            tracker.Set("qwen2.5-coder:1.5b");
+        }
+
+        var runningJson = runningModel is null
+            ? "{\"models\":[]}"
+            : $"{{\"models\":[{{\"name\":\"{runningModel}\",\"size_vram\":{sizeVramBytes},\"context_length\":2048}}]}}";
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\"}]}"),
+                "/api/ps" => FakeHttpMessageHandler.Json(runningJson),
+                "/api/generate" => FakeHttpMessageHandler.Json("{}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
+        var pressureChecks = 0;
+        var manager = new InstallationManager(
+            clientFactory: () => new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler)),
+            resourcePressureValidator: (_, _) =>
+            {
+                pressureChecks++;
+                return new ResourcePressureCheck(true, "OK", "Safe.");
+            },
+            validationStoreProvider: _ => validations,
+            activeModelTrackerProvider: _ => tracker);
+
+        var result = await manager.ValidateSelectedModelForTestingAsync(ValidationState());
+
+        Assert.False(result.Success);
+        Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.Code);
+        Assert.Equal(0, pressureChecks);
+        Assert.Equal(["/api/tags", "/api/ps", "/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
+        Assert.Equal(
+            trackSelectedModel ? ActiveModelTrackerStatus.Valid : ActiveModelTrackerStatus.Absent,
+            tracker.Inspect().Status);
     }
 
     private static FakeHttpMessageHandler InventoryHandler()

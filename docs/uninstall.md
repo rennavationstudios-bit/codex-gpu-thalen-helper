@@ -8,7 +8,7 @@ thalen-helper uninstall --yes
 
 A small local install-context file beside the helper executables records only the managed install directory, state directory, and `CODEX_HOME` selected during setup. This lets Inno uninstall reopen the correct state when non-default paths were used. Explicit uninstall CLI paths take precedence. The context is validated against the current install directory and deleted after successful cleanup.
 
-For a product-owned integration, lifecycle cleanup disables/cancels review, unloads the selected model when Ollama responds, removes the owned per-user startup entry, restores prior `OLLAMA_MODELS`/`OLLAMA_HOST` values only if the current values are still product-owned, removes only the marked MCP/instruction sections, deletes product state, and writes a concise report in the temporary directory.
+For a product-owned integration, lifecycle cleanup disables/cancels review, unloads only a currently running model proven by the valid helper ownership marker, removes the owned per-user startup entry, restores prior `OLLAMA_MODELS`/`OLLAMA_HOST` values only if the current values are still product-owned, removes only the marked MCP/instruction sections, deletes product state, and writes a concise report in the temporary directory. An untracked, stale, mismatched, or otherwise unprovable Ollama runtime is left untouched.
 
 When setup preserved an existing unmarked `local_gpu_reviewer`, uninstall does not connect to Ollama, unload or delete models, change startup/environment values, terminate reviewer processes, or edit the existing TOML table. It removes only helper-managed instruction sections and product state.
 

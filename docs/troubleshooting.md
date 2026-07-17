@@ -13,7 +13,7 @@ These checks call inventory/runtime endpoints only and do not run model inferenc
 
 The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads and loads no model, so the dashboard reports that model setup is still required. Choose **Choose model** to point to an existing Ollama model folder or explicitly approve a download and bounded validation.
 
-Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** only unloads the model.
+Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** unloads only a currently tracked helper-owned model and never an untracked model merely because its name matches the configured selection.
 
 ## The Control Center says no model is loaded
 

@@ -642,15 +642,27 @@ public sealed class ReviewerService
                     }
 
                     var running = await _ollama.GetRunningModelsAsync(token).ConfigureAwait(false);
-                    var selectedAlreadyLoaded = running.Any(model =>
-                        ModelIntegrity.NamesMatch(model.Name, route.Model));
-                    var pressure = _resourcePressureValidator(routedState, selectedAlreadyLoaded);
+                    var runtimeOwnership = OllamaRuntimeOwnership.Inspect(
+                        running,
+                        _activeModelTracker.Inspect(),
+                        route.Model);
+                    if (!runtimeOwnership.Allowed)
+                    {
+                        throw new OllamaException(runtimeOwnership.Code, runtimeOwnership.Message, retryable: true);
+                    }
+
+                    var pressure = _resourcePressureValidator(
+                        routedState,
+                        runtimeOwnership.SelectedModelAlreadyLoaded);
                     if (!pressure.Allowed)
                     {
                         throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
                     }
 
-                    _activeModelTracker.Set(route.Model);
+                    if (!runtimeOwnership.SelectedModelAlreadyLoaded)
+                    {
+                        _activeModelTracker.Set(route.Model);
+                    }
                     return new OllamaGenerationSpec(
                         route.Model,
                         BuildPrompt(request, route.HardwareTier),

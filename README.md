@@ -110,6 +110,8 @@ Approximate catalog tiers are conservative guardrails, not guarantees:
 
 Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models with a current exact-digest validation pass on that installation; shared graphics memory is never counted as dedicated VRAM. Validation stores only bounded timing/acceleration evidence and never prompts or responses. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
 
+Before Ollama review or validation, the helper checks runtime ownership inside its shared inference lease. An empty runtime may be claimed for the bounded operation. A loaded runtime is accepted only when exactly one running model matches both the current helper ownership marker and the requested route. CPU-only models, GPU models, and same-name models without that proof are treated as foreign and left untouched. Pause, disable, release, and validation cleanup never fall back to unloading the configured model merely by name.
+
 Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), [docs/task-aware-routing.md](docs/task-aware-routing.md), and the auditable [model catalog](model-catalog/models.v1.json).
 
 ## Model storage
@@ -172,7 +174,7 @@ thalen-helper update [--yes]
 thalen-helper uninstall --yes [--remove-owned-model]
 ```
 
-`pause` is temporary: it rejects new calls, cancels an active helper generation when possible, and unloads the selected model while leaving the Codex MCP entry configured. `resume` verifies safety and allows calls again without preloading the model. `disable` persistently turns off the helper-owned MCP entry and may require a Codex restart to remove its tools from the current session; `enable` persistently turns it back on after safety checks. `release-gpu` only unloads the model and leaves future reviews allowed.
+`pause` is temporary: it rejects new calls, cancels an active helper generation when possible, and unloads only a currently tracked helper-owned model while leaving the Codex MCP entry configured. `resume` verifies safety and allows calls again without preloading the model. `disable` persistently turns off the helper-owned MCP entry and may require a Codex restart to remove its tools from the current session; `enable` persistently turns it back on after safety checks. `release-gpu` only unloads a currently tracked helper-owned model and leaves future reviews allowed. All three controls preserve untracked Ollama models even when their names match the saved selection.
 
 Local generation is single-flight through a named per-user Windows semaphore shared by every Codex chat. A review skips immediately by default when busy, or may request a bounded queue of at most 120 seconds. Immediately before generation, the helper refuses optional work when measured dedicated VRAM, physical memory, or Windows commit reserve is unsafe. Low-impact mode unloads immediately; bounded idle keep-alive is opt-in.
 

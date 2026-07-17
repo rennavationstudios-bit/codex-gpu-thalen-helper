@@ -52,6 +52,7 @@ public sealed class InstallationManager
     private readonly Func<StateStore, InstallationState, CancellationToken, Task>? _stateSaver;
     private readonly Action<ProductPaths> _installContextSaver;
     private readonly Func<ProductPaths?, ModelValidationStore> _validationStoreProvider;
+    private readonly Func<ProductPaths?, ActiveModelTracker> _activeModelTrackerProvider;
 
     public InstallationManager(
         HardwareDetector? hardwareDetector = null,
@@ -66,7 +67,8 @@ public sealed class InstallationManager
         Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null,
         Func<StateStore, InstallationState, CancellationToken, Task>? stateSaver = null,
         Func<ProductPaths?, ModelValidationStore>? validationStoreProvider = null,
-        Action<ProductPaths>? installContextSaver = null)
+        Action<ProductPaths>? installContextSaver = null,
+        Func<ProductPaths?, ActiveModelTracker>? activeModelTrackerProvider = null)
     {
         _hardwareProvider = hardwareProvider ?? (hardwareDetector ?? new HardwareDetector()).Detect;
         _catalogService = catalogService ?? new ModelCatalogService();
@@ -87,6 +89,8 @@ public sealed class InstallationManager
             Guid.NewGuid().ToString("N"));
         _validationStoreProvider = validationStoreProvider
             ?? (paths => new ModelValidationStore(paths?.StateDirectory ?? isolatedTestDirectory));
+        _activeModelTrackerProvider = activeModelTrackerProvider
+            ?? (paths => new ActiveModelTracker(paths?.StateDirectory ?? isolatedTestDirectory));
     }
 
     public async Task<RepairDryRunResult> PreviewRepairAsync(
@@ -913,6 +917,7 @@ public sealed class InstallationManager
         var exactMilliseconds = 0L;
         var reviewMilliseconds = 0L;
         var validationStore = _validationStoreProvider(paths);
+        var activeModelTracker = _activeModelTrackerProvider(paths);
         try
         {
             // A prior pass must never survive a new validation attempt for the same tag.
@@ -939,17 +944,33 @@ public sealed class InstallationManager
                 return new ModelValidationResult(false, "MODEL_DIGEST_INVALID", "Ollama did not provide a full normalized SHA-256 model digest.", null, 0, 0);
             }
 
-            async Task CheckResourcePressureAsync(CancellationToken token)
+            var runtimeClaimedByValidation = false;
+            async Task CheckRuntimeOwnershipAndPressureAsync(CancellationToken token)
             {
                 ThrowIfOwnershipInvalid(paths, state);
                 var runningModels = await client.GetRunningModelsAsync(token).ConfigureAwait(false);
                 ThrowIfOwnershipInvalid(paths, state);
-                var selectedAlreadyLoaded = runningModels.Any(model =>
-                    ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
-                var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
+                var runtimeOwnership = OllamaRuntimeOwnership.Inspect(
+                    runningModels,
+                    activeModelTracker.Inspect(),
+                    state.SelectedModel);
+                if (!runtimeOwnership.Allowed)
+                {
+                    throw new OllamaException(runtimeOwnership.Code, runtimeOwnership.Message, retryable: true);
+                }
+
+                var pressure = _resourcePressureValidator(
+                    state,
+                    runtimeOwnership.SelectedModelAlreadyLoaded);
                 if (!pressure.Allowed)
                 {
                     throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
+                }
+
+                if (!runtimeOwnership.SelectedModelAlreadyLoaded)
+                {
+                    activeModelTracker.Set(state.SelectedModel);
+                    runtimeClaimedByValidation = true;
                 }
             }
 
@@ -959,10 +980,14 @@ public sealed class InstallationManager
                 cancellationToken).ConfigureAwait(false);
             AccelerationResult? acceleration = null;
             var unloadVerified = false;
+            var generationAttempted = false;
+            string? cleanupFailureCode = null;
+            string? cleanupFailureMessage = null;
             try
             {
-                await CheckResourcePressureAsync(cancellationToken).ConfigureAwait(false);
+                await CheckRuntimeOwnershipAndPressureAsync(cancellationToken).ConfigureAwait(false);
                 var exactStart = System.Diagnostics.Stopwatch.StartNew();
+                generationAttempted = true;
                 var exact = await client.GenerateUnderLeaseAsync(
                     new OllamaGenerationSpec(
                         state.SelectedModel,
@@ -979,8 +1004,9 @@ public sealed class InstallationManager
                     throw new OllamaException("EXACT_RESPONSE_FAILED", "The exact-response smoke test failed.");
                 }
 
-                await CheckResourcePressureAsync(cancellationToken).ConfigureAwait(false);
+                await CheckRuntimeOwnershipAndPressureAsync(cancellationToken).ConfigureAwait(false);
                 var reviewStart = System.Diagnostics.Stopwatch.StartNew();
+                generationAttempted = true;
                 var review = await client.GenerateUnderLeaseAsync(
                     new OllamaGenerationSpec(
                         state.SelectedModel,
@@ -1013,17 +1039,46 @@ public sealed class InstallationManager
                 using var unloadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
                 try
                 {
-                    await client.UnloadAsync(state.SelectedModel, unloadTimeout.Token).ConfigureAwait(false);
-                    while (!unloadTimeout.IsCancellationRequested)
+                    var beforeCleanup = await client.GetRunningModelsAsync(unloadTimeout.Token).ConfigureAwait(false);
+                    var tracker = activeModelTracker.Inspect();
+                    if (beforeCleanup.Count == 0
+                        && runtimeClaimedByValidation
+                        && OllamaRuntimeOwnership.MatchesTrackedOllamaModel(tracker, state.SelectedModel))
                     {
-                        var after = await client.GetRunningModelsAsync(unloadTimeout.Token).ConfigureAwait(false);
-                        if (!after.Any(item => ModelIntegrity.NamesMatch(item.Name, state.SelectedModel)))
+                        activeModelTracker.Clear(state.SelectedModel);
+                        unloadVerified = true;
+                    }
+                    else
+                    {
+                        var cleanupOwnership = OllamaRuntimeOwnership.Inspect(
+                            beforeCleanup,
+                            tracker,
+                            state.SelectedModel);
+                        if (!cleanupOwnership.Allowed || !cleanupOwnership.SelectedModelAlreadyLoaded)
+                        {
+                            cleanupFailureCode = cleanupOwnership.Code;
+                            cleanupFailureMessage = cleanupOwnership.Message;
+                        }
+                        else if (!generationAttempted)
                         {
                             unloadVerified = true;
-                            break;
                         }
+                        else
+                        {
+                            await client.UnloadAsync(state.SelectedModel, unloadTimeout.Token).ConfigureAwait(false);
+                            while (!unloadTimeout.IsCancellationRequested)
+                            {
+                                var after = await client.GetRunningModelsAsync(unloadTimeout.Token).ConfigureAwait(false);
+                                if (!after.Any(item => ModelIntegrity.NamesMatch(item.Name, state.SelectedModel)))
+                                {
+                                    activeModelTracker.Clear(state.SelectedModel);
+                                    unloadVerified = true;
+                                    break;
+                                }
 
-                        await Task.Delay(TimeSpan.FromMilliseconds(250), unloadTimeout.Token).ConfigureAwait(false);
+                                await Task.Delay(TimeSpan.FromMilliseconds(250), unloadTimeout.Token).ConfigureAwait(false);
+                            }
+                        }
                     }
                 }
                 catch (Exception exception) when (exception is OllamaException or OperationCanceledException)
@@ -1034,7 +1089,13 @@ public sealed class InstallationManager
 
             if (!unloadVerified)
             {
-                return new ModelValidationResult(false, "GPU_RELEASE_FAILED", "The selected model did not unload after validation.", acceleration, exactMilliseconds, reviewMilliseconds);
+                return new ModelValidationResult(
+                    false,
+                    cleanupFailureCode ?? "GPU_RELEASE_FAILED",
+                    cleanupFailureMessage ?? "The helper-owned selected model did not unload after validation.",
+                    acceleration,
+                    exactMilliseconds,
+                    reviewMilliseconds);
             }
 
             await validationStore.UpsertAsync(new ModelValidationEntry(

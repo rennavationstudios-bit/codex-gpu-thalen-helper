@@ -43,11 +43,11 @@ Passive status never runs a model. **Test local review** is the explicit action 
 
 ## Controls
 
-- **Pause reviews** temporarily blocks helper reviews and unloads the selected model.
+- **Pause reviews** temporarily blocks helper reviews and unloads only a model currently tracked as helper-owned.
 - **Resume reviews** repeats safety verification and allows reviews without preloading the model.
 - **Enable integration** persistently enables the helper-owned Codex MCP entry after safety checks.
 - **Disable integration** persistently disables that entry; restart Codex if its tools remain visible in the current session.
-- **Release GPU** unloads the model without blocking a future review.
+- **Release GPU** unloads only a model currently tracked as helper-owned without blocking a future review. An untracked Ollama model is left alone.
 - **Low impact** unloads immediately after each response and is recommended during emulator, Expo, graphics, or device work.
 - **Keep warm** retains the model for a bounded idle period when hardware headroom permits.
 - **Auto model** lets each Codex task passively choose the safest installed audited Q4 model for its task type, size, and current hardware headroom. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.

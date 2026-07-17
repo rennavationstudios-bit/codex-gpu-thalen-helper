@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.10 - 2026-07-17
+
+- Ollama review and validation now refuse every loaded model that is not bound to the exact current helper ownership marker and requested route, including untracked same-name models and CPU-only foreign models.
+- Pause, disable, release, uninstall cleanup, and validation cleanup unload only a valid tracked helper-owned model; stale, malformed, mismatched, or absent ownership evidence fails closed without a name-based fallback unload.
+- Added mocked regression coverage for CPU/GPU foreign models, same-name ambiguity, stale tracking, exact tracked cleanup, and control actions that preserve untracked runtimes.
+
 ## 0.1.0-beta.9 - 2026-07-17
 
 - Added `models activate` for an exact, non-destructive switch to a complete pre-copied Ollama store.
