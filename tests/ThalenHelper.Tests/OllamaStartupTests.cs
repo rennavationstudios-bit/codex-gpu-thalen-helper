@@ -142,17 +142,20 @@ public sealed class OllamaStartupTests
         var absent = OllamaAutoStartManager.EvaluateListenerStatus([]);
         Assert.False(absent.HasListeners);
         Assert.False(absent.LoopbackOnly);
+        Assert.True(OllamaAutoStartManager.HasNoNonLoopbackListener(absent));
 
         var loopback = OllamaAutoStartManager.EvaluateListenerStatus(
             [new IPEndPoint(IPAddress.Loopback, 11434), new IPEndPoint(IPAddress.IPv6Loopback, 11434)]);
         Assert.True(loopback.HasListeners);
         Assert.True(loopback.LoopbackOnly);
+        Assert.True(OllamaAutoStartManager.HasNoNonLoopbackListener(loopback));
         Assert.Equal(2, loopback.ListenerCount);
 
         var exposed = OllamaAutoStartManager.EvaluateListenerStatus(
             [new IPEndPoint(IPAddress.IPv6Any, 11434)]);
         Assert.True(exposed.HasListeners);
         Assert.False(exposed.LoopbackOnly);
+        Assert.False(OllamaAutoStartManager.HasNoNonLoopbackListener(exposed));
     }
 
     [Fact]

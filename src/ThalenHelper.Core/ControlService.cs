@@ -7,6 +7,7 @@ public sealed class ControlService
     private readonly ProductPaths _paths;
     private readonly StateStore _stateStore;
     private readonly Func<OllamaClient> _clientFactory;
+    private readonly Func<LmStudioClient> _lmStudioFactory;
     private readonly CodexConfigManager _codexConfig;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly ActiveModelTracker _activeModelTracker;
@@ -16,11 +17,13 @@ public sealed class ControlService
         StateStore stateStore,
         Func<OllamaClient>? clientFactory = null,
         CodexConfigManager? codexConfig = null,
-        OllamaAutoStartManager? autoStart = null)
+        OllamaAutoStartManager? autoStart = null,
+        Func<LmStudioClient>? lmStudioFactory = null)
     {
         _paths = paths;
         _stateStore = stateStore;
         _clientFactory = clientFactory ?? (() => new OllamaClient());
+        _lmStudioFactory = lmStudioFactory ?? (() => new LmStudioClient());
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
         _activeModelTracker = new ActiveModelTracker(paths.StateDirectory);
@@ -46,7 +49,7 @@ public sealed class ControlService
             unload ? "PAUSED" : "PAUSED_UNLOAD_UNCONFIRMED",
             unload
                 ? "New local reviews are paused and the selected model was released."
-                : "New local reviews are paused; Ollama was unavailable, so model unload could not be confirmed.",
+                : "New local reviews are paused; the active provider was unavailable, so model unload could not be confirmed.",
             state);
     }
 
@@ -93,7 +96,7 @@ public sealed class ControlService
         return new ControlResult(
             unloaded,
             unloaded ? "GPU_RELEASED" : "GPU_RELEASE_UNCONFIRMED",
-            unloaded ? "The selected model is no longer loaded." : "Ollama was unavailable, so release could not be confirmed.",
+            unloaded ? "The selected model is no longer loaded." : "The active provider was unavailable, so release could not be confirmed.",
             state);
     }
 
@@ -297,22 +300,45 @@ public sealed class ControlService
         InstallationState state,
         CancellationToken cancellationToken)
     {
-        var trackedModel = _activeModelTracker.Read();
-        var models = new[] { trackedModel, state.SelectedModel }
-            .Where(model => !string.IsNullOrWhiteSpace(model))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var success = true;
-        foreach (var model in models)
+        var tracked = _activeModelTracker.ReadReference();
+        var success = tracked is null || await TryUnloadReferenceAsync(tracked, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(state.SelectedModel)
+            && string.Equals(ModelProviders.Normalize(state.SelectedModelProvider), ModelProviders.Ollama, StringComparison.Ordinal)
+            && (tracked is null || !string.Equals(tracked.Model, state.SelectedModel, StringComparison.OrdinalIgnoreCase)))
         {
-            success &= await TryUnloadAsync(model, cancellationToken).ConfigureAwait(false);
+            success &= await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
         }
 
-        if (success && trackedModel is not null)
+        if (success && tracked is not null)
         {
-            _activeModelTracker.Clear(trackedModel);
+            _activeModelTracker.Clear(tracked.Model);
         }
 
         return success;
+    }
+
+    private async Task<bool> TryUnloadReferenceAsync(
+        ActiveModelReference reference,
+        CancellationToken cancellationToken)
+    {
+        if (string.Equals(ModelProviders.Normalize(reference.Provider), ModelProviders.Ollama, StringComparison.Ordinal))
+        {
+            return await TryUnloadAsync(reference.Model, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (string.IsNullOrWhiteSpace(reference.InstanceId))
+        {
+            return false;
+        }
+        try
+        {
+            using var client = _lmStudioFactory();
+            await client.UnloadAndWaitAsync(reference.Model, reference.InstanceId, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (LmStudioException)
+        {
+            return false;
+        }
     }
 }

@@ -22,7 +22,7 @@ public static class InstallContextStore
         Directory.CreateDirectory(paths.InstallDirectory);
         var context = new InstallContext(
             1,
-            Path.GetFullPath(paths.InstallDirectory),
+            NormalizeDirectoryPath(paths.InstallDirectory),
             Path.GetFullPath(paths.StateDirectory),
             Path.GetFullPath(paths.CodexHome));
         var destination = GetPath(paths.InstallDirectory);
@@ -45,7 +45,7 @@ public static class InstallContextStore
 
     public static InstallContext? Load(string installDirectory)
     {
-        var expectedInstallDirectory = Path.GetFullPath(installDirectory);
+        var expectedInstallDirectory = NormalizeDirectoryPath(installDirectory);
         var path = GetPath(expectedInstallDirectory);
         if (!File.Exists(path))
         {
@@ -71,7 +71,7 @@ public static class InstallContextStore
             || !Path.IsPathFullyQualified(context.StateDirectory)
             || !Path.IsPathFullyQualified(context.CodexHome)
             || !string.Equals(
-                Path.GetFullPath(context.InstallDirectory),
+                NormalizeDirectoryPath(context.InstallDirectory),
                 expectedInstallDirectory,
                 StringComparison.OrdinalIgnoreCase))
         {
@@ -97,4 +97,7 @@ public static class InstallContextStore
 
     public static string GetPath(string installDirectory)
         => Path.Combine(Path.GetFullPath(installDirectory), FileName);
+
+    private static string NormalizeDirectoryPath(string path)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
 }

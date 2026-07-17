@@ -110,6 +110,45 @@ public sealed class ModelAndStorageTests
     }
 
     [Fact]
+    public void ExplicitAttachedFixedVolumeIsAllowedWithDisconnectWarningButNeverAutoSelected()
+    {
+        var model = new ModelCatalogService().LoadBundled().Models.Single(item => item.Tag == "qwen3:8b");
+        var profile = FixtureFactory.Create(FixtureFactory.LoadHardwareFixtures().First()) with
+        {
+            Volumes = [Volume("X:\\", StorageMediaType.Removable, 300, false, false)]
+        };
+
+        var automatic = new StorageSelector().Recommend(profile, model);
+        var explicitSelection = InstallationManager.ValidateCustomStorage(profile, model, @"X:\Models\Ollama");
+
+        Assert.Null(automatic.Volume);
+        Assert.Equal("X:\\", explicitSelection.Volume?.RootPath);
+        Assert.Equal(@"X:\Models\Ollama", explicitSelection.ModelDirectory);
+        Assert.Contains(explicitSelection.Warnings, warning =>
+            warning.Contains("connected", StringComparison.OrdinalIgnoreCase)
+            && warning.Contains("drive letter", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ExplicitNetworkOrNonFixedModelStorageStillFailsClosed()
+    {
+        var model = new ModelCatalogService().LoadBundled().Models.Single(item => item.Tag == "qwen3:8b");
+        var profile = FixtureFactory.Create(FixtureFactory.LoadHardwareFixtures().First()) with
+        {
+            Volumes =
+            [
+                new StorageVolume("N:\\", "NTFS", 1000 * GiB, 300 * GiB, StorageMediaType.Network, true, false, false, false, "network"),
+                new StorageVolume("R:\\", "NTFS", 1000 * GiB, 300 * GiB, StorageMediaType.Removable, false, false, false, false, "not fixed")
+            ]
+        };
+
+        Assert.Throws<InvalidOperationException>(() =>
+            InstallationManager.ValidateCustomStorage(profile, model, @"N:\Models"));
+        Assert.Throws<InvalidOperationException>(() =>
+            InstallationManager.ValidateCustomStorage(profile, model, @"R:\Models"));
+    }
+
+    [Fact]
     public void InvalidCatalogIsRejected()
     {
         var valid = new ModelCatalogService().LoadBundled();

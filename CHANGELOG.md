@@ -4,6 +4,27 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.8 - 2026-07-17
+
+- Fixed post-logon Ollama startup so an unused port is treated as safe to bind on loopback instead of being misclassified as network exposure.
+- Preserved fail-closed blocking when an actual wildcard or non-loopback listener owns the Ollama port.
+- Added regression coverage for absent, loopback-only, and exposed listener states.
+
+## 0.1.0-beta.7 - 2026-07-17
+
+- Added optional, exact-digest LM Studio routing for audited local GGUF models, beginning with Qwythos 9B BF16.
+- Added provider-aware validation and automatic routing: quick and GPU-busy reviews stay on smaller Ollama models while validated standard/deep reviews can prefer Qwythos.
+- Added a signed-current-user LM Studio loopback trust check, one shared GPU lease, foreign-model refusal, bounded validation, and verified unload after every LM Studio call.
+- Existing Ollama-only installations remain the safe fallback when LM Studio or removable model storage is unavailable.
+
+## 0.1.0-beta.6 - 2026-07-16
+
+- Added read-only protected repair previews with explicit private diff output and four source/planned SHA-256 values that bind both Codex files before either write.
+- Added explicit, reviewed migration for an existing unmarked `local_gpu_reviewer`; default installs and repairs still preserve external integrations byte-for-byte.
+- Added surgical TOML migration with ambiguity refusal, exact existing AGENTS prefix preservation, timestamped backups, idempotent adoption, and cross-file rollback.
+- Added semantic update ordering, correct failed-update exit codes, persisted product-version refresh, and a SHA-pinned disposable beta.5-to-beta.6 upgrade lifecycle.
+- Added fail-closed per-model validation evidence so automatic routing uses only exact installed digests that passed the current bounded validation protocol; prompts and responses are never persisted.
+
 ## 0.1.0-beta.5 - 2026-07-16
 
 - Added passive `local_gpu_plan` task routing plus automatic or pinned model-selection modes shared across Codex projects.

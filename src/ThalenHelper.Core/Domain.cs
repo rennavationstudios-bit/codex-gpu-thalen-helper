@@ -161,7 +161,10 @@ public sealed record ModelCatalogEntry(
     string LicenseUrl,
     bool CommercialUseAllowed,
     string SourceUrl,
-    DateOnly VerifiedOn);
+    DateOnly VerifiedOn,
+    bool NonQ4AutomaticAllowed = false,
+    int AutomaticPriority = 0,
+    string? IndexedModelPath = null);
 
 public sealed record ModelRecommendation(
     HardwareTier HardwareTier,
@@ -200,7 +203,8 @@ public sealed record HelperPreferences(
     bool PreferGpuKvCache = true,
     bool PreferModelProvidedChatTemplate = true,
     bool AllowCpuMoeOffloadWhenSupported = true,
-    bool AllowExperimentalRuntimeOverrides = false);
+    bool AllowExperimentalRuntimeOverrides = false,
+    bool PreferLmStudioForStandardAndDeep = false);
 
 public sealed record AccelerationResult(
     string Processor,
@@ -211,7 +215,7 @@ public sealed record AccelerationResult(
 public sealed record InstallationState
 {
     public int SchemaVersion { get; init; } = 1;
-    public string ProductVersion { get; init; } = ProductInfo.Version;
+    public string ProductVersion { get; set; } = ProductInfo.Version;
     public DateTimeOffset InstalledAt { get; init; } = DateTimeOffset.UtcNow;
     public List<string> FilesCreated { get; init; } = [];
     public List<string> FilesModified { get; init; } = [];
@@ -223,7 +227,9 @@ public sealed record InstallationState
     public bool ExistingIntegrationPreserved { get; set; }
     public bool ReliabilityBaselineInstalled { get; set; }
     public string? SelectedModel { get; set; }
+    public string SelectedModelProvider { get; set; } = ModelProviders.Ollama;
     public string? SelectedModelDigest { get; set; }
+    public List<LocalModelRegistration> RegisteredLocalModels { get; set; } = [];
     public bool SelectedModelOwnedByHelper { get; set; }
     public string? ModelStorageLocation { get; set; }
     public string? ManagedCodexHome { get; set; }
@@ -236,13 +242,45 @@ public sealed record InstallationState
     public string? LastHealthCheckCode { get; set; }
 }
 
+public sealed record LocalModelRegistration(
+    string Provider,
+    string Model,
+    string Digest,
+    string Path,
+    DateTimeOffset ValidatedAtUtc,
+    long Length = 0,
+    DateTimeOffset? LastWriteTimeUtc = null);
+
+public sealed record ProtectedFilePlanSummary(
+    string Path,
+    bool Changed,
+    string Action,
+    string SourceSha256,
+    string PlannedSha256);
+
+public sealed record RepairDryRunResult(
+    bool Success,
+    string Code,
+    string Message,
+    ProtectedFilePlanSummary CodexConfig,
+    ProtectedFilePlanSummary AgentsOverride,
+    string DiffPath);
+
+public sealed record RepairHashBinding(
+    string ConfigSourceSha256,
+    string ConfigPlannedSha256,
+    string AgentsSourceSha256,
+    string AgentsPlannedSha256);
+
 public sealed record OllamaModelInfo(
     string Name,
     string? Digest,
     ulong? SizeBytes,
     string? Family,
     string? ParameterSize,
-    string? QuantizationLevel);
+    string? QuantizationLevel,
+    string Provider = ModelProviders.Ollama,
+    string? IndexedModelPath = null);
 
 public sealed record OllamaRunningModel(
     string Name,
@@ -276,7 +314,8 @@ public sealed record ModelRouteDecision(
     int ContextTokens,
     string Reason,
     IReadOnlyList<string> Warnings,
-    ReviewerTuningPlan Tuning);
+    ReviewerTuningPlan Tuning,
+    string Provider = ModelProviders.Ollama);
 
 public sealed record ReviewerTuningPlan(
     string Quantization,
@@ -384,7 +423,7 @@ public sealed record OllamaRoutedGenerationResult(
 public static class ProductInfo
 {
     public const string Name = "Codex GPU Thalen Helper";
-    public const string Version = "0.1.0-beta.5";
+    public const string Version = "0.1.0-beta.8";
     public const string IntegrationName = "local_gpu_reviewer";
     public const string ManagedConfigStart = "# BEGIN CODEX GPU THALEN HELPER (managed)";
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";
@@ -392,4 +431,17 @@ public static class ProductInfo
     public const string ManagedAgentsEnd = "<!-- END CODEX GPU THALEN HELPER (managed) -->";
     public const string ManagedReliabilityStart = "<!-- BEGIN CODEX RELIABILITY BASELINE (managed by Codex GPU Thalen Helper) -->";
     public const string ManagedReliabilityEnd = "<!-- END CODEX RELIABILITY BASELINE (managed by Codex GPU Thalen Helper) -->";
+}
+
+public static class ModelProviders
+{
+    public const string Ollama = "Ollama";
+    public const string LmStudio = "LM Studio";
+
+    public static bool IsSupported(string? provider)
+        => string.Equals(provider, Ollama, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(provider, LmStudio, StringComparison.OrdinalIgnoreCase);
+
+    public static string Normalize(string? provider)
+        => string.Equals(provider, LmStudio, StringComparison.OrdinalIgnoreCase) ? LmStudio : Ollama;
 }

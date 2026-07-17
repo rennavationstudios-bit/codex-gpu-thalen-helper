@@ -8,6 +8,7 @@ public sealed class ReviewerService
 {
     private readonly StateStore _stateStore;
     private readonly OllamaClient _ollama;
+    private readonly LmStudioClient? _lmStudio;
     private readonly Func<int, bool> _listenerCheck;
     private readonly Func<InstallationState, ReviewerModelStorageVerification> _modelStorageValidator;
     private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
@@ -16,6 +17,7 @@ public sealed class ReviewerService
     private readonly Func<ModelManifest> _catalogProvider;
     private readonly Func<HardwareProfile> _hardwareProvider;
     private readonly ActiveModelTracker _activeModelTracker;
+    private readonly ModelValidationStore _validationStore;
 
     public ReviewerService(
         ProductPaths paths,
@@ -27,7 +29,9 @@ public sealed class ReviewerService
             null,
             null,
             null,
-            state => IntegrationOwnership.Inspect(paths, state))
+            state => IntegrationOwnership.Inspect(paths, state),
+            validationStore: new ModelValidationStore(paths.StateDirectory),
+            lmStudio: new LmStudioClient())
     {
     }
 
@@ -47,10 +51,13 @@ public sealed class ReviewerService
         Func<InstallationState, IntegrationOwnershipInspection>? ownershipInspector = null,
         TaskAwareModelRouter? router = null,
         Func<ModelManifest>? catalogProvider = null,
-        Func<HardwareProfile>? hardwareProvider = null)
+        Func<HardwareProfile>? hardwareProvider = null,
+        ModelValidationStore? validationStore = null,
+        LmStudioClient? lmStudio = null)
     {
         _stateStore = stateStore;
         _ollama = ollama;
+        _lmStudio = lmStudio;
         _listenerCheck = listenerCheck ?? OllamaAutoStartManager.IsPortLoopbackOnly;
         _modelStorageValidator = modelStorageValidator ?? (state => ValidateModelStorage(
             state,
@@ -64,6 +71,7 @@ public sealed class ReviewerService
         _catalogProvider = catalogProvider ?? (() => new ModelCatalogService().LoadBundled());
         _hardwareProvider = hardwareProvider ?? (() => new HardwareDetector().Detect());
         _activeModelTracker = new ActiveModelTracker(Path.GetDirectoryName(_stateStore.Path)!);
+        _validationStore = validationStore ?? new ModelValidationStore(Path.GetDirectoryName(_stateStore.Path)!);
     }
 
     public async Task<ReviewerHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
@@ -102,7 +110,8 @@ public sealed class ReviewerService
 
         try
         {
-            var models = await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+            var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
             var running = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
             var selected = state.SelectedModel;
             var selectedModel = ModelIntegrity.FindSelectedModel(models, selected);
@@ -110,7 +119,8 @@ public sealed class ReviewerService
                 state,
                 _catalogProvider(),
                 _hardwareProvider(),
-                models);
+                models,
+                validations);
             var eligibleInstalledModels = eligibleModelTags.Count;
             var available = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
                 ? eligibleInstalledModels > 0
@@ -137,6 +147,9 @@ public sealed class ReviewerService
 
             return new ReviewerHealthResult
             {
+                Provider = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                    ? "Automatic (Ollama + LM Studio)"
+                    : ModelProviders.Normalize(state.SelectedModelProvider),
                 Model = selected,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
                 SelectionMode = state.Preferences.ModelSelectionMode,
@@ -168,6 +181,211 @@ public sealed class ReviewerService
                 ErrorCode = exception.Code,
                 ErrorMessage = exception.Message
             };
+        }
+        catch (LmStudioException exception)
+        {
+            return new ReviewerHealthResult
+            {
+                Provider = ModelProviders.LmStudio,
+                Model = state.SelectedModel,
+                HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
+                SelectionMode = state.Preferences.ModelSelectionMode,
+                EndpointReachable = false,
+                ModelRan = false,
+                Paused = state.Availability == HelperAvailability.Paused,
+                Availability = state.Availability,
+                ErrorCode = exception.Code,
+                ErrorMessage = exception.Message
+            };
+        }
+        catch (ModelValidationStateException exception)
+        {
+            return HealthError(state, exception.Code, exception.Message);
+        }
+    }
+
+    private async Task<IReadOnlyList<OllamaModelInfo>> GetCombinedModelsAsync(
+        InstallationState state,
+        CancellationToken cancellationToken)
+    {
+        var combined = (await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false)).ToList();
+        var registrations = state.RegisteredLocalModels
+            .Where(item => string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (registrations.Length == 0)
+        {
+            return combined;
+        }
+
+        if (_lmStudio is null)
+        {
+            if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+                && string.Equals(state.SelectedModelProvider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new LmStudioException("LMSTUDIO_UNAVAILABLE", "LM Studio support is not available in this reviewer process.");
+            }
+            return combined;
+        }
+
+        try
+        {
+            var inventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var registration in registrations)
+            {
+                var catalog = _catalogProvider().Models.FirstOrDefault(model =>
+                    string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(model.Tag, registration.Model, StringComparison.Ordinal));
+                var api = inventory.FirstOrDefault(model => string.Equals(model.Key, registration.Model, StringComparison.Ordinal));
+                if (catalog is null || api is null || !RegistrationFileIsCurrent(registration)
+                    || !ModelIntegrity.DigestMatches(registration.Digest, catalog.ExpectedDigest)
+                    || api.SizeBytes != catalog.ExpectedDownloadBytes)
+                {
+                    continue;
+                }
+                combined.Add(new OllamaModelInfo(
+                    api.Key,
+                    registration.Digest,
+                    api.SizeBytes,
+                    api.Architecture,
+                    api.ParameterBillions is double parameters ? $"{parameters:0.##}B" : null,
+                    api.Quantization ?? (api.BitsPerWeight is int bits ? $"{bits}-bit" : null),
+                    ModelProviders.LmStudio,
+                    registration.Path));
+            }
+        }
+        catch (LmStudioException) when (state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
+        {
+            // Automatic mode degrades to a validated Ollama route when LM Studio is closed or untrusted.
+        }
+        return combined;
+    }
+
+    private async Task<ReviewerResult> ReviewWithLmStudioAsync(
+        ReviewRequest request,
+        InstallationState state,
+        ModelRouteDecision plannedRoute,
+        string boundedAssignment,
+        int outputTokens,
+        Stopwatch stopwatch,
+        CancellationToken cancellationToken)
+    {
+        if (_lmStudio is null || string.IsNullOrWhiteSpace(plannedRoute.Model))
+        {
+            throw new LmStudioException("LMSTUDIO_UNAVAILABLE", "LM Studio support is unavailable.");
+        }
+        var routedModel = plannedRoute.Model;
+
+        using var lease = await GpuCoordination.AcquireAsync(
+            request.BusyBehavior,
+            TimeSpan.FromSeconds(request.QueueTimeoutSeconds),
+            cancellationToken).ConfigureAwait(false);
+        var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+        var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
+        if (!route.Allowed || !string.Equals(route.Provider, ModelProviders.LmStudio, StringComparison.Ordinal)
+            || !string.Equals(route.Model, routedModel, StringComparison.Ordinal))
+        {
+            throw new LmStudioException("MODEL_ROUTE_CHANGED", "The LM Studio route changed while waiting for the GPU lease; retry the bounded review.", true);
+        }
+
+        var registration = state.RegisteredLocalModels.SingleOrDefault(item =>
+            string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(item.Model, route.Model, StringComparison.Ordinal));
+        if (registration is null || !RegistrationFileIsCurrent(registration))
+        {
+            throw new LmStudioException("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed or became unavailable before generation.");
+        }
+        var runningOllama = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+        if (runningOllama.Count > 0)
+        {
+            throw new LmStudioException("FOREIGN_MODEL_LOADED", "Ollama already has a model loaded. The helper will not unload or replace an unowned runtime instance.", true);
+        }
+        var lmInventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+        if (lmInventory.SelectMany(model => model.LoadedInstances).Any())
+        {
+            throw new LmStudioException("FOREIGN_MODEL_LOADED", "LM Studio already has a model loaded. The helper will not unload or replace a user-owned instance.", true);
+        }
+        var routedState = StateForRoute(state, route);
+        var pressure = _resourcePressureValidator(routedState, false);
+        if (!pressure.Allowed)
+        {
+            throw new LmStudioException(pressure.Code, pressure.Message, true);
+        }
+
+        LmStudioLoadResult? load = null;
+        LmStudioGenerationResult? generation = null;
+        try
+        {
+            load = await _lmStudio.LoadAsync(routedModel, cancellationToken).ConfigureAwait(false);
+            _activeModelTracker.Set(new ActiveModelReference(ModelProviders.LmStudio, routedModel, load.InstanceId));
+            generation = await _lmStudio.GenerateReasoningOffAsync(
+                routedModel,
+                load.InstanceId,
+                BuildPrompt(request, route.HardwareTier),
+                outputTokens,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (load is not null)
+            {
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                try
+                {
+                    await _lmStudio.UnloadAndWaitAsync(routedModel, load.InstanceId, TimeSpan.FromSeconds(30), cleanup.Token).ConfigureAwait(false);
+                    _activeModelTracker.Clear(routedModel);
+                }
+                catch (Exception exception) when (exception is LmStudioException or OperationCanceledException)
+                {
+                    throw new LmStudioException("GPU_RELEASE_FAILED", "LM Studio did not prove the helper-created model instance was unloaded.", true);
+                }
+            }
+        }
+
+        stopwatch.Stop();
+        return new ReviewerResult
+        {
+            Provider = ModelProviders.LmStudio,
+            Model = routedModel,
+            HardwareTier = route.HardwareTier.ToString().ToLowerInvariant(),
+            SelectionMode = route.SelectionMode,
+            TaskKind = route.TaskKind,
+            Effort = route.Effort,
+            ContextTokens = route.ContextTokens,
+            SelectionReason = route.Reason,
+            Tuning = route.Tuning,
+            BoundedAssignment = boundedAssignment,
+            Findings = generation!.Response,
+            ConfirmedObservations = [],
+            Hypotheses = ["All local-model conclusions are untrusted advisory hypotheses until Codex verifies them."],
+            ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+            PerformanceMetadata = new Dictionary<string, object?>
+            {
+                ["prompt_tokens"] = generation.PromptTokens,
+                ["completion_tokens"] = generation.CompletionTokens,
+                ["model_unloaded"] = true,
+                ["busy_behavior"] = request.BusyBehavior.ToString().ToLowerInvariant(),
+                ["warnings"] = route.Warnings
+            },
+            ModelRan = true,
+            Paused = false
+        };
+    }
+
+    private static bool RegistrationFileIsCurrent(LocalModelRegistration registration)
+    {
+        try
+        {
+            var info = new FileInfo(Path.GetFullPath(registration.Path));
+            return info.Exists
+                && !info.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                && info.Length == registration.Length
+                && (!registration.LastWriteTimeUtc.HasValue
+                    || info.LastWriteTimeUtc == registration.LastWriteTimeUtc.Value.UtcDateTime);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
         }
     }
 
@@ -204,12 +422,14 @@ public sealed class ReviewerService
 
         try
         {
-            var models = await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false);
-            var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models);
+            var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+            var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+            var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
             if (!route.Allowed)
             {
                 return new ReviewerPlanResult
                 {
+                    Provider = route.Provider,
                     Allowed = false,
                     SelectionMode = route.SelectionMode,
                     TaskKind = route.TaskKind,
@@ -226,14 +446,32 @@ public sealed class ReviewerService
             }
 
             var routedState = StateForRoute(state, route);
-            var storage = _modelStorageValidator(routedState);
-            if (!storage.Success)
+            if (string.Equals(route.Provider, ModelProviders.LmStudio, StringComparison.Ordinal))
             {
-                return PlanError(storage.Code, storage.Message, routedState, route);
+                var registration = state.RegisteredLocalModels.SingleOrDefault(item =>
+                    string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(item.Model, route.Model, StringComparison.Ordinal));
+                if (registration is null || !RegistrationFileIsCurrent(registration))
+                {
+                    return PlanError(
+                        "MODEL_FILE_IDENTITY_CHANGED",
+                        "The validated LM Studio GGUF changed or became unavailable while planning.",
+                        routedState,
+                        route);
+                }
+            }
+            else
+            {
+                var storage = _modelStorageValidator(routedState);
+                if (!storage.Success)
+                {
+                    return PlanError(storage.Code, storage.Message, routedState, route);
+                }
             }
 
             return new ReviewerPlanResult
             {
+                Provider = route.Provider,
                 Allowed = true,
                 SelectionMode = route.SelectionMode,
                 TaskKind = route.TaskKind,
@@ -247,6 +485,14 @@ public sealed class ReviewerService
             };
         }
         catch (OllamaException exception)
+        {
+            return PlanError(exception.Code, exception.Message, state);
+        }
+        catch (LmStudioException exception)
+        {
+            return PlanError(exception.Code, exception.Message, state);
+        }
+        catch (ModelValidationStateException exception)
         {
             return PlanError(exception.Code, exception.Message, state);
         }
@@ -334,11 +580,29 @@ public sealed class ReviewerService
         ModelRouteDecision? route = null;
         try
         {
+            if (state.RegisteredLocalModels.Any(item =>
+                string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)))
+            {
+                var initialValidations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+                var initialModels = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+                route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), initialModels, initialValidations);
+                if (route.Allowed && string.Equals(route.Provider, ModelProviders.LmStudio, StringComparison.Ordinal))
+                {
+                    return await ReviewWithLmStudioAsync(
+                        request, state, route, boundedAssignment, outputTokens, stopwatch, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
             var routed = await _ollama.GenerateRoutedAsync(
                 async token =>
                 {
-                    var models = await _ollama.GetModelsAsync(token).ConfigureAwait(false);
-                    route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models);
+                    var validations = await _validationStore.LoadAsync(token).ConfigureAwait(false);
+                    var models = await GetCombinedModelsAsync(state, token).ConfigureAwait(false);
+                    route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
+                    if (!string.Equals(route.Provider, ModelProviders.Ollama, StringComparison.Ordinal))
+                    {
+                        throw new OllamaException("MODEL_ROUTE_CHANGED", "The automatic route changed providers while waiting for the GPU lease; retry the bounded review.", true);
+                    }
                     if (!route.Allowed || string.IsNullOrWhiteSpace(route.Model))
                     {
                         if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned)
@@ -406,6 +670,7 @@ public sealed class ReviewerService
             }
             return new ReviewerResult
             {
+                Provider = ModelProviders.Ollama,
                 Model = routed.Spec.Model,
                 HardwareTier = selectedRoute.HardwareTier.ToString().ToLowerInvariant(),
                 SelectionMode = selectedRoute.SelectionMode,
@@ -439,6 +704,7 @@ public sealed class ReviewerService
             stopwatch.Stop();
             return new ReviewerResult
             {
+                Provider = route?.Provider ?? ModelProviders.Normalize(state.SelectedModelProvider),
                 Model = route?.Model ?? state.SelectedModel,
                 HardwareTier = (route?.HardwareTier ?? state.HardwareTier).ToString().ToLowerInvariant(),
                 SelectionMode = route?.SelectionMode ?? state.Preferences.ModelSelectionMode,
@@ -454,6 +720,38 @@ public sealed class ReviewerService
                 ErrorCode = exception.Code,
                 ErrorMessage = exception.Message
             };
+        }
+        catch (LmStudioException exception)
+        {
+            stopwatch.Stop();
+            return new ReviewerResult
+            {
+                Provider = ModelProviders.LmStudio,
+                Model = route?.Model ?? state.SelectedModel,
+                HardwareTier = (route?.HardwareTier ?? state.HardwareTier).ToString().ToLowerInvariant(),
+                SelectionMode = route?.SelectionMode ?? state.Preferences.ModelSelectionMode,
+                TaskKind = route?.TaskKind ?? request.TaskKind,
+                Effort = route?.Effort ?? request.Effort,
+                ContextTokens = route?.ContextTokens ?? 0,
+                SelectionReason = route?.Reason,
+                Tuning = route?.Tuning,
+                BoundedAssignment = boundedAssignment,
+                ElapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                ModelRan = false,
+                Paused = false,
+                ErrorCode = exception.Code,
+                ErrorMessage = exception.Message
+            };
+        }
+        catch (ModelValidationStateException exception)
+        {
+            stopwatch.Stop();
+            return Error(
+                exception.Code,
+                exception.Message,
+                false,
+                route?.Model ?? state.SelectedModel,
+                route?.HardwareTier ?? state.HardwareTier);
         }
         catch (OperationCanceledException)
         {
@@ -495,6 +793,7 @@ public sealed class ReviewerService
         {
             SelectedModel = route.Model,
             SelectedModelDigest = route.ExpectedDigest,
+            SelectedModelProvider = route.Provider,
             HardwareTier = route.HardwareTier
         };
 
@@ -505,6 +804,7 @@ public sealed class ReviewerService
         ModelRouteDecision? route = null)
         => new()
         {
+            Provider = route?.Provider ?? ModelProviders.Normalize(state?.SelectedModelProvider),
             Allowed = false,
             SelectionMode = route?.SelectionMode ?? state?.Preferences.ModelSelectionMode ?? ModelSelectionMode.Pinned,
             TaskKind = route?.TaskKind ?? ReviewTaskKind.Auto,

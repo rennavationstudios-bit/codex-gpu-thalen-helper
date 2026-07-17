@@ -345,7 +345,14 @@ public sealed class OllamaAutoStartManager
         _platform.BroadcastEnvironmentChange();
     }
 
-    public static bool IsPortLoopbackOnly(int port) => GetListenerStatus(port).LoopbackOnly;
+    // An unused port is safe for the helper to start on loopback. It is not an
+    // exposure and must not be confused with a wildcard/non-loopback listener.
+    // Endpoint reachability is verified separately by the caller.
+    public static bool IsPortLoopbackOnly(int port)
+        => HasNoNonLoopbackListener(GetListenerStatus(port));
+
+    internal static bool HasNoNonLoopbackListener(OllamaListenerStatus status)
+        => !status.HasListeners || status.LoopbackOnly;
 
     public static OllamaListenerStatus GetListenerStatus(int port)
     {
@@ -648,7 +655,7 @@ internal sealed class WindowsOllamaStartupPlatform : IOllamaStartupPlatform
     }
 
     public bool IsPortLoopbackOnly(int port)
-        => OllamaAutoStartManager.GetListenerStatus(port).LoopbackOnly;
+        => OllamaAutoStartManager.IsPortLoopbackOnly(port);
 
     public void BroadcastEnvironmentChange()
     {

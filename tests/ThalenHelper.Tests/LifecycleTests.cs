@@ -156,7 +156,15 @@ public sealed class LifecycleTests
         InstallContextStore.Save(paths);
         var manager = new InstallationManager(hardwareProvider: () => CreateProfile(temporary.Path));
 
-        var first = await manager.RepairAsync(paths, _ => true);
+        var preview = await manager.PreviewRepairAsync(paths, Path.Combine(temporary.Path, "repair.diff"));
+        var first = await manager.RepairAsync(
+            paths,
+            _ => true,
+            binding: new RepairHashBinding(
+                preview.CodexConfig.SourceSha256,
+                preview.CodexConfig.PlannedSha256,
+                preview.AgentsOverride.SourceSha256,
+                preview.AgentsOverride.PlannedSha256));
         var configAfterFirst = await File.ReadAllBytesAsync(paths.CodexConfigFile);
         var agentsAfterFirst = await File.ReadAllBytesAsync(paths.AgentsOverrideFile);
         var second = await manager.RepairAsync(paths, _ => true);

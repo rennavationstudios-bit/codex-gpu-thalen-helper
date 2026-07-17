@@ -84,6 +84,28 @@ public sealed class InstallContextTests
     }
 
     [Fact]
+    public void EquivalentInstallDirectoryWithTrailingSeparatorLoadsSuccessfully()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        Directory.CreateDirectory(paths.InstallDirectory);
+        File.WriteAllText(
+            InstallContextStore.GetPath(paths.InstallDirectory),
+            JsonSerializer.Serialize(new InstallContext(
+                1,
+                Path.EndsInDirectorySeparator(paths.InstallDirectory)
+                    ? paths.InstallDirectory
+                    : paths.InstallDirectory + Path.DirectorySeparatorChar,
+                paths.StateDirectory,
+                paths.CodexHome)));
+
+        var context = InstallContextStore.Load(paths.InstallDirectory);
+
+        Assert.NotNull(context);
+        Assert.Equal(Path.TrimEndingDirectorySeparator(Path.GetFullPath(paths.InstallDirectory)), context.InstallDirectory);
+    }
+
+    [Fact]
     public async Task RepairReusesCustomContextIdempotently()
     {
         using var temporary = new TemporaryDirectory();

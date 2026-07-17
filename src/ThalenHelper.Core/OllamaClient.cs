@@ -117,50 +117,67 @@ public sealed partial class OllamaClient : IDisposable
                 queueTimeout ?? TimeSpan.FromSeconds(30),
                 linked.Token).ConfigureAwait(false);
             var spec = await routeAndValidate(linked.Token).ConfigureAwait(false);
-            ValidateGenerationSpec(spec);
-
-            var payload = new
-            {
-                model = spec.Model,
-                prompt = spec.Prompt,
-                stream = false,
-                think = false,
-                keep_alive = spec.KeepAlive == Timeout.InfiniteTimeSpan
-                    ? "-1"
-                    : $"{Math.Max(0, (int)spec.KeepAlive.TotalSeconds)}s",
-                options = new
-                {
-                    num_ctx = spec.ContextTokens,
-                    num_predict = spec.OutputTokens,
-                    temperature = 0.1
-                }
-            };
-            using var document = await SendJsonAsync(
-                HttpMethod.Post,
-                "/api/generate",
-                payload,
-                TimeSpan.FromMinutes(5),
-                linked.Token).ConfigureAwait(false);
-            var root = document.RootElement;
-            var response = GetOptionalString(root, "response")
-                ?? throw new OllamaException("OLLAMA_MALFORMED_RESPONSE", "Ollama did not return generated text.");
-            response = HiddenReasoningRegex().Replace(response, string.Empty).Trim();
             return new OllamaRoutedGenerationResult(
                 spec,
-                new OllamaGenerationResult(
-                    response,
-                    GetOptionalString(root, "model"),
-                    root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True,
-                    GetOptionalInt64(root, "total_duration") ?? 0,
-                    GetOptionalInt64(root, "load_duration") ?? 0,
-                    GetOptionalInt32(root, "prompt_eval_count") ?? 0,
-                    GetOptionalInt32(root, "eval_count") ?? 0,
-                    GetOptionalInt64(root, "eval_duration") ?? 0));
+                await GenerateUnderLeaseAsync(spec, linked.Token).ConfigureAwait(false));
         }
         finally
         {
             _ = registration.Unregister(null);
         }
+    }
+
+    internal async Task<OllamaGenerationResult> GenerateUnderLeaseAsync(
+        OllamaGenerationSpec spec,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateGenerationSpec(spec);
+        var payload = new
+        {
+            model = spec.Model,
+            prompt = spec.Prompt,
+            stream = false,
+            think = false,
+            keep_alive = spec.KeepAlive == Timeout.InfiniteTimeSpan
+                ? "-1"
+                : $"{Math.Max(0, (int)spec.KeepAlive.TotalSeconds)}s",
+            options = new
+            {
+                num_ctx = spec.ContextTokens,
+                num_predict = spec.OutputTokens,
+                temperature = 0.1
+            }
+        };
+        using var document = await SendJsonAsync(
+            HttpMethod.Post,
+            "/api/generate",
+            payload,
+            TimeSpan.FromMinutes(5),
+            cancellationToken).ConfigureAwait(false);
+        var root = document.RootElement;
+        var response = GetOptionalString(root, "response")
+            ?? throw new OllamaException("OLLAMA_MALFORMED_RESPONSE", "Ollama did not return generated text.");
+        var responseModel = GetOptionalString(root, "model")
+            ?? throw new OllamaException(
+                "OLLAMA_MALFORMED_RESPONSE",
+                "Ollama did not return the generated model identity.");
+        if (!ModelIntegrity.NamesMatch(responseModel, spec.Model))
+        {
+            throw new OllamaException(
+                "MODEL_RESPONSE_IDENTITY_MISMATCH",
+                "Ollama returned generated text for a model identity that does not match the validated route.");
+        }
+
+        response = HiddenReasoningRegex().Replace(response, string.Empty).Trim();
+        return new OllamaGenerationResult(
+            response,
+            responseModel,
+            root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True,
+            GetOptionalInt64(root, "total_duration") ?? 0,
+            GetOptionalInt64(root, "load_duration") ?? 0,
+            GetOptionalInt32(root, "prompt_eval_count") ?? 0,
+            GetOptionalInt32(root, "eval_count") ?? 0,
+            GetOptionalInt64(root, "eval_duration") ?? 0);
     }
 
     private static void ValidateGenerationSpec(OllamaGenerationSpec spec)

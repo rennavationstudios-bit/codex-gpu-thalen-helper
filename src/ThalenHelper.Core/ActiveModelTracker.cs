@@ -15,6 +15,9 @@ public sealed class ActiveModelTracker
     public string Path => _path;
 
     public string? Read()
+        => ReadReference()?.Model;
+
+    public ActiveModelReference? ReadReference()
     {
         try
         {
@@ -23,9 +26,15 @@ public sealed class ActiveModelTracker
                 return null;
             }
 
-            var model = File.ReadAllText(_path, Encoding.UTF8).Trim();
-            OllamaClient.ValidateModelIdentifier(model);
-            return model;
+            var value = File.ReadAllText(_path, Encoding.UTF8).Trim();
+            if (value.StartsWith('{'))
+            {
+                var reference = System.Text.Json.JsonSerializer.Deserialize<ActiveModelReference>(value);
+                if (reference is null || !ModelProviders.IsSupported(reference.Provider)) return null;
+                return reference with { Provider = ModelProviders.Normalize(reference.Provider) };
+            }
+            OllamaClient.ValidateModelIdentifier(value);
+            return new ActiveModelReference(ModelProviders.Ollama, value, null);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or OllamaException)
         {
@@ -34,12 +43,18 @@ public sealed class ActiveModelTracker
     }
 
     public void Set(string model)
+        => Set(new ActiveModelReference(ModelProviders.Ollama, model, null));
+
+    public void Set(ActiveModelReference reference)
     {
-        OllamaClient.ValidateModelIdentifier(model);
+        ArgumentNullException.ThrowIfNull(reference);
+        if (!ModelProviders.IsSupported(reference.Provider)) throw new ArgumentException("Unsupported provider.", nameof(reference));
+        if (string.IsNullOrWhiteSpace(reference.Model) || reference.Model.Length > 128) throw new ArgumentException("Invalid model.", nameof(reference));
         var directory = System.IO.Path.GetDirectoryName(_path)!;
         Directory.CreateDirectory(directory);
         var temporary = _path + "." + Environment.ProcessId + ".tmp";
-        File.WriteAllText(temporary, model + Environment.NewLine, new UTF8Encoding(false));
+        var json = System.Text.Json.JsonSerializer.Serialize(reference with { Provider = ModelProviders.Normalize(reference.Provider) });
+        File.WriteAllText(temporary, json + Environment.NewLine, new UTF8Encoding(false));
         File.Move(temporary, _path, true);
     }
 
@@ -60,3 +75,5 @@ public sealed class ActiveModelTracker
         }
     }
 }
+
+public sealed record ActiveModelReference(string Provider, string Model, string? InstanceId);

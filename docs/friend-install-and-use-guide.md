@@ -37,6 +37,7 @@ If setup finds an existing unmarked `local_gpu_reviewer`, it preserves that inte
 - **OLLAMA PEER NOT VERIFIED**: something owns the local Ollama port but is not the expected current-user, validly signed official Ollama process. The helper sends it no review prompt. Close the unknown listener and repair or install official Ollama for Windows.
 - **EXTERNAL AUTOSTART UNVERIFIED**: another Run/Startup artifact was preserved to avoid duplication, but its target and next-login environment were not certified. Review/remove it or use manual startup before enabling managed review.
 - **No model loaded**: normally the safe idle state. Installed models stay on disk while GPU memory is released.
+- **Existing reviewer preserved**: setup found a reviewer it does not own, so it did not replace or control it. Ask Codex to use the included handoff. Codex can create a private dry-run diff, explain it simply, and migrate only after you approve the exact reviewed change.
 
 Passive status never runs a model. **Test local review** is the explicit action that runs a small validation inference and unloads afterward.
 
@@ -57,7 +58,7 @@ The helper does not control Codex or its cloud model. It offers Codex three opti
 
 Setup never silently downloads a model. A missing model can be downloaded only after a named model choice and confirmation. A user with existing models can point setup to that Ollama model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables review.
 
-Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models. Hardware examples in the test suite are boundaries, not preferred devices. Models that exist only in LM Studio, including Qwythos or Qwen3.6 files, are not silently used by the current Ollama reviewer; a future provider adapter must first meet the same loopback, process-trust, locking, pressure, and unload rules.
+Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models that have passed this installation's exact-digest validation. A missing or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. Models that exist only in LM Studio, including Qwythos or Qwen3.6 files, are not silently used by the current Ollama reviewer; a future provider adapter must first meet the same loopback, process-trust, locking, pressure, validation, and unload rules.
 
 When automatic startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before local review works.
 

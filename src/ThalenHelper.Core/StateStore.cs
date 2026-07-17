@@ -1,7 +1,13 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace ThalenHelper.Core;
+
+internal sealed record StateStoreLoadResult(
+    InstallationState? State,
+    ProtectedFileSnapshot Revision);
 
 public sealed class StateStore
 {
@@ -13,70 +19,105 @@ public sealed class StateStore
     };
 
     private readonly string _path;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly string _mutexName;
 
     public StateStore(string path)
     {
         _path = System.IO.Path.GetFullPath(path);
+        var identity = Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes(_path.ToUpperInvariant())))[..24];
+        _mutexName = @"Local\CodexGpuThalenHelperState-" + identity;
     }
 
     public string Path => _path;
 
+    internal string MutexName => _mutexName;
+
     public async Task<InstallationState?> LoadAsync(CancellationToken cancellationToken = default)
-    {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        => (await LoadWithRevisionAsync(cancellationToken).ConfigureAwait(false)).State;
+
+    internal Task<StateStoreLoadResult> LoadWithRevisionAsync(CancellationToken cancellationToken = default)
+        => RunLockedAsync(() =>
         {
-            if (!File.Exists(_path))
+            var revision = ProtectedFileTransaction.Capture(_path);
+            if (!revision.Exists)
             {
-                return null;
+                return new StateStoreLoadResult(null, revision);
             }
 
-            await using var stream = new FileStream(
-                _path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                16 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await JsonSerializer.DeserializeAsync<InstallationState>(stream, JsonOptions, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            _gate.Release();
-        }
-    }
+            var state = JsonSerializer.Deserialize<InstallationState>(revision.Bytes, JsonOptions)
+                ?? throw new InvalidDataException("Installation state is empty or malformed.");
+            return new StateStoreLoadResult(state, revision);
+        }, cancellationToken);
 
     public async Task SaveAsync(InstallationState state, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(state);
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        await RunLockedAsync(() =>
         {
-            var directory = System.IO.Path.GetDirectoryName(_path)
-                ?? throw new InvalidOperationException("State path has no directory.");
-            Directory.CreateDirectory(directory);
-            var temporaryPath = _path + ".tmp";
-
-            await using (var stream = new FileStream(
-                temporaryPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                16 * 1024,
-                FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await JsonSerializer.SerializeAsync(stream, state, JsonOptions, cancellationToken)
-                    .ConfigureAwait(false);
-                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            File.Move(temporaryPath, _path, true);
-        }
-        finally
-        {
-            _gate.Release();
-        }
+            var current = ProtectedFileTransaction.Capture(_path);
+            _ = SaveIfUnchanged(state, current);
+        }, cancellationToken).ConfigureAwait(false);
     }
+
+    internal Task<ProtectedFileSnapshot> SaveIfUnchangedAsync(
+        InstallationState state,
+        ProtectedFileSnapshot expected,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(expected);
+        return RunLockedAsync(() => SaveIfUnchanged(state, expected), cancellationToken);
+    }
+
+    private ProtectedFileSnapshot SaveIfUnchanged(InstallationState state, ProtectedFileSnapshot expected)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(state, JsonOptions);
+        ProtectedFileTransaction.ReplaceIfUnchanged(_path, expected, bytes);
+        return new ProtectedFileSnapshot(
+            true,
+            bytes,
+            Convert.ToHexString(SHA256.HashData(bytes)));
+    }
+
+    private Task<T> RunLockedAsync<T>(Func<T> action, CancellationToken cancellationToken)
+        => Task.Run(() =>
+        {
+            using var mutex = new Mutex(false, _mutexName);
+            var acquired = false;
+            try
+            {
+                try
+                {
+                    var index = WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle]);
+                    if (index == 1)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
+
+                    acquired = true;
+                }
+                catch (AbandonedMutexException)
+                {
+                    acquired = true;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                return action();
+            }
+            finally
+            {
+                if (acquired)
+                {
+                    mutex.ReleaseMutex();
+                }
+            }
+        }, CancellationToken.None);
+
+    private Task RunLockedAsync(Action action, CancellationToken cancellationToken)
+        => RunLockedAsync(() =>
+        {
+            action();
+            return true;
+        }, cancellationToken);
 }

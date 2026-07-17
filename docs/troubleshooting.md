@@ -21,7 +21,7 @@ This is normally the safe idle state. Low-impact mode uses `keep_alive=0`, so Ol
 
 ## The reviewer is labeled external
 
-Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Review a protected-file diff and perform a separate explicit migration before expecting packaged locking, pressure refusal, startup, or unload controls to apply.
+Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Run `thalen-helper repair --dry-run --diff-out <private-local-file> --migrate-existing`, review the private diff, then apply only with the four returned source/planned hashes and the same `--migrate-existing` flag. Ambiguous table layouts are intentionally refused. Packaged locking, pressure refusal, startup, routing, and unload controls apply only after that explicit migration succeeds.
 
 ## MCP tools are missing after install
 

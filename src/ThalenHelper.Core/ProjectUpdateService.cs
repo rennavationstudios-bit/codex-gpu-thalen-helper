@@ -67,6 +67,7 @@ public sealed class ProjectUpdateService : IDisposable
             return new ProjectUpdateInfo(false, ProductInfo.Version, null, null, null, null, false, "UPDATE_RESPONSE_INVALID", "GitHub returned an invalid release inventory.");
         }
 
+        ReleaseCandidate? best = null;
         foreach (var release in document.RootElement.EnumerateArray())
         {
             if (release.TryGetProperty("draft", out var draft) && draft.GetBoolean())
@@ -80,26 +81,42 @@ public sealed class ProjectUpdateService : IDisposable
             var assets = release.GetProperty("assets").EnumerateArray().ToArray();
             var installer = FindAsset(assets, InstallerAssetName);
             var checksums = FindAsset(assets, ChecksumsAssetName);
-            if (tag is null || installer is null || checksums is null)
+            if (tag is null || installer is null || checksums is null
+                || !SemanticVersion.TryParse(tag, out var semanticVersion))
             {
                 continue;
             }
 
             var version = tag.TrimStart('v', 'V');
-            var available = !string.Equals(version, ProductInfo.Version, StringComparison.OrdinalIgnoreCase);
-            return new ProjectUpdateInfo(
-                available,
-                ProductInfo.Version,
+            var candidate = new ReleaseCandidate(
+                semanticVersion,
                 version,
                 html,
                 installer,
                 checksums,
-                prerelease,
-                available ? "UPDATE_AVAILABLE" : "UP_TO_DATE",
-                available ? $"Version {version} is available." : "This installation matches the latest published release.");
+                prerelease);
+            if (best is null || candidate.SemanticVersion.CompareTo(best.SemanticVersion) > 0)
+            {
+                best = candidate;
+            }
         }
 
-        return new ProjectUpdateInfo(false, ProductInfo.Version, null, null, null, null, false, "NO_RELEASE_FOUND", "No complete published release with installer and checksums was found.");
+        if (best is null)
+        {
+            return new ProjectUpdateInfo(false, ProductInfo.Version, null, null, null, null, false, "NO_RELEASE_FOUND", "No complete published release with installer and checksums was found.");
+        }
+
+        var available = IsNewerVersion(best.Version, ProductInfo.Version);
+        return new ProjectUpdateInfo(
+            available,
+            ProductInfo.Version,
+            best.Version,
+            best.ReleaseUrl,
+            best.InstallerUrl,
+            best.ChecksumsUrl,
+            best.Prerelease,
+            available ? "UPDATE_AVAILABLE" : "UP_TO_DATE",
+            available ? $"Version {best.Version} is available." : "The published release is not newer than this installation.");
     }
 
     public async Task<ProjectUpdateResult> DownloadVerifyAndLaunchAsync(
@@ -163,6 +180,11 @@ public sealed class ProjectUpdateService : IDisposable
             _http.Dispose();
         }
     }
+
+    internal static bool IsNewerVersion(string candidate, string current)
+        => SemanticVersion.TryParse(candidate, out var candidateVersion)
+            && SemanticVersion.TryParse(current, out var currentVersion)
+            && candidateVersion.CompareTo(currentVersion) > 0;
 
     private async Task<string> DownloadStringAsync(Uri uri, CancellationToken cancellationToken)
     {
@@ -268,4 +290,103 @@ public sealed class ProjectUpdateService : IDisposable
             .TryGetProperty("browser_download_url", out var url)
                 ? url.GetString()
                 : null;
+
+    private sealed record SemanticVersion(
+        int Major,
+        int Minor,
+        int Patch,
+        IReadOnlyList<string> Prerelease) : IComparable<SemanticVersion>
+    {
+        public static bool TryParse(string value, out SemanticVersion version)
+        {
+            version = null!;
+            var normalized = value.Trim();
+            if (normalized.StartsWith('v') || normalized.StartsWith('V'))
+            {
+                normalized = normalized[1..];
+            }
+
+            var buildParts = normalized.Split('+');
+            if (buildParts.Length > 2
+                || (buildParts.Length == 2
+                    && (buildParts[1].Length == 0
+                        || buildParts[1].Split('.').Any(identifier => !IsValidIdentifier(identifier)))))
+            {
+                return false;
+            }
+
+            normalized = buildParts[0];
+            var prereleaseIndex = normalized.IndexOf('-');
+            var core = prereleaseIndex >= 0 ? normalized[..prereleaseIndex] : normalized;
+            var prerelease = prereleaseIndex >= 0
+                ? normalized[(prereleaseIndex + 1)..].Split('.')
+                : [];
+            var parts = core.Split('.');
+            if (parts.Length != 3
+                || !TryParseCoreNumber(parts[0], out var major)
+                || !TryParseCoreNumber(parts[1], out var minor)
+                || !TryParseCoreNumber(parts[2], out var patch)
+                || (prereleaseIndex >= 0
+                    && (prerelease.Length == 0
+                        || prerelease.Any(identifier =>
+                            !IsValidIdentifier(identifier)
+                            || (identifier.All(char.IsDigit) && identifier.Length > 1 && identifier[0] == '0')))))
+            {
+                return false;
+            }
+
+            version = new SemanticVersion(major, minor, patch, prerelease);
+            return true;
+        }
+
+        private static bool TryParseCoreNumber(string value, out int number)
+        {
+            number = 0;
+            return value.Length > 0
+                && (value.Length == 1 || value[0] != '0')
+                && value.All(char.IsDigit)
+                && int.TryParse(value, out number);
+        }
+
+        private static bool IsValidIdentifier(string value)
+            => value.Length > 0 && value.All(character => char.IsAsciiLetterOrDigit(character) || character == '-');
+
+        public int CompareTo(SemanticVersion? other)
+        {
+            if (other is null)
+            {
+                return 1;
+            }
+
+            var core = Major.CompareTo(other.Major);
+            if (core == 0) core = Minor.CompareTo(other.Minor);
+            if (core == 0) core = Patch.CompareTo(other.Patch);
+            if (core != 0) return core;
+            if (Prerelease.Count == 0) return other.Prerelease.Count == 0 ? 0 : 1;
+            if (other.Prerelease.Count == 0) return -1;
+            for (var index = 0; index < Math.Min(Prerelease.Count, other.Prerelease.Count); index++)
+            {
+                var leftNumeric = int.TryParse(Prerelease[index], out var left);
+                var rightNumeric = int.TryParse(other.Prerelease[index], out var right);
+                var comparison = leftNumeric && rightNumeric
+                    ? left.CompareTo(right)
+                    : leftNumeric
+                        ? -1
+                        : rightNumeric
+                            ? 1
+                            : string.CompareOrdinal(Prerelease[index], other.Prerelease[index]);
+                if (comparison != 0) return comparison;
+            }
+
+            return Prerelease.Count.CompareTo(other.Prerelease.Count);
+        }
+    }
+
+    private sealed record ReleaseCandidate(
+        SemanticVersion SemanticVersion,
+        string Version,
+        string? ReleaseUrl,
+        string InstallerUrl,
+        string ChecksumsUrl,
+        bool Prerelease);
 }

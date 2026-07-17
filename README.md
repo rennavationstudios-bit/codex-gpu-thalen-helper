@@ -1,10 +1,10 @@
 # Codex GPU Thalen Helper
 
-Use a hardware-appropriate local Ollama model as an optional, bounded, read-only GPU reviewer for Codex on Windows.
+Use a hardware-appropriate local Ollama or explicitly registered LM Studio model as an optional, bounded, read-only GPU reviewer for Codex on Windows.
 
 > **Independent community project:** This project is not made, endorsed, or supported by OpenAI or Ollama. Codex, ChatGPT, OpenAI, Ollama, Qwen, NVIDIA, AMD, and Intel are trademarks or names of their respective owners.
 
-Codex GPU Thalen Helper keeps Codex as the primary agent. It adds a local stdio MCP server named `local_gpu_reviewer`, which accepts only text Codex explicitly supplies and sends ordinary text-generation requests to an Ollama loopback endpoint. The local result is untrusted advice; Codex still orchestrates, verifies, integrates, and makes final decisions.
+Codex GPU Thalen Helper keeps Codex as the primary agent. It adds a local stdio MCP server named `local_gpu_reviewer`, which accepts only text Codex explicitly supplies and sends bounded requests to a verified loopback provider. Ollama is the default; LM Studio is opt-in for exact audited GGUF registrations. The local result is untrusted advice; Codex still orchestrates, verifies, integrates, and makes final decisions.
 
 The helper does not replace Codex's OpenAI model, bypass Codex limits, or guarantee lower costs, reduced credits, less OpenAI usage, faster work, or better results. Small local models have sharply limited reasoning and code-review ability.
 
@@ -28,6 +28,7 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 - A self-contained stdio MCP server (`local-gpu-reviewer.exe`).
 - Dynamic Windows, CPU, RAM, GPU, driver, VRAM, and storage detection.
 - A versioned, audited Ollama model catalog and conservative selector.
+- Optional exact-digest LM Studio registration with provider-aware automatic routing, reasoning-off calls, and verified unload.
 - Preservation-first, backed-up, idempotent merging of `config.toml` and `AGENTS.override.md`.
 - A sanitized reusable reliability baseline that is installed only through an explicit opt-in preview.
 - A sanitized post-install Codex handoff that guides read-only discovery, consented setup, and verification on a new computer.
@@ -107,11 +108,13 @@ Approximate catalog tiers are conservative guardrails, not guarantees:
 | High | 14B | Broader bounded review, still advisory |
 | Enthusiast | verified 30B-class fit | Stronger bounded review, never final authority |
 
-Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models; shared graphics memory is never counted as dedicated VRAM. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
+Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models with a current exact-digest validation pass on that installation; shared graphics memory is never counted as dedicated VRAM. Validation stores only bounded timing/acceleration evidence and never prompts or responses. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
 
 Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), [docs/task-aware-routing.md](docs/task-aware-routing.md), and the auditable [model catalog](model-catalog/models.v1.json).
 
 ## Model storage
+
+Automatic storage selection uses only suitable non-removable local volumes. An explicitly chosen, currently mounted fixed-volume USB or other external model directory is allowed when it has enough reserve space; setup warns that the same drive letter must remain connected and unlocked before Ollama or Codex starts. Network shares and non-fixed removable media remain blocked.
 
 Setup ranks suitable fixed local NVMe, SSD, unknown fixed media, then HDD with a warning. Removable and network drives are never auto-selected. Space calculations include temporary overhead and a safety reserve, with extra protection for the Windows system volume.
 
@@ -154,6 +157,8 @@ thalen-helper model routing status|automatic|pinned
 thalen-helper model change <tag> --yes
 thalen-helper models move <fixed-local-directory> --yes
 thalen-helper repair
+thalen-helper repair --dry-run --diff-out <private-local-file> [--migrate-existing]
+thalen-helper repair [--migrate-existing] --expected-config-source-sha256 <hash> --expected-config-planned-sha256 <hash> --expected-agents-source-sha256 <hash> --expected-agents-planned-sha256 <hash>
 thalen-helper test
 thalen-helper ollama verify | autostart | install --yes
 thalen-helper diagnostics export <output.json>
@@ -171,7 +176,7 @@ Interactive setup leaves model download and validation unchecked. Installing the
 
 Setup parses TOML, makes timestamped backups, preserves unrelated content, inserts a marked MCP block with `required = false`, an explicit three-tool allowlist, prompt approval for review, automatic approval only for passive health and routing, and re-parses the result. A supplied fresh-Codex validator can roll the edit back automatically.
 
-If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup preserves it byte-for-byte, adds no duplicate TOML table or local-review invocation guidance, leaves its Ollama/model/startup/runtime behavior untouched, and disables this helper's managed controls. The Control Center labels the entry external and unverified. The optional reliability baseline remains separately available only through its explicit diff-preview flow.
+If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup preserves it byte-for-byte by default, adds no duplicate TOML table or local-review invocation guidance, leaves its Ollama/model/startup/runtime behavior untouched, and disables this helper's managed controls. The Control Center labels the entry external and unverified. A separate explicit migration is available only after a private dry-run diff is reviewed and all four source/planned hashes for `config.toml` and `AGENTS.override.md` are supplied at apply time. Ambiguous or interleaved TOML table layouts are refused. The optional reliability baseline remains separately available only through its explicit diff-preview flow.
 
 The automatic [local GPU guidance template](templates/AGENTS.local-gpu-reviewer.md) is tier-aware. The separate [sanitized reliability baseline](templates/AGENTS.reliability-baseline.md) generalizes task continuity, Goal/Context/Constraints/Done, planning, delegation, repository safety, privacy, honest verification, local-review announcements, and GPU-contention rules. It is optional, unchecked by default, and installed only after a before/after diff preview. The reviewed source and planned-output hashes must still match at apply time. The Control Center can later preview and surgically add or remove the baseline. Both sections use distinct markers; existing files are never replaced. Reinstall/repair is idempotent, changes create timestamped backups, failures restore the original bytes, and uninstall removes only product-managed sections. See [docs/configuration-merging.md](docs/configuration-merging.md).
 

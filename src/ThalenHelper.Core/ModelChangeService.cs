@@ -71,6 +71,7 @@ public sealed class ModelChangeService
         var previousOwnership = state.SelectedModelOwnedByHelper;
         var previousTier = state.HardwareTier;
         var previousAvailability = state.Availability;
+        var previousAcceleration = state.Acceleration;
         var pause = await _control.PauseAsync(cancellationToken).ConfigureAwait(false);
         if (!pause.Success)
         {
@@ -119,10 +120,22 @@ public sealed class ModelChangeService
         }
         catch (Exception exception) when (exception is OllamaException or ModelValidationException or ModelActivationException)
         {
+            try
+            {
+                await new ModelValidationStore(_paths.StateDirectory)
+                    .RemoveAsync(model.Tag, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (ModelValidationStateException)
+            {
+                // The corrupt registry already fails routing closed; rollback must still restore product state.
+            }
+
             state.SelectedModel = previousModel;
             state.SelectedModelDigest = previousDigest;
             state.SelectedModelOwnedByHelper = previousOwnership;
             state.HardwareTier = previousTier;
+            state.Acceleration = previousAcceleration;
             state.Availability = previousAvailability == HelperAvailability.Enabled
                 ? HelperAvailability.Paused
                 : previousAvailability;

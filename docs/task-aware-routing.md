@@ -5,7 +5,7 @@ Automatic routing is a persistent helper preference shared by every Codex projec
 ## Fast path for each task
 
 1. Codex calls `local_gpu_plan` with a bounded task description, task kind, expected input size, requested effort, and whether a GPU-heavy workload is active.
-2. The passive planner selects only an already-installed catalog model whose tag, digest, Q4 quantization, RAM requirement, available dedicated VRAM, and configured reserve pass policy. Planning never pulls, loads, or runs a model.
+2. The passive planner selects only an already-installed catalog model with a current provider-specific validation pass for its exact full digest and whose quantization policy, RAM requirement, available dedicated VRAM, and configured reserve pass policy. Planning never validates, pulls, loads, or runs a model.
 3. Codex announces the returned integration, provider, actual model, and purpose.
 4. Codex calls `local_gpu_review` with the same routing fields and only the text it explicitly chose to supply.
 5. The helper acquires its cross-process single-review lock, repeats model selection and every safety check inside that lock, and only then sends one bounded generation request.
@@ -21,9 +21,11 @@ Pinned mode remains available for users who always want one validated model. It 
 | Standard | 16K | Strongest safe installed audited model up to roughly 16B |
 | Deep | 64K | Strongest safe installed audited model |
 
+When a validated LM Studio Qwythos registration is explicitly enabled, quick work and GPU-busy work remain on the smallest safe Ollama model. Standard and deep work prefer the audited Qwythos route. If LM Studio is closed or its removable model path is unavailable, automatic mode excludes it and falls back to a validated Ollama candidate.
+
 Every context request is capped by both the model catalog maximum and the helper-wide maximum. A GPU-intensive workload forces quick effort and the smallest safe tier. Current dedicated-VRAM and Windows memory/commit pressure can still refuse the review immediately before generation.
 
-Fresh managed installations default to automatic routing. Existing installations retain their prior pinned behavior during an upgrade until the user explicitly chooses automatic routing:
+Fresh managed installations default to automatic routing after at least one model passes validation. Existing installations retain their prior pinned behavior during an upgrade until the user explicitly validates suitable installed models and chooses automatic routing:
 
 ```text
 thalen-helper model routing status
@@ -45,4 +47,4 @@ Use one coherent objective per model context. Checkpoint useful work between unr
 
 ## Provider boundary
 
-The managed production reviewer uses Ollama on a verified loopback endpoint. Models visible only to another runtime, including LM Studio, are not silently routed through that runtime. Adding a provider requires an explicit loopback-only adapter, capability detection, ownership-safe unload behavior, catalog evidence, and the same lock and pressure controls. This prevents an attractive model name from bypassing the helper's network and process trust boundary.
+Ollama and LM Studio use separate verified loopback adapters and one shared cross-process GPU lease. LM Studio is opt-in per exact GGUF: the helper binds the model key, local file, size, full SHA-256, validation result, and provider identity. It refuses to replace a model already loaded by the user, explicitly loads only its selected instance, requests bounded reasoning-off generation, and verifies that exact instance is unloaded afterward. Automatic fallback never assigns an LM Studio directory to `OLLAMA_MODELS`.
