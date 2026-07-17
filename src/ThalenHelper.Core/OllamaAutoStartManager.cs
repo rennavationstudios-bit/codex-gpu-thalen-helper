@@ -23,6 +23,14 @@ public sealed record OllamaListenerStatus(
     bool LoopbackOnly,
     int ListenerCount);
 
+public sealed record OllamaIdleVerification(bool Idle, string Code, string Message);
+
+public enum OllamaRestartModelPolicy
+{
+    UnloadRunningModels,
+    RequireIdle
+}
+
 public interface IOllamaStartupPlatform
 {
     string? GetUserEnvironmentVariable(string name);
@@ -85,15 +93,61 @@ public sealed class OllamaAutoStartManager
     private static string GetCanonicalRunCommand(ProductPaths paths)
         => $"\"{paths.CliExecutable}\" ollama autostart --quiet";
 
-    public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
+    public string? GetConfiguredUserModelDirectory()
+        => _platform.GetUserEnvironmentVariable("OLLAMA_MODELS");
+
+    public async Task<OllamaIdleVerification> VerifyIdleForStorageChangeAsync(
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = _clientFactory();
+            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            return running.Count == 0
+                ? new OllamaIdleVerification(true, "OLLAMA_IDLE", "Ollama has no loaded models.")
+                : new OllamaIdleVerification(
+                    false,
+                    "OLLAMA_RESTART_NOT_IDLE",
+                    "Ollama has a loaded model. Storage activation refused without unloading or stopping it.");
+        }
+        catch (OllamaException) when (!_platform.IsAnyOllamaProcessRunning())
+        {
+            return new OllamaIdleVerification(true, "OLLAMA_STOPPED", "Ollama is stopped and has no resident model.");
+        }
+        catch (OllamaException exception)
+        {
+            return new OllamaIdleVerification(
+                false,
+                "OLLAMA_RESTART_IDLE_UNCONFIRMED",
+                $"Ollama is running but idle state could not be confirmed: {exception.Message}");
+        }
+    }
+
+    public Task<OllamaStartupVerification> ApplyConfigurationAsync(
         ProductPaths paths,
         InstallationState state,
         string? previousModelDirectory,
         bool enabled,
         bool allowSafeRestart,
         CancellationToken cancellationToken = default)
+        => ApplyConfigurationAsync(
+            paths,
+            state,
+            previousModelDirectory,
+            enabled,
+            allowSafeRestart,
+            OllamaRestartModelPolicy.UnloadRunningModels,
+            cancellationToken);
+
+    public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
+        ProductPaths paths,
+        InstallationState state,
+        string? previousModelDirectory,
+        bool enabled,
+        bool allowSafeRestart,
+        OllamaRestartModelPolicy restartModelPolicy,
+        CancellationToken cancellationToken = default)
     {
-        Configure(paths, state, enabled);
         var desired = Path.GetFullPath(state.ModelStorageLocation!);
         var defaultDirectory = Path.GetFullPath(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -103,6 +157,40 @@ public sealed class OllamaAutoStartManager
             ? defaultDirectory
             : Path.GetFullPath(previousModelDirectory);
         var pathChanged = !string.Equals(previous, desired, StringComparison.OrdinalIgnoreCase);
+
+        if (pathChanged && allowSafeRestart && restartModelPolicy == OllamaRestartModelPolicy.RequireIdle)
+        {
+            try
+            {
+                using var client = _clientFactory();
+                var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+                if (running.Count > 0)
+                {
+                    var current = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
+                    return current with
+                    {
+                        Code = "OLLAMA_RESTART_NOT_IDLE",
+                        Message = "Ollama has a loaded model. Activation refused without unloading or stopping any user-owned model."
+                    };
+                }
+            }
+            catch (OllamaException exception) when (!_platform.IsAnyOllamaProcessRunning())
+            {
+                _ = exception;
+                // A stopped Ollama process is idle. Configuration may start it once with the new path.
+            }
+            catch (OllamaException exception)
+            {
+                var current = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
+                return current with
+                {
+                    Code = "OLLAMA_RESTART_IDLE_UNCONFIRMED",
+                    Message = $"Ollama is running but idle state could not be confirmed: {exception.Message}"
+                };
+            }
+        }
+
+        Configure(paths, state, enabled);
         var initial = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
         if (!initial.EndpointReachable || !pathChanged)
         {
@@ -124,9 +212,21 @@ public sealed class OllamaAutoStartManager
         {
             using var client = _clientFactory();
             var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var model in running)
+            if (restartModelPolicy == OllamaRestartModelPolicy.RequireIdle && running.Count > 0)
             {
-                await client.UnloadAsync(model.Name, cancellationToken).ConfigureAwait(false);
+                return initial with
+                {
+                    Code = "OLLAMA_RESTART_NOT_IDLE",
+                    Message = "Ollama loaded a model during activation. No model was unloaded and the process was not stopped."
+                };
+            }
+
+            if (restartModelPolicy == OllamaRestartModelPolicy.UnloadRunningModels)
+            {
+                foreach (var model in running)
+                {
+                    await client.UnloadAsync(model.Name, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch (OllamaException exception)

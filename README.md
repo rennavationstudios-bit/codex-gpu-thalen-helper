@@ -124,6 +124,10 @@ After a fresh Codex restart, the MCP process also requires its inherited `OLLAMA
 
 `thalen-helper models move <directory> --yes` copies every model file, verifies size and SHA-256, activates and runtime-checks the new directory, then removes the old copy. Failure rolls back the path and preserves the source.
 
+`thalen-helper models activate <directory> --yes` is the non-destructive path for a pre-copied model store. It requires an exact path, size, metadata, and SHA-256 match, runtime-checks the new directory, refuses to unload a foreign model, and always preserves the old directory.
+
+If Windows or the CLI exits during activation, the durable transition marker keeps local review paused. `thalen-helper models recover --yes` re-verifies both trees and restores the original path without deleting either copy.
+
 ## Automatic Ollama startup
 
 Setup offers per-user automatic startup after sign-in. Before adding its HKCU Run entry, the helper checks other per-user Run values and Startup-folder entries for Ollama. If another startup owner already exists, it preserves that owner and does not add a duplicate helper entry, but reports the external source as unverified instead of claiming automatic startup is configured. Review or remove the external launcher, or choose manual startup, before enabling managed review. At logon the managed launcher uses a named cross-process startup semaphore, checks the endpoint first, and checks all Ollama processes before launching `ollama serve`. It never launches a second process when an Ollama process already exists; an unhealthy existing process is reported for repair.
@@ -156,6 +160,8 @@ thalen-helper model recommend [--allow-cpu]
 thalen-helper model routing status|automatic|pinned
 thalen-helper model change <tag> --yes
 thalen-helper models move <fixed-local-directory> --yes
+thalen-helper models activate <existing-fixed-local-directory> --yes
+thalen-helper models recover --yes
 thalen-helper repair
 thalen-helper repair --dry-run --diff-out <private-local-file> [--migrate-existing]
 thalen-helper repair [--migrate-existing] --expected-config-source-sha256 <hash> --expected-config-planned-sha256 <hash> --expected-agents-source-sha256 <hash> --expected-agents-planned-sha256 <hash>

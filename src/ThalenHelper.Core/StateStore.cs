@@ -56,6 +56,23 @@ public sealed class StateStore
         await RunLockedAsync(() =>
         {
             var current = ProtectedFileTransaction.Capture(_path);
+            if (state.ModelStorageTransition is not null)
+            {
+                throw new InvalidOperationException(
+                    "Model storage transition state must be written with revision-bound compare-and-swap.");
+            }
+
+            if (current.Exists)
+            {
+                var currentState = JsonSerializer.Deserialize<InstallationState>(current.Bytes, JsonOptions)
+                    ?? throw new InvalidDataException("Installation state is empty or malformed.");
+                if (currentState.ModelStorageTransition is not null)
+                {
+                    throw new InvalidOperationException(
+                        "A model storage transition is pending. This stale state write was refused.");
+                }
+            }
+
             _ = SaveIfUnchanged(state, current);
         }, cancellationToken).ConfigureAwait(false);
     }

@@ -35,7 +35,9 @@ Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROC
 
 ## Model path is not verified
 
-`MODEL_PATH_NOT_CONFIGURED` means the current user's `OLLAMA_MODELS` differs from product state. `MODEL_NOT_IN_CONFIGURED_PATH` means the selected manifest was not found there. Run repair to safely restart Ollama with the persisted path, then verify. Do not manually copy only blobs; use `models move` for a verified full move.
+`MODEL_PATH_NOT_CONFIGURED` means the current user's `OLLAMA_MODELS` differs from product state. `MODEL_NOT_IN_CONFIGURED_PATH` means the selected manifest was not found there. Run repair to safely restart Ollama with the persisted path, then verify. Do not manually copy only blobs; use `models move` for a verified full move, or `models activate` to verify and select a complete pre-copied store while preserving the original.
+
+`MODEL_STORAGE_TRANSITION_PENDING` means activation stopped after writing its crash-recovery marker. Keep both model directories unchanged and run `thalen-helper models recover --yes`; ordinary repair, enable, and resume remain blocked until recovery verifies and clears the marker.
 
 ## Network exposure warning
 

@@ -227,6 +227,46 @@ public sealed class OllamaStartupTests
     }
 
     [Fact]
+    public async Task RequireIdleRefusesLoadedModelWithoutUnloadingStoppingOrChangingEnvironment()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var state = CreateState(temporary.Path);
+        var platform = new FakeStartupPlatform
+        {
+            LoopbackOnly = true,
+            ProcessRunning = true,
+            Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
+        };
+        platform.UserEnvironment["OLLAMA_MODELS"] = Path.Combine(temporary.Path, "old-models");
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"foreign:latest\"}]}"),
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
+        var manager = new OllamaAutoStartManager(
+            () => new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler)),
+            platform);
+        var mutationsBefore = platform.MutationCount;
+
+        var result = await manager.ApplyConfigurationAsync(
+            paths,
+            state,
+            Path.Combine(temporary.Path, "old-models"),
+            enabled: true,
+            allowSafeRestart: true,
+            OllamaRestartModelPolicy.RequireIdle);
+
+        Assert.Equal("OLLAMA_RESTART_NOT_IDLE", result.Code);
+        Assert.Equal(mutationsBefore, platform.MutationCount);
+        Assert.Equal(0, platform.StopCount);
+        Assert.Equal(0, platform.StartCount);
+        Assert.Equal(Path.Combine(temporary.Path, "old-models"), platform.UserEnvironment["OLLAMA_MODELS"]);
+    }
+
+    [Fact]
     public async Task ModelMustExistUnderExactConfiguredManifestTree()
     {
         using var temporary = new TemporaryDirectory();

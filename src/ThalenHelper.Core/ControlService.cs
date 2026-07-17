@@ -61,6 +61,15 @@ public sealed class ControlService
             return preserved;
         }
 
+        if (state.ModelStorageTransition is not null)
+        {
+            return new ControlResult(
+                false,
+                "MODEL_STORAGE_TRANSITION_PENDING",
+                "Model storage activation did not reach a final checkpoint. Local reviews remain paused until models recover --yes completes the transition.",
+                state);
+        }
+
         var verification = await _autoStart.VerifyAsync(_paths, state, false, cancellationToken).ConfigureAwait(false);
         if (!ModelIntegrity.IsOperationallySafe(verification, state))
         {
@@ -132,6 +141,15 @@ public sealed class ControlService
         if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
+        }
+
+        if (state.ModelStorageTransition is not null)
+        {
+            return new ControlResult(
+                false,
+                "MODEL_STORAGE_TRANSITION_PENDING",
+                "Model storage activation did not reach a final checkpoint. Local reviews remain disabled until models recover --yes completes the transition.",
+                state);
         }
 
         if (string.IsNullOrWhiteSpace(state.SelectedModel))

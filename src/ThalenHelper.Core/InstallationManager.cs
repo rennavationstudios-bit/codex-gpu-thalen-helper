@@ -621,6 +621,12 @@ public sealed class InstallationManager
         var originalState = loadedState.Revision;
         ValidateCodexHomeRoute(paths, state, "Repair");
 
+        if (state.ModelStorageTransition is not null)
+        {
+            throw new InvalidOperationException(
+                "A model storage transition is pending. Run models recover --yes before ordinary repair.");
+        }
+
         if (migrateExisting && binding is null)
         {
             throw new InvalidOperationException(

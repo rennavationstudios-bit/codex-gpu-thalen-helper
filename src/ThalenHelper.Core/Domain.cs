@@ -232,6 +232,7 @@ public sealed record InstallationState
     public List<LocalModelRegistration> RegisteredLocalModels { get; set; } = [];
     public bool SelectedModelOwnedByHelper { get; set; }
     public string? ModelStorageLocation { get; set; }
+    public ModelStorageTransition? ModelStorageTransition { get; set; }
     public string? ManagedCodexHome { get; set; }
     public HardwareTier HardwareTier { get; set; } = HardwareTier.NoModel;
     public AccelerationResult? Acceleration { get; set; }
@@ -241,6 +242,14 @@ public sealed record InstallationState
     public DateTimeOffset? LastHealthCheckAt { get; set; }
     public string? LastHealthCheckCode { get; set; }
 }
+
+public sealed record ModelStorageTransition(
+    string OperationId,
+    string Source,
+    string Destination,
+    HelperAvailability PriorAvailability,
+    string? PriorUserEnvironment,
+    DateTimeOffset StartedAtUtc);
 
 public sealed record LocalModelRegistration(
     string Provider,
@@ -423,7 +432,7 @@ public sealed record OllamaRoutedGenerationResult(
 public static class ProductInfo
 {
     public const string Name = "Codex GPU Thalen Helper";
-    public const string Version = "0.1.0-beta.8";
+    public const string Version = "0.1.0-beta.9";
     public const string IntegrationName = "local_gpu_reviewer";
     public const string ManagedConfigStart = "# BEGIN CODEX GPU THALEN HELPER (managed)";
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";

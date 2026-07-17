@@ -115,6 +115,46 @@ public sealed class CliPolicyTests
                 state));
     }
 
+    [Fact]
+    public async Task ModelStorageActivationAndRecoveryRequireExplicitConfirmationWithoutTouchingState()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var common = new[]
+        {
+            "--install-dir", paths.InstallDirectory,
+            "--state-dir", paths.StateDirectory,
+            "--codex-home", paths.CodexHome
+        };
+
+        var activate = await CliApplication.RunAsync(
+            ["models", "activate", Path.Combine(temporary.Path, "destination"), .. common]);
+        var recover = await CliApplication.RunAsync(["models", "recover", .. common]);
+
+        Assert.Equal(2, activate);
+        Assert.Equal(2, recover);
+        Assert.False(File.Exists(paths.StateFile));
+    }
+
+    [Fact]
+    public void ModelStorageActivationResultUsesNormalResultExitPolicy()
+    {
+        var success = new ModelsActivationResult(
+            true,
+            "MODELS_ACTIVATED_SOURCE_PRESERVED",
+            "ok",
+            "source",
+            "destination",
+            1,
+            1,
+            true,
+            false,
+            "OK");
+
+        Assert.Equal(0, CliApplication.ResultExitCode(success));
+        Assert.Equal(1, CliApplication.ResultExitCode(success with { Success = false, Code = "FAILED" }));
+    }
+
     private static int Count(string value, string marker)
         => value.Split(marker, StringSplitOptions.None).Length - 1;
 }

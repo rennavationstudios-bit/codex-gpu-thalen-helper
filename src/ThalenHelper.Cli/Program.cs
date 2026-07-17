@@ -327,16 +327,25 @@ internal static class CliApplication
         StateStore store,
         ControlService control)
     {
-        if (parsed.Positionals.Count < 3
-            || !string.Equals(parsed.Positionals[1], "move", StringComparison.OrdinalIgnoreCase)
-            || !parsed.Has("yes"))
+        if (parsed.Positionals.Count < 2 || !parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "Use models move <fixed-local-directory> --yes.");
+            return Fail(
+                "CONFIRMATION_REQUIRED",
+                "Use models move <empty-fixed-local-directory> --yes, models activate <existing-fixed-local-directory> --yes, or models recover --yes.");
         }
 
-        var result = await new ModelsMoveService(paths, store, control)
-            .MoveAsync(parsed.Positionals[2]).ConfigureAwait(false);
-        return Write(result);
+        return parsed.Positionals[1].ToLowerInvariant() switch
+        {
+            "move" when parsed.Positionals.Count >= 3 => Write(await new ModelsMoveService(paths, store, control)
+                .MoveAsync(parsed.Positionals[2]).ConfigureAwait(false)),
+            "activate" when parsed.Positionals.Count >= 3 => Write(await new ModelsActivationService(paths, store, control)
+                .ActivateExistingAsync(parsed.Positionals[2]).ConfigureAwait(false)),
+            "recover" when parsed.Positionals.Count == 2 => Write(await new ModelsActivationService(paths, store, control)
+                .RecoverAsync().ConfigureAwait(false)),
+            _ => Fail(
+                "UNKNOWN_SUBCOMMAND",
+                "Use models move <empty-fixed-local-directory> --yes, models activate <existing-fixed-local-directory> --yes, or models recover --yes.")
+        };
     }
 
     private static async Task<int> TestAsync(ProductPaths paths, StateStore store)
@@ -510,6 +519,7 @@ internal static class CliApplication
             or LmStudioRegistrationResult { Success: false }
             or ModelChangeResult { Success: false }
             or ModelsMoveResult { Success: false }
+            or ModelsActivationResult { Success: false }
             or UninstallResult { Success: false }
             or OllamaInstallResult { Success: false }
             or ProjectUpdateResult { Success: false }
@@ -542,6 +552,8 @@ internal static class CliApplication
             thalen-helper model change <tag> --yes [--accept-restricted-license]
             thalen-helper lmstudio register <model-key> <gguf-path> --yes
             thalen-helper models move <fixed-local-directory> --yes
+            thalen-helper models activate <existing-fixed-local-directory> --yes
+            thalen-helper models recover --yes
             thalen-helper install --yes --defer-model --codex-home <directory> [--auto-start true|false]
             thalen-helper repair --dry-run --diff-out <local-file> [--migrate-existing]
             thalen-helper repair [--migrate-existing] --expected-config-source-sha256 <hash> --expected-config-planned-sha256 <hash> --expected-agents-source-sha256 <hash> --expected-agents-planned-sha256 <hash>

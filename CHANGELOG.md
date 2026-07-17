@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.9 - 2026-07-17
+
+- Added `models activate` for an exact, non-destructive switch to a complete pre-copied Ollama store.
+- Added revision-bound transition recovery with `models recover`, stale-write protection, and move/repair/control guards while recovery is pending.
+- Activation now refuses loaded foreign models and verifies files, empty directories, timestamps, attributes, SHA-256, fixed-volume ancestry, runtime model identity, and source preservation before committing.
+
 ## 0.1.0-beta.8 - 2026-07-17
 
 - Fixed post-logon Ollama startup so an unused port is treated as safe to bind on loopback instead of being misclassified as network exposure.
