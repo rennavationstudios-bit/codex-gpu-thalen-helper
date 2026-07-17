@@ -315,7 +315,12 @@ public sealed class OllamaAndReviewerTests
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
         var checks = 0;
 
-        var result = await new ReviewerService(store, client, _ => ++checks == 1, StorageOk)
+        var result = await new ReviewerService(
+            store,
+            client,
+            _ => ++checks == 1,
+            StorageOk,
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("OLLAMA_NETWORK_EXPOSURE", result.ErrorCode);
@@ -341,7 +346,12 @@ public sealed class OllamaAndReviewerTests
             "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}")));
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
 
-        var result = await new ReviewerService(store, client, _ => true, StorageOk)
+        var result = await new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_DIGEST_MISMATCH", result.ErrorCode);
@@ -370,7 +380,8 @@ public sealed class OllamaAndReviewerTests
             store,
             client,
             _ => true,
-            _ => new ReviewerModelStorageVerification(false, "MODEL_PATH_NOT_CONFIGURED", "Path drift."))
+            _ => new ReviewerModelStorageVerification(false, "MODEL_PATH_NOT_CONFIGURED", "Path drift."),
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_PATH_NOT_CONFIGURED", result.ErrorCode);
@@ -402,7 +413,8 @@ public sealed class OllamaAndReviewerTests
             _ => true,
             _ => ++checks == 1
                 ? new ReviewerModelStorageVerification(true, "OK", "Storage verified.")
-                : new ReviewerModelStorageVerification(false, "MODEL_NOT_IN_CONFIGURED_PATH", "Manifest drift."))
+                : new ReviewerModelStorageVerification(false, "MODEL_NOT_IN_CONFIGURED_PATH", "Manifest drift."),
+            hardwareProvider: ReviewerHardware)
             .ReviewAsync(new ReviewRequest("Inspect."));
 
         Assert.Equal("MODEL_NOT_IN_CONFIGURED_PATH", result.ErrorCode);
@@ -516,7 +528,8 @@ public sealed class OllamaAndReviewerTests
             (_, _) => new ResourcePressureCheck(
                 false,
                 "WINDOWS_COMMIT_PRESSURE",
-                "Commit pressure is high."));
+                "Commit pressure is high."),
+            hardwareProvider: ReviewerHardware);
 
         var result = await reviewer.ReviewAsync(new ReviewRequest("Inspect."));
 
@@ -670,4 +683,8 @@ public sealed class OllamaAndReviewerTests
 
     private static ReviewerModelStorageVerification StorageOk(InstallationState _)
         => new(true, "OK", "Storage verified.");
+
+    private static HardwareProfile ReviewerHardware()
+        => FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "nvidia-rtx3090-24gb"));
 }
