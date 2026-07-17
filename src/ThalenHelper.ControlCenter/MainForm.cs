@@ -25,6 +25,7 @@ public sealed class MainForm : Form
     private Button _primaryAction = null!;
     private Button _lowImpactButton = null!;
     private Button _keepWarmButton = null!;
+    private Button _modelRoutingButton = null!;
     private Func<Task>? _primaryActionCommand;
     private int _operationInProgress;
     private bool _managedActionsAllowed;
@@ -262,7 +263,7 @@ public sealed class MainForm : Form
         left.Controls.Add(UiTheme.SectionLabel("GPU BEHAVIOR"));
         var preferences = ActionFlow();
         _lowImpactButton = AddActionButton(preferences, "Low impact", "Keeps GPU impact minimal and unloads the model immediately after every response. Recommended while emulators, Expo, or graphics tools are active.", ToggleLowImpactAsync, managedOnly: true);
-        _keepWarmButton = AddActionButton(preferences, "Keep warm", "Keeps the model in GPU memory for a bounded idle period for faster follow-up reviews. Entry-tier hardware blocks this option.", ToggleKeepWarmAsync, managedOnly: true);
+        _keepWarmButton = AddActionButton(preferences, "Keep warm", "Keeps one pinned model in GPU memory for a bounded idle period for faster follow-up reviews. Entry-tier hardware and automatic model routing block this option.", ToggleKeepWarmAsync, managedOnly: true);
         left.Controls.Add(preferences);
 
         var right = ActionColumn();
@@ -270,6 +271,7 @@ public sealed class MainForm : Form
         right.Controls.Add(UiTheme.SectionLabel("MODEL & SETUP"));
         var setup = ActionFlow();
         AddActionButton(setup, "Test local review", "Runs one small, explicitly confirmed local inference and then unloads the model. This is the only button here that intentionally runs a model.", TestLocalReviewAsync, AppButtonStyle.Primary, managedOnly: true);
+        _modelRoutingButton = AddActionButton(setup, "Auto model", "Switches between automatic task-aware routing and one pinned model. Automatic mode selects only installed, audited, digest-matching Q4 models after passive hardware checks. Changing this setting never loads a model.", ToggleModelRoutingAsync, managedOnly: true);
         AddActionButton(setup, "Choose model", "Shows hardware-safe supported models. After confirmation, it downloads only when missing, validates locally, and records ownership safely.", ChangeModelAsync, managedOnly: true);
         AddActionButton(setup, "Move model storage", "Moves helper-managed Ollama model files to an empty fixed local folder, verifies every file with SHA-256, and rolls back on failure.", MoveModelsAsync, managedOnly: true);
         AddActionButton(setup, "Repair integration", "Rechecks the managed configuration, startup, model path, and passive health. Existing unowned integrations remain untouched.", RepairAsync, managedOnly: true);
@@ -391,6 +393,9 @@ public sealed class MainForm : Form
             _technicalValue.ForeColor = managed && health.ErrorCode is not null || externalExposure ? UiTheme.Warning : UiTheme.Muted;
             _lowImpactButton.Text = state?.Preferences.LowImpactMode == true ? "Low impact: On" : "Low impact: Off";
             _keepWarmButton.Text = state?.Preferences.KeepWarm == true ? "Keep warm: On" : "Keep warm: Off";
+            _modelRoutingButton.Text = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                ? "Auto model: On"
+                : "Auto model: Off";
             _notice.Text = !managed
                 ? externalExposure
                     ? "Codex may see the external reviewer, but this app cannot pause, lock, unload, or secure it. Ollama is reachable beyond loopback; stop and correct that external startup before local review."
@@ -521,6 +526,15 @@ public sealed class MainForm : Form
     {
         var state = await new StateStore(_paths.StateFile).LoadAsync();
         await RunControlAsync(() => Control().SetKeepWarmAsync(!(state?.Preferences.KeepWarm ?? false)));
+    }
+
+    private async Task ToggleModelRoutingAsync()
+    {
+        var state = await new StateStore(_paths.StateFile).LoadAsync();
+        var mode = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+            ? ModelSelectionMode.Pinned
+            : ModelSelectionMode.Automatic;
+        await RunControlAsync(() => Control().SetModelSelectionModeAsync(mode));
     }
 
     private async Task TestLocalReviewAsync()

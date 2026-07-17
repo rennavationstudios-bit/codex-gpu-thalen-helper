@@ -79,23 +79,29 @@ public sealed partial class OllamaClient : IDisposable
         TimeSpan? queueTimeout = null,
         Func<CancellationToken, Task>? preGenerationCheck = null)
     {
-        ValidateModelIdentifier(model);
-        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
-        if (prompt.Length > 120_000)
-        {
-            throw new OllamaException("INPUT_TOO_LARGE", "The bounded reviewer input exceeds 120,000 characters.");
-        }
+        var routed = await GenerateRoutedAsync(
+            async token =>
+            {
+                if (preGenerationCheck is not null)
+                {
+                    await preGenerationCheck(token).ConfigureAwait(false);
+                }
 
-        if (contextTokens is < 512 or > 32_768)
-        {
-            throw new ArgumentOutOfRangeException(nameof(contextTokens));
-        }
+                return new OllamaGenerationSpec(model, prompt, contextTokens, outputTokens, keepAlive);
+            },
+            busyBehavior,
+            queueTimeout,
+            cancellationToken).ConfigureAwait(false);
+        return routed.Generation;
+    }
 
-        if (outputTokens is < 64 or > 2_048)
-        {
-            throw new ArgumentOutOfRangeException(nameof(outputTokens));
-        }
-
+    public async Task<OllamaRoutedGenerationResult> GenerateRoutedAsync(
+        Func<CancellationToken, Task<OllamaGenerationSpec>> routeAndValidate,
+        ReviewBusyBehavior busyBehavior = ReviewBusyBehavior.Queue,
+        TimeSpan? queueTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(routeAndValidate);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var cancellationEvent = GpuCoordination.OpenCancellationEvent();
         var registration = ThreadPool.RegisterWaitForSingleObject(
@@ -110,22 +116,22 @@ public sealed partial class OllamaClient : IDisposable
                 busyBehavior,
                 queueTimeout ?? TimeSpan.FromSeconds(30),
                 linked.Token).ConfigureAwait(false);
-            if (preGenerationCheck is not null)
-            {
-                await preGenerationCheck(linked.Token).ConfigureAwait(false);
-            }
+            var spec = await routeAndValidate(linked.Token).ConfigureAwait(false);
+            ValidateGenerationSpec(spec);
 
             var payload = new
             {
-                model,
-                prompt,
+                model = spec.Model,
+                prompt = spec.Prompt,
                 stream = false,
                 think = false,
-                keep_alive = keepAlive == Timeout.InfiniteTimeSpan ? "-1" : $"{Math.Max(0, (int)keepAlive.TotalSeconds)}s",
+                keep_alive = spec.KeepAlive == Timeout.InfiniteTimeSpan
+                    ? "-1"
+                    : $"{Math.Max(0, (int)spec.KeepAlive.TotalSeconds)}s",
                 options = new
                 {
-                    num_ctx = contextTokens,
-                    num_predict = outputTokens,
+                    num_ctx = spec.ContextTokens,
+                    num_predict = spec.OutputTokens,
                     temperature = 0.1
                 }
             };
@@ -139,19 +145,42 @@ public sealed partial class OllamaClient : IDisposable
             var response = GetOptionalString(root, "response")
                 ?? throw new OllamaException("OLLAMA_MALFORMED_RESPONSE", "Ollama did not return generated text.");
             response = HiddenReasoningRegex().Replace(response, string.Empty).Trim();
-            return new OllamaGenerationResult(
-                response,
-                GetOptionalString(root, "model"),
-                root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True,
-                GetOptionalInt64(root, "total_duration") ?? 0,
-                GetOptionalInt64(root, "load_duration") ?? 0,
-                GetOptionalInt32(root, "prompt_eval_count") ?? 0,
-                GetOptionalInt32(root, "eval_count") ?? 0,
-                GetOptionalInt64(root, "eval_duration") ?? 0);
+            return new OllamaRoutedGenerationResult(
+                spec,
+                new OllamaGenerationResult(
+                    response,
+                    GetOptionalString(root, "model"),
+                    root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True,
+                    GetOptionalInt64(root, "total_duration") ?? 0,
+                    GetOptionalInt64(root, "load_duration") ?? 0,
+                    GetOptionalInt32(root, "prompt_eval_count") ?? 0,
+                    GetOptionalInt32(root, "eval_count") ?? 0,
+                    GetOptionalInt64(root, "eval_duration") ?? 0));
         }
         finally
         {
             _ = registration.Unregister(null);
+        }
+    }
+
+    private static void ValidateGenerationSpec(OllamaGenerationSpec spec)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        ValidateModelIdentifier(spec.Model);
+        ArgumentException.ThrowIfNullOrWhiteSpace(spec.Prompt);
+        if (spec.Prompt.Length > 120_000)
+        {
+            throw new OllamaException("INPUT_TOO_LARGE", "The bounded reviewer input exceeds 120,000 characters.");
+        }
+
+        if (spec.ContextTokens is < 512 or > 131_072)
+        {
+            throw new ArgumentOutOfRangeException(nameof(spec.ContextTokens));
+        }
+
+        if (spec.OutputTokens is < 64 or > 2_048)
+        {
+            throw new ArgumentOutOfRangeException(nameof(spec.OutputTokens));
         }
     }
 

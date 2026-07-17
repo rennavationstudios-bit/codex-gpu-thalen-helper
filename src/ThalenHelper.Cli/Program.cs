@@ -178,7 +178,7 @@ internal static class CliApplication
     {
         if (parsed.Positionals.Count < 2)
         {
-            return Fail("MISSING_SUBCOMMAND", "Use model recommend or model change <tag>.");
+            return Fail("MISSING_SUBCOMMAND", "Use model recommend, model routing status|automatic|pinned, or model change <tag>.");
         }
 
         switch (parsed.Positionals[1].ToLowerInvariant())
@@ -189,6 +189,47 @@ internal static class CliApplication
                     var hardware = new HardwareDetector().Detect();
                     var recommendation = new ModelSelector().Recommend(hardware, catalog, parsed.Has("allow-cpu"));
                     return Write(new { recommendation, hardware });
+                }
+            case "routing":
+                {
+                    if (parsed.Positionals.Count == 2 || string.Equals(parsed.Positionals[2], "status", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var state = await store.LoadAsync().ConfigureAwait(false)
+                            ?? throw new InvalidOperationException("The helper is not configured.");
+                        return Write(new
+                        {
+                            selectionMode = state.Preferences.ModelSelectionMode,
+                            pinnedModel = state.SelectedModel,
+                            state.Preferences.VramReserveMiB,
+                            context = new
+                            {
+                                quick = state.Preferences.QuickContextTokens,
+                                standard = state.Preferences.StandardContextTokens,
+                                deep = state.Preferences.DeepContextTokens,
+                                maximum = state.Preferences.MaximumContextTokens
+                            },
+                            tuning = new
+                            {
+                                q4 = state.Preferences.PreferQ4Quantization,
+                                flashAttention = state.Preferences.PreferFlashAttention,
+                                keyCache = state.Preferences.KeyCacheQuantization,
+                                valueCache = state.Preferences.ValueCacheQuantization,
+                                gpuKvCache = state.Preferences.PreferGpuKvCache,
+                                modelJinja = state.Preferences.PreferModelProvidedChatTemplate,
+                                cpuMoeWhenSupported = state.Preferences.AllowCpuMoeOffloadWhenSupported,
+                                experimentalOverrides = state.Preferences.AllowExperimentalRuntimeOverrides
+                            },
+                            note = "Status is passive; no model was loaded or run."
+                        });
+                    }
+
+                    var mode = parsed.Positionals[2].ToLowerInvariant() switch
+                    {
+                        "automatic" or "auto" => ModelSelectionMode.Automatic,
+                        "pinned" or "pin" => ModelSelectionMode.Pinned,
+                        _ => throw new ArgumentException("Use model routing status, automatic, or pinned.")
+                    };
+                    return Write(await control.SetModelSelectionModeAsync(mode).ConfigureAwait(false));
                 }
             case "change":
                 {
@@ -206,7 +247,7 @@ internal static class CliApplication
                     return Write(result);
                 }
             default:
-                return Fail("UNKNOWN_SUBCOMMAND", "Use model recommend or model change <tag>.");
+                return Fail("UNKNOWN_SUBCOMMAND", "Use model recommend, model routing status|automatic|pinned, or model change <tag>.");
         }
     }
 
@@ -402,6 +443,7 @@ internal static class CliApplication
             thalen-helper low-impact on|off
             thalen-helper keep-warm on|off
             thalen-helper model recommend [--allow-cpu]
+            thalen-helper model routing status|automatic|pinned
             thalen-helper model change <tag> --yes [--accept-restricted-license]
             thalen-helper models move <fixed-local-directory> --yes
             thalen-helper install --yes --defer-model --codex-home <directory> [--auto-start true|false]

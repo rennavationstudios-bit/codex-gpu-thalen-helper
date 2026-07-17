@@ -555,6 +555,97 @@ public sealed class LifecycleTests
     }
 
     [Fact]
+    public async Task ModelRoutingPreferenceIsPersistentIdempotentAndDoesNotRewriteCodexFiles()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        new CodexConfigManager().InstallOrRepair(paths, false);
+        var configBefore = await File.ReadAllBytesAsync(paths.CodexConfigFile);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen3:8b",
+            SelectedModelDigest = "500a1f067a9f",
+            HardwareTier = HardwareTier.Mid,
+            Availability = HelperAvailability.Disabled,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection]
+        });
+        var control = new ControlService(paths, store);
+
+        Assert.Equal("MODEL_ROUTING_AUTOMATIC", (await control.SetModelSelectionModeAsync(ModelSelectionMode.Automatic)).Code);
+        Assert.Equal("MODEL_ROUTING_AUTOMATIC", (await control.SetModelSelectionModeAsync(ModelSelectionMode.Automatic)).Code);
+        Assert.Equal(ModelSelectionMode.Automatic, (await store.LoadAsync())?.Preferences.ModelSelectionMode);
+        Assert.Equal("KEEP_WARM_AUTOMATIC_UNSAFE", (await control.SetKeepWarmAsync(true)).Code);
+        Assert.Equal(configBefore, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+
+        Assert.Equal("MODEL_ROUTING_PINNED", (await control.SetModelSelectionModeAsync(ModelSelectionMode.Pinned)).Code);
+        Assert.Equal(ModelSelectionMode.Pinned, (await store.LoadAsync())?.Preferences.ModelSelectionMode);
+        Assert.Equal(configBefore, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+    }
+
+    [Fact]
+    public async Task ReleaseGpuUnloadsTheTrackedAutomaticRouteWhenItDiffersFromPinnedState()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var runtime = new FakeOllamaRuntime(models);
+        runtime.SeedModel();
+        var store = new StateStore(paths.StateFile);
+        new CodexConfigManager().InstallOrRepair(paths, false);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            ModelStorageLocation = models,
+            HardwareTier = HardwareTier.Entry,
+            Availability = HelperAvailability.Enabled,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Preferences = new HelperPreferences(ModelSelectionMode: ModelSelectionMode.Automatic)
+        });
+        var tracker = new ActiveModelTracker(paths.StateDirectory);
+        tracker.Set("qwen3:14b");
+        var control = new ControlService(paths, store, runtime.CreateClient);
+
+        var result = await control.ReleaseGpuAsync();
+
+        Assert.True(result.Success, result.Message);
+        Assert.Null(tracker.Read());
+        Assert.True(runtime.UnloadCount >= 2);
+    }
+
+    [Fact]
+    public async Task FailedTrackedModelUnloadDoesNotEraseRecoveryMarker()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        new CodexConfigManager().InstallOrRepair(paths, false);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen3:8b",
+            HardwareTier = HardwareTier.Mid,
+            Availability = HelperAvailability.Enabled,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Preferences = new HelperPreferences(ModelSelectionMode: ModelSelectionMode.Automatic)
+        });
+        var tracker = new ActiveModelTracker(paths.StateDirectory);
+        tracker.Set("qwen3:14b");
+        OllamaClient FailingClient()
+        {
+            var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(
+                FakeHttpMessageHandler.Json("{\"error\":\"offline\"}", HttpStatusCode.ServiceUnavailable)));
+            return new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        }
+        var control = new ControlService(paths, store, FailingClient);
+
+        var result = await control.ReleaseGpuAsync();
+
+        Assert.False(result.Success);
+        Assert.Equal("qwen3:14b", tracker.Read());
+    }
+
+    [Fact]
     public async Task EnableAndResumeRemainClosedWhenOllamaIsNetworkExposed()
     {
         using var temporary = new TemporaryDirectory();

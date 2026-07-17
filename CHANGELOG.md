@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.5 - 2026-07-16
+
+- Added passive `local_gpu_plan` task routing plus automatic or pinned model-selection modes shared across Codex projects.
+- Automatic reviews now select an installed, catalog-audited, digest-matching Q4 Ollama model inside the cross-process inference lock using task type, effort, input size, live RAM/VRAM headroom, and GPU-workload hints.
+- Added persistent CLI and Control Center routing controls, quick/standard/deep context policy, a 2 GiB VRAM reserve, explicit provider-managed tuning disclosures, and no-download/no-load planning.
+- Added audited Qwen3 8B and 14B catalog entries, managed Codex routing instructions, and isolated coverage for passive planning, contention-safe execution, context caps, digest/Q4 rejection, pressure refusal, idempotent preferences, and MCP contracts.
+
 ## 0.1.0-beta.4 - 2026-07-14
 
 - Verify every production Ollama TCP peer as a current-user, validly signed `Ollama Inc.` process before sending any HTTP bytes or review prompt.

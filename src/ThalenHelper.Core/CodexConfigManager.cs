@@ -424,7 +424,7 @@ public sealed partial class CodexConfigManager
             command = "{{command}}"
             enabled = {{enabled.ToString().ToLowerInvariant()}}
             required = false
-            enabled_tools = ["local_gpu_health", "local_gpu_review"]
+            enabled_tools = ["local_gpu_health", "local_gpu_plan", "local_gpu_review"]
             default_tools_approval_mode = "prompt"
             supports_parallel_tool_calls = false
             startup_timeout_sec = 20
@@ -432,6 +432,9 @@ public sealed partial class CodexConfigManager
             env = { THALEN_HELPER_STATE_DIR = "{{state}}", OLLAMA_HOST = "http://127.0.0.1:11434" }
 
             [mcp_servers.local_gpu_reviewer.tools.local_gpu_health]
+            approval_mode = "auto"
+
+            [mcp_servers.local_gpu_reviewer.tools.local_gpu_plan]
             approval_mode = "auto"
 
             [mcp_servers.local_gpu_reviewer.tools.local_gpu_review]
@@ -551,7 +554,7 @@ public sealed partial class CodexConfigManager
             || !TryInteger(reviewer, "tool_timeout_sec", 360)
             || !reviewer.TryGetValue("enabled_tools", out var enabledToolsValue)
             || enabledToolsValue is not TomlArray enabledTools
-            || !enabledTools.OfType<string>().SequenceEqual(["local_gpu_health", "local_gpu_review"], StringComparer.Ordinal)
+            || !enabledTools.OfType<string>().SequenceEqual(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], StringComparer.Ordinal)
             || !reviewer.TryGetValue("env", out var envValue)
             || envValue is not TomlTable env
             || !env.Keys.Order(StringComparer.Ordinal).SequenceEqual(["OLLAMA_HOST", "THALEN_HELPER_STATE_DIR"], StringComparer.Ordinal)
@@ -561,8 +564,9 @@ public sealed partial class CodexConfigManager
             || !PathsEqual(stateDirectory, paths.StateDirectory)
             || !reviewer.TryGetValue("tools", out var toolsValue)
             || toolsValue is not TomlTable tools
-            || !tools.Keys.Order(StringComparer.Ordinal).SequenceEqual(["local_gpu_health", "local_gpu_review"], StringComparer.Ordinal)
+            || !tools.Keys.Order(StringComparer.Ordinal).SequenceEqual(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], StringComparer.Ordinal)
             || !HasExactApprovalMode(tools, "local_gpu_health", "auto")
+            || !HasExactApprovalMode(tools, "local_gpu_plan", "auto")
             || !HasExactApprovalMode(tools, "local_gpu_review", "prompt"))
         {
             return false;

@@ -40,6 +40,8 @@ The MCP server exposes only:
 - `local_gpu_health` — passive; never runs inference.
 - `local_gpu_review` — one bounded advisory generation using explicitly supplied text.
 
+- `local_gpu_plan` is also passive task-aware model/context selection; it never downloads, loads, or runs a model.
+
 It exposes no filesystem, shell, Git, deployment, publishing, email, arbitrary network, or mutation tool.
 
 ## System requirements
@@ -105,9 +107,9 @@ Approximate catalog tiers are conservative guardrails, not guarantees:
 | High | 14B | Broader bounded review, still advisory |
 | Enthusiast | verified 30B-class fit | Stronger bounded review, never final authority |
 
-The NVIDIA MX330 2 GB fixture selects `qwen2.5-coder:1.5b`, uses a reduced context, enables low-impact mode, and never counts Intel shared graphics memory. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
+Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models; shared graphics memory is never counted as dedicated VRAM. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
 
-Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), and the auditable [model catalog](model-catalog/models.v1.json).
+Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), [docs/task-aware-routing.md](docs/task-aware-routing.md), and the auditable [model catalog](model-catalog/models.v1.json).
 
 ## Model storage
 
@@ -148,6 +150,7 @@ thalen-helper enable | disable | pause | resume | release-gpu
 thalen-helper low-impact on|off
 thalen-helper keep-warm on|off
 thalen-helper model recommend [--allow-cpu]
+thalen-helper model routing status|automatic|pinned
 thalen-helper model change <tag> --yes
 thalen-helper models move <fixed-local-directory> --yes
 thalen-helper repair
@@ -166,7 +169,7 @@ Interactive setup leaves model download and validation unchecked. Installing the
 
 ## Configuration safety
 
-Setup parses TOML, makes timestamped backups, preserves unrelated content, inserts a marked MCP block with `required = false`, an explicit two-tool allowlist, prompt approval for review, automatic approval only for passive health, and re-parses the result. A supplied fresh-Codex validator can roll the edit back automatically.
+Setup parses TOML, makes timestamped backups, preserves unrelated content, inserts a marked MCP block with `required = false`, an explicit three-tool allowlist, prompt approval for review, automatic approval only for passive health and routing, and re-parses the result. A supplied fresh-Codex validator can roll the edit back automatically.
 
 If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup preserves it byte-for-byte, adds no duplicate TOML table or local-review invocation guidance, leaves its Ollama/model/startup/runtime behavior untouched, and disables this helper's managed controls. The Control Center labels the entry external and unverified. The optional reliability baseline remains separately available only through its explicit diff-preview flow.
 

@@ -37,6 +37,7 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
    - `docs/friend-install-and-use-guide.md`
    - `docs/configuration-merging.md`
    - `docs/model-selection.md`
+   - `docs/task-aware-routing.md`
    - `docs/privacy-and-security.md`
    - `docs/troubleshooting.md`
    - `docs/uninstall.md`
@@ -47,6 +48,7 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
    .\thalen-helper.exe status
    .\thalen-helper.exe doctor
    .\thalen-helper.exe ollama verify
+   .\thalen-helper.exe model routing status
    ```
 
 5. Report whether the integration is helper-owned, external/unmarked, incomplete, disabled, paused, or ready. Treat **No model loaded** as the normal safe idle state, not as evidence that setup failed.
@@ -63,6 +65,8 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
 - Do not download, pull, load, validate, move, or delete a model without the user's explicit model and storage choice. Passive status and installation must not run inference.
 - For modest hardware, prefer the smallest model that the current catalog marks safe for the detected dedicated VRAM and system memory. Keep shared GPU memory separate from dedicated VRAM, never use a larger model based on shared memory, and do not enable CPU-only fallback without explicit informed consent.
 - Keep local review single-flight. Do not bypass the helper's lock, queue-or-skip behavior, pressure refusal, workload guard, or idle unloading.
+- Prefer automatic task-aware routing after at least one supported Ollama model is validated. Before each non-trivial local review, use passive `local_gpu_plan`, then announce the returned provider, actual planned model, and bounded purpose before calling `local_gpu_review` with the same task kind, effort, context, and GPU-workload fields. Planning must not download, load, or run a model.
+- Do not claim that LM Studio-only models such as Qwythos or Qwen3.6 are in the current automatic pool. The managed reviewer is Ollama-only until a separately secured provider adapter exists.
 - Do not interrupt Codex, Expo, Android, iPhone, emulator, graphics, build, or device-testing processes. Prefer low-impact mode during GPU-intensive work.
 - Default to low-impact mode on, keep-warm off, queue-or-skip set to skip, and immediate unloading after review on entry-level or uncertain hardware. Increase resource use only after fresh measurements and explicit consent.
 - If automatic Ollama startup was declined, leave it declined and explain that Ollama must be started manually after sign-in. Do not create a startup entry without consent.
@@ -78,7 +82,7 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
 3. Recommend the safest path. On an entry-level or uncertain GPU, recommend the smallest supported model and low-impact settings even when a larger model might technically fit.
 4. Before a helper-owned configuration change, use the Control Center to show the detected paths, selected action, model acquisition choice, and the optional reliability baseline's supported before/after diff. Codex must summarize the expected managed-file effects in plain language. Do not invent an unsupported CLI dry-run command.
 5. Apply only the chosen managed action. If the helper reports external ownership, drift, unsafe network exposure, pressure, or an unverifiable startup owner, stop and report it instead of bypassing the guard.
-6. Turn on low-impact mode and leave keep-warm off for modest or uncertain hardware. Confirm no model is resident before asking the user to restart Codex.
+6. Turn on automatic model routing and low-impact mode, and leave keep-warm off for modest or uncertain hardware. Automatic routing selects dynamically from installed audited models and always unloads after a response. Confirm no model is resident before asking the user to restart Codex.
 7. Restart every Codex window only after a successful helper-owned integration change. A Codex restart is required for MCP discovery; restarting the Control Center alone is insufficient. Ask the user to close and reopen Codex only when this point is reached.
 8. After the fresh Codex restart, re-run passive status. Run **Test local review** only with explicit consent because it performs a small Ollama inference; unload the model afterward.
 9. Provide the backup/restore information and a concise post-change diff summary. Run the same passive checks a second time to confirm the operation was idempotent and did not append duplicates.
@@ -94,6 +98,7 @@ Do not say setup is complete unless the applicable items are verified:
 - the selected model remains listed and its manifest is present in that store;
 - automatic startup is helper-owned and verified, or manual startup is clearly reported as the user's choice;
 - the MCP reviewer appears after a fresh Codex restart when the integration is helper-owned and enabled;
+- `local_gpu_health`, `local_gpu_plan`, and `local_gpu_review` appear after restart, and a passive plan reports the task kind, effort, model, context cap, and no inference;
 - no model is left loaded after a consented validation when low-impact mode requires unloading;
 - restore instructions and any remaining manual step are reported honestly.
 

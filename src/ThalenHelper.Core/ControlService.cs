@@ -9,6 +9,7 @@ public sealed class ControlService
     private readonly Func<OllamaClient> _clientFactory;
     private readonly CodexConfigManager _codexConfig;
     private readonly OllamaAutoStartManager _autoStart;
+    private readonly ActiveModelTracker _activeModelTracker;
 
     public ControlService(
         ProductPaths paths,
@@ -22,6 +23,7 @@ public sealed class ControlService
         _clientFactory = clientFactory ?? (() => new OllamaClient());
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
+        _activeModelTracker = new ActiveModelTracker(paths.StateDirectory);
     }
 
     public Task<InstallationState?> GetStatusAsync(CancellationToken cancellationToken = default)
@@ -38,7 +40,7 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Paused;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        var unload = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+        var unload = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
         return new ControlResult(
             true,
             unload ? "PAUSED" : "PAUSED_UNLOAD_UNCONFIRMED",
@@ -82,7 +84,7 @@ public sealed class ControlService
         }
 
         GpuCoordination.RequestCancellation();
-        var unloaded = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+        var unloaded = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
         if (state.Availability == HelperAvailability.Enabled)
         {
             GpuCoordination.ClearCancellation();
@@ -106,7 +108,7 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Disabled;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        _ = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+        _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
         if (disableCodexEntry)
         {
             _codexConfig.SetEnabled(_paths, false);
@@ -169,7 +171,7 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (enabled)
         {
-            _ = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "LOW_IMPACT_ON" : "LOW_IMPACT_OFF", "Preferences updated.", state);
@@ -188,6 +190,15 @@ public sealed class ControlService
             return new ControlResult(false, "KEEP_WARM_UNSAFE", "Keep-warm mode is unavailable on the entry hardware tier.", state);
         }
 
+        if (enabled && state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
+        {
+            return new ControlResult(
+                false,
+                "KEEP_WARM_AUTOMATIC_UNSAFE",
+                "Automatic routing unloads each routed model immediately so a later task can choose a different model safely. Use pinned routing before enabling keep-warm.",
+                state);
+        }
+
         state.Preferences = state.Preferences with
         {
             KeepWarm = enabled,
@@ -197,10 +208,46 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (!enabled)
         {
-            _ = await TryUnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "KEEP_WARM_ON" : "KEEP_WARM_OFF", "Preferences updated.", state);
+    }
+
+    public async Task<ControlResult> SetModelSelectionModeAsync(
+        ModelSelectionMode mode,
+        CancellationToken cancellationToken = default)
+    {
+        var state = await RequireStateAsync(cancellationToken).ConfigureAwait(false);
+        if (OwnershipGuard(state) is { } preserved)
+        {
+            return preserved;
+        }
+
+        if (mode == ModelSelectionMode.Pinned && string.IsNullOrWhiteSpace(state.SelectedModel))
+        {
+            return new ControlResult(false, "NO_PINNED_MODEL", "Choose and validate a model before enabling pinned routing.", state);
+        }
+
+        var wasKeepWarm = state.Preferences.KeepWarm;
+        state.Preferences = state.Preferences with
+        {
+            ModelSelectionMode = mode,
+            KeepWarm = mode == ModelSelectionMode.Automatic ? false : state.Preferences.KeepWarm,
+            IdleUnloadSeconds = mode == ModelSelectionMode.Automatic ? 0 : state.Preferences.IdleUnloadSeconds
+        };
+        if (mode == ModelSelectionMode.Automatic && wasKeepWarm)
+        {
+            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        }
+        await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        return new ControlResult(
+            true,
+            mode == ModelSelectionMode.Automatic ? "MODEL_ROUTING_AUTOMATIC" : "MODEL_ROUTING_PINNED",
+            mode == ModelSelectionMode.Automatic
+                ? "Automatic task-aware routing is enabled for all Codex projects using this managed integration. No model was loaded."
+                : $"Pinned routing is enabled for {state.SelectedModel}. No model was loaded.",
+            state);
     }
 
     private async Task<InstallationState> RequireStateAsync(CancellationToken cancellationToken)
@@ -244,5 +291,28 @@ public sealed class ControlService
         {
             return false;
         }
+    }
+
+    private async Task<bool> TryUnloadManagedModelAsync(
+        InstallationState state,
+        CancellationToken cancellationToken)
+    {
+        var trackedModel = _activeModelTracker.Read();
+        var models = new[] { trackedModel, state.SelectedModel }
+            .Where(model => !string.IsNullOrWhiteSpace(model))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var success = true;
+        foreach (var model in models)
+        {
+            success &= await TryUnloadAsync(model, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (success && trackedModel is not null)
+        {
+            _activeModelTracker.Clear(trackedModel);
+        }
+
+        return success;
     }
 }

@@ -167,7 +167,8 @@ public sealed class InstallationManager
                     LowImpactMode: recommendation.LowImpactMode,
                     KeepWarm: false,
                     AutoStartOllama: options.AutoStartOllama,
-                    IdleUnloadSeconds: 0)
+                    IdleUnloadSeconds: 0,
+                    ModelSelectionMode: ModelSelectionMode.Automatic)
                 : priorState.Preferences with { AutoStartOllama = options.AutoStartOllama }
         };
         if (priorState is null)
