@@ -705,7 +705,7 @@ public sealed partial class CodexConfigManager
     private static bool ManagedReviewerMatches(string content, ProductPaths paths)
     {
         var reviewer = GetExclusiveManagedReviewer(content);
-        if (reviewer is null)
+        if (reviewer is null || HasUnapprovedManagedEnvironment(reviewer))
         {
             return false;
         }
@@ -762,6 +762,48 @@ public sealed partial class CodexConfigManager
         }
 
         return true;
+    }
+
+    private static void ThrowIfUnapprovedManagedEnvironment(string content)
+    {
+        var document = TomlSerializer.Deserialize<TomlTable>(content);
+        if (document is null
+            || !document.TryGetValue("mcp_servers", out var serversValue)
+            || serversValue is not TomlTable servers
+            || !servers.TryGetValue(ProductInfo.IntegrationName, out var reviewerValue)
+            || reviewerValue is not TomlTable reviewer
+            || !HasUnapprovedManagedEnvironment(reviewer))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "The existing local_gpu_reviewer block contains an unapproved environment entry. No automatic migration or repair was applied; review and remove the extra env or env_vars entry explicitly, then preview repair again.");
+    }
+
+    private static bool HasUnapprovedManagedEnvironment(TomlTable reviewer)
+    {
+        if (reviewer.TryGetValue("env_vars", out var environmentVariablesValue)
+            && (environmentVariablesValue is not TomlArray environmentVariables
+                || environmentVariables.Count != 1
+                || environmentVariables[0] is not string imported
+                || !string.Equals(imported, "OLLAMA_MODELS", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        if (!reviewer.TryGetValue("env", out var envValue))
+        {
+            return false;
+        }
+
+        if (envValue is not TomlTable environment)
+        {
+            return true;
+        }
+
+        return environment.Keys.Any(key => !string.Equals(key, "OLLAMA_HOST", StringComparison.Ordinal)
+            && !string.Equals(key, "THALEN_HELPER_STATE_DIR", StringComparison.Ordinal));
     }
 
     private static bool TryGetManagedEnabled(string content, out bool enabled)
@@ -989,6 +1031,7 @@ public sealed partial class CodexConfigManager
 
     private static string ReplaceExistingReviewerTable(string content, string managedBlock)
     {
+        ThrowIfUnapprovedManagedEnvironment(content);
         var headers = ReadTableHeaders(content);
         var targets = headers
             .Select((header, index) => (header, index))
@@ -1291,6 +1334,7 @@ public sealed partial class CodexConfigManager
 
         var blockEnd = end + ProductInfo.ManagedConfigEnd.Length;
         var existingBlock = content[start..blockEnd];
+        ThrowIfUnapprovedManagedEnvironment(existingBlock);
         var familyStart = existingBlock.IndexOf('[', StringComparison.Ordinal);
         var familyEnd = existingBlock.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
         if (familyStart < 0 || familyEnd < familyStart)

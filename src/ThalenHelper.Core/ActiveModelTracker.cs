@@ -50,6 +50,17 @@ public sealed class ActiveModelTracker
                     {
                         return new ActiveModelTrackerInspection(ActiveModelTrackerStatus.Invalid, null);
                     }
+
+                    if (normalized.Digest is not null)
+                    {
+                        var digest = ModelValidationStore.NormalizeFullDigest(normalized.Digest);
+                        if (digest is null)
+                        {
+                            return new ActiveModelTrackerInspection(ActiveModelTrackerStatus.Invalid, null);
+                        }
+
+                        normalized = normalized with { Digest = digest };
+                    }
                 }
 
                 return new ActiveModelTrackerInspection(ActiveModelTrackerStatus.Valid, normalized);
@@ -58,7 +69,7 @@ public sealed class ActiveModelTracker
             OllamaClient.ValidateModelIdentifier(value);
             return new ActiveModelTrackerInspection(
                 ActiveModelTrackerStatus.Valid,
-                new ActiveModelReference(ModelProviders.Ollama, value, null));
+                new ActiveModelReference(ModelProviders.Ollama, value, null, null));
         }
         catch (Exception exception) when (exception is IOException
             or UnauthorizedAccessException
@@ -70,7 +81,10 @@ public sealed class ActiveModelTracker
     }
 
     public void Set(string model)
-        => Set(new ActiveModelReference(ModelProviders.Ollama, model, null));
+        => Set(new ActiveModelReference(ModelProviders.Ollama, model, null, null));
+
+    public void Set(string model, string digest)
+        => Set(new ActiveModelReference(ModelProviders.Ollama, model, null, digest));
 
     public void Set(ActiveModelReference reference)
     {
@@ -81,11 +95,21 @@ public sealed class ActiveModelTracker
         {
             OllamaClient.ValidateModelIdentifier(reference.Model);
             if (!string.IsNullOrWhiteSpace(reference.InstanceId)) throw new ArgumentException("Ollama trackers do not support instance identifiers.", nameof(reference));
+            if (reference.Digest is not null && ModelValidationStore.NormalizeFullDigest(reference.Digest) is null)
+            {
+                throw new ArgumentException("Ollama tracker digests must be full SHA-256 values.", nameof(reference));
+            }
         }
         var directory = System.IO.Path.GetDirectoryName(_path)!;
         Directory.CreateDirectory(directory);
         var temporary = _path + "." + Environment.ProcessId + ".tmp";
-        var json = System.Text.Json.JsonSerializer.Serialize(reference with { Provider = ModelProviders.Normalize(reference.Provider) });
+        var json = System.Text.Json.JsonSerializer.Serialize(reference with
+        {
+            Provider = ModelProviders.Normalize(reference.Provider),
+            Digest = string.Equals(ModelProviders.Normalize(reference.Provider), ModelProviders.Ollama, StringComparison.Ordinal)
+                ? ModelValidationStore.NormalizeFullDigest(reference.Digest)
+                : reference.Digest
+        });
         File.WriteAllText(temporary, json + Environment.NewLine, new UTF8Encoding(false));
         File.Move(temporary, _path, true);
     }
@@ -108,7 +132,11 @@ public sealed class ActiveModelTracker
     }
 }
 
-public sealed record ActiveModelReference(string Provider, string Model, string? InstanceId);
+public sealed record ActiveModelReference(
+    string Provider,
+    string Model,
+    string? InstanceId,
+    string? Digest = null);
 
 internal enum ActiveModelTrackerStatus
 {

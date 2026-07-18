@@ -181,6 +181,24 @@ public sealed class TaskAwareModelRouter
         IReadOnlyList<string> warnings)
     {
         var selectedProvider = ModelProviders.Normalize(state.SelectedModelProvider);
+        if (string.Equals(selectedProvider, ModelProviders.LmStudio, StringComparison.Ordinal)
+            && !LmStudioModelFileBinding.ExactLoadedFileBindingSupported)
+        {
+            return new ModelRouteDecision(
+                false,
+                ModelSelectionMode.Pinned,
+                taskKind,
+                effort,
+                state.SelectedModel,
+                state.SelectedModelDigest,
+                state.HardwareTier,
+                0,
+                "LM Studio routing is disabled until the runtime can prove which exact local file is loaded for the selected model key.",
+                warnings,
+                BuildTuningPlan(state.Preferences, 0, selectedProvider),
+                selectedProvider);
+        }
+
         var selected = catalog.Models.FirstOrDefault(model =>
             string.Equals(ModelProviders.Normalize(model.Provider), selectedProvider, StringComparison.Ordinal)
             && ModelIntegrity.NamesMatch(model.Tag, state.SelectedModel ?? string.Empty));
@@ -266,6 +284,8 @@ public sealed class TaskAwareModelRouter
     {
         return catalog.Models
             .Where(model => ModelProviders.IsSupported(model.Provider)
+                && (!string.Equals(ModelProviders.Normalize(model.Provider), ModelProviders.LmStudio, StringComparison.Ordinal)
+                    || LmStudioModelFileBinding.ExactLoadedFileBindingSupported)
                 && model.AutomaticSelectionAllowed
                 && model.CommercialUseAllowed
                 && FitsHardwareAndReserve(model, state, hardware))

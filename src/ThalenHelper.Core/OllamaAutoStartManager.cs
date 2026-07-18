@@ -25,9 +25,15 @@ public sealed record OllamaListenerStatus(
 
 public sealed record OllamaIdleVerification(bool Idle, string Code, string Message);
 
+internal sealed record OllamaStartupConfigurationPlan(
+    string ModelDirectory,
+    string Host,
+    string? RunEntry,
+    bool Enabled,
+    bool HelperOwnsAutoStart);
+
 public enum OllamaRestartModelPolicy
 {
-    UnloadRunningModels,
     RequireIdle
 }
 
@@ -62,7 +68,15 @@ public sealed class OllamaAutoStartManager
         _platform = platform ?? new WindowsOllamaStartupPlatform();
     }
 
+    internal IOllamaStartupPlatform Platform => _platform;
+
     public void Configure(ProductPaths paths, InstallationState state, bool enabled)
+        => ApplyConfiguration(PreviewConfiguration(paths, state, enabled), state);
+
+    internal OllamaStartupConfigurationPlan PreviewConfiguration(
+        ProductPaths paths,
+        InstallationState state,
+        bool enabled)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(state);
@@ -72,16 +86,28 @@ public sealed class OllamaAutoStartManager
         }
 
         var modelDirectory = Path.GetFullPath(state.ModelStorageLocation);
-        _platform.SetUserEnvironmentVariable("OLLAMA_MODELS", modelDirectory);
-        _platform.SetUserEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434");
-        _platform.SetProcessEnvironmentVariable("OLLAMA_MODELS", modelDirectory);
-        _platform.SetProcessEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434");
-        _platform.BroadcastEnvironmentChange();
         var externalAutoStart = _platform.HasExternalAutoStart();
         var helperOwnsAutoStart = enabled && !externalAutoStart;
-        _platform.SetRunEntry(helperOwnsAutoStart ? GetCanonicalRunCommand(paths) : null);
-        state.Preferences = state.Preferences with { AutoStartOllama = enabled };
-        state.StartupEntryOwnedByHelper = helperOwnsAutoStart;
+        return new OllamaStartupConfigurationPlan(
+            modelDirectory,
+            "127.0.0.1:11434",
+            helperOwnsAutoStart ? GetCanonicalRunCommand(paths) : null,
+            enabled,
+            helperOwnsAutoStart);
+    }
+
+    internal void ApplyConfiguration(OllamaStartupConfigurationPlan plan, InstallationState state)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(state);
+        _platform.SetUserEnvironmentVariable("OLLAMA_MODELS", plan.ModelDirectory);
+        _platform.SetUserEnvironmentVariable("OLLAMA_HOST", plan.Host);
+        _platform.SetProcessEnvironmentVariable("OLLAMA_MODELS", plan.ModelDirectory);
+        _platform.SetProcessEnvironmentVariable("OLLAMA_HOST", plan.Host);
+        _platform.BroadcastEnvironmentChange();
+        _platform.SetRunEntry(plan.RunEntry);
+        state.Preferences = state.Preferences with { AutoStartOllama = plan.Enabled };
+        state.StartupEntryOwnedByHelper = plan.HelperOwnsAutoStart;
     }
 
     public bool IsConfigured(ProductPaths paths)
@@ -136,7 +162,7 @@ public sealed class OllamaAutoStartManager
             previousModelDirectory,
             enabled,
             allowSafeRestart,
-            OllamaRestartModelPolicy.UnloadRunningModels,
+            OllamaRestartModelPolicy.RequireIdle,
             cancellationToken);
 
     public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
@@ -208,47 +234,16 @@ public sealed class OllamaAutoStartManager
             };
         }
 
-        try
+        if (restartModelPolicy != OllamaRestartModelPolicy.RequireIdle)
         {
-            using var client = _clientFactory();
-            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            if (restartModelPolicy == OllamaRestartModelPolicy.RequireIdle && running.Count > 0)
-            {
-                return initial with
-                {
-                    Code = "OLLAMA_RESTART_NOT_IDLE",
-                    Message = "Ollama loaded a model during activation. No model was unloaded and the process was not stopped."
-                };
-            }
-
-            if (restartModelPolicy == OllamaRestartModelPolicy.UnloadRunningModels)
-            {
-                foreach (var model in running)
-                {
-                    await client.UnloadAsync(model.Name, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-        catch (OllamaException exception)
-        {
-            return initial with
-            {
-                Code = "OLLAMA_RESTART_UNLOAD_FAILED",
-                Message = $"Ollama could not be safely restarted because loaded models could not be released: {exception.Message}"
-            };
+            throw new InvalidOperationException("Unsupported Ollama restart policy.");
         }
 
-        var executable = _platform.FindOllamaExecutable();
-        if (executable is null || !_platform.StopOllamaProcesses(executable))
+        return initial with
         {
-            return initial with
-            {
-                Code = "OLLAMA_RESTART_FAILED",
-                Message = "The existing Ollama process could not be stopped safely. Close Ollama manually, then run repair."
-            };
-        }
-
-        return await EnsureRunningAsync(paths, state, cancellationToken).ConfigureAwait(false);
+            Code = "OLLAMA_RESTART_REQUIRED",
+            Message = "OLLAMA_MODELS changed while Ollama was running. The helper will not stop a shared provider because runtime ownership cannot be proven atomically; close Ollama manually, then retry."
+        };
     }
 
     public async Task<OllamaStartupVerification> EnsureRunningAsync(

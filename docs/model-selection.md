@@ -26,14 +26,14 @@ After a user-authorized pull, setup runs:
 2. An exact `THALEN_HELPER_OK` response check.
 3. A tiny off-by-one review expected to return `OFF_BY_ONE`.
 4. `/api/ps` inspection for loaded model, VRAM bytes, context, and expiry.
-5. Explicit unload of only the tracked helper-owned model through generation with `keep_alive=0`.
-6. A second `/api/ps` check proving unload.
+5. Generation with `keep_alive=0s`, without a separate name-based unload request.
+6. Bounded `/api/ps` polling that proves the tracked runtime released before validation evidence is recorded.
 
 After both checks, runtime inspection, unload, and a post-unload check succeed, the helper records only the model tag, full digest, validation protocol, pass time, two durations, and bounded acceleration counters in `model-validations.json`. Prompts, responses, findings, paths, and user data are never recorded. A missing, corrupt, stale-protocol, or digest-mismatched record is ineligible for automatic routing. OOM, timeout, malformed response, wrong output, cancellation, or unload failure removes that model's prior pass and keeps it out of the automatic pool. Guided setup never switches to a different fallback model after the user confirms a named selection. An explicitly configured noninteractive installation may attempt exactly one smaller automatic/commercial candidate. Pre-existing models are not removed or marked as product-owned.
 
 ### LM Studio registration
 
-LM Studio registration is explicit and never downloads a model. Use `thalen-helper lmstudio register <model-key> <gguf-path> --yes`. The helper hashes the complete regular file, matches the catalog and LM Studio inventory, refuses foreign loaded instances or unsafe resource pressure, runs bounded reasoning-off validation, proves unload, and only then enables provider-aware automatic routing. The local path is kept only in private helper state so removable storage fails safely when disconnected; it is never placed in public templates or diagnostics.
+LM Studio registration is fail-closed in beta.12. The current loopback inventory exposes a model key and metadata but not the canonical absolute GGUF file that will be loaded for that key. Therefore `thalen-helper lmstudio register <model-key> <gguf-path> --yes` removes any stale approval and returns `LMSTUDIO_EXACT_FILE_BINDING_UNAVAILABLE` without hashing for approval, loading, or running the model. LM Studio models do not enter automatic or pinned routing until a future runtime contract can bind the loaded key to the exact audited file identity.
 
 ## Limitations
 

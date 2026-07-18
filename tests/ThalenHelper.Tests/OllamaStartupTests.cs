@@ -204,7 +204,7 @@ public sealed class OllamaStartupTests
     }
 
     [Fact]
-    public async Task SafeRestartStopsOnlyTheDiscoveredExecutable()
+    public async Task DefaultPathChangeNeverStopsEvenTheDiscoveredExecutable()
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
@@ -221,9 +221,9 @@ public sealed class OllamaStartupTests
             enabled: true,
             allowSafeRestart: true);
 
-        Assert.Equal("OK", result.Code);
-        Assert.Equal(1, platform.StopCount);
-        Assert.Equal(expectedExecutable, platform.LastStoppedExecutable);
+        Assert.Equal("OLLAMA_RESTART_REQUIRED", result.Code);
+        Assert.Equal(0, platform.StopCount);
+        Assert.Null(platform.LastStoppedExecutable);
     }
 
     [Fact]
@@ -264,6 +264,53 @@ public sealed class OllamaStartupTests
         Assert.Equal(0, platform.StopCount);
         Assert.Equal(0, platform.StartCount);
         Assert.Equal(Path.Combine(temporary.Path, "old-models"), platform.UserEnvironment["OLLAMA_MODELS"]);
+    }
+
+    [Fact]
+    public async Task RequireIdleNeverStopsProviderAfterEarlierIdleCheck()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var state = CreateState(temporary.Path);
+        CreateManifest(state);
+        var platform = new FakeStartupPlatform
+        {
+            LoopbackOnly = true,
+            ProcessRunning = true,
+            Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
+        };
+        platform.UserEnvironment["OLLAMA_MODELS"] = Path.Combine(temporary.Path, "old-models");
+        var idleChecked = false;
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/ps" when !idleChecked => MarkIdleChecked(),
+                "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"foreign:latest\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}"),
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\"}]}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
+        HttpResponseMessage MarkIdleChecked()
+        {
+            idleChecked = true;
+            return FakeHttpMessageHandler.Json("{\"models\":[]}");
+        }
+        var manager = new OllamaAutoStartManager(
+            () => new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler)),
+            platform);
+
+        var result = await manager.ApplyConfigurationAsync(
+            paths,
+            state,
+            Path.Combine(temporary.Path, "old-models"),
+            enabled: true,
+            allowSafeRestart: true,
+            OllamaRestartModelPolicy.RequireIdle);
+
+        Assert.True(idleChecked);
+        Assert.Equal("OLLAMA_RESTART_REQUIRED", result.Code);
+        Assert.Equal(0, platform.StopCount);
+        Assert.Equal(0, platform.StartCount);
+        Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
     }
 
     [Fact]

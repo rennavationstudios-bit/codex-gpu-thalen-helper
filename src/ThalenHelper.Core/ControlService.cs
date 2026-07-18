@@ -120,7 +120,7 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Disabled;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
+        var unloaded = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         if (disableCodexEntry)
         {
             _codexConfig.SetEnabled(_paths, false);
@@ -128,10 +128,12 @@ public sealed class ControlService
 
         return new ControlResult(
             true,
-            "DISABLED",
-            disableCodexEntry
-                ? "Local review is disabled persistently. Restart Codex to remove the MCP tools from a running session."
-                : "Local review calls are disabled persistently.",
+            unloaded ? "DISABLED" : "DISABLED_UNLOAD_UNCONFIRMED",
+            unloaded
+                ? disableCodexEntry
+                    ? "Local review is disabled persistently. Restart Codex to remove the MCP tools from a running session."
+                    : "Local review calls are disabled persistently."
+                : "Local review calls are disabled persistently; runtime ownership could not be proven, so the loaded state was left untouched.",
             state);
     }
 
@@ -330,21 +332,35 @@ public sealed class ControlService
                     TimeSpan.FromSeconds(30),
                     cancellationToken).ConfigureAwait(false);
                 using var client = _clientFactory();
-                var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-                var ownership = OllamaRuntimeOwnership.Inspect(
-                    running,
-                    _activeModelTracker.Inspect(),
-                    reference.Model);
-                if (!ownership.Allowed || !ownership.SelectedModelAlreadyLoaded)
+                using var releaseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                releaseTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+                var first = true;
+                while (!releaseTimeout.IsCancellationRequested)
                 {
-                    return false;
+                    var running = await client.GetRunningModelsAsync(releaseTimeout.Token).ConfigureAwait(false);
+                    if (running.Count == 0)
+                    {
+                        // A tracker that was already stale on entry is deliberately not
+                        // treated as proof of a completed release.
+                        return !first;
+                    }
+
+                    var ownership = OllamaRuntimeOwnership.Inspect(
+                        running,
+                        _activeModelTracker.Inspect(),
+                        reference.Model);
+                    if (!ownership.Allowed || !ownership.SelectedModelAlreadyLoaded)
+                    {
+                        return false;
+                    }
+
+                    first = false;
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), releaseTimeout.Token).ConfigureAwait(false);
                 }
 
-                await client.UnloadAsync(reference.Model, cancellationToken).ConfigureAwait(false);
-                var after = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-                return !after.Any(item => ModelIntegrity.NamesMatch(item.Name, reference.Model));
+                return false;
             }
-            catch (OllamaException)
+            catch (Exception exception) when (exception is OllamaException or OperationCanceledException)
             {
                 return false;
             }

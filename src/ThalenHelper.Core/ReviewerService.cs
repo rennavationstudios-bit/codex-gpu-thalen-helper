@@ -148,7 +148,7 @@ public sealed class ReviewerService
             return new ReviewerHealthResult
             {
                 Provider = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                    ? "Automatic (Ollama + LM Studio)"
+                    ? "Automatic (Ollama)"
                     : ModelProviders.Normalize(state.SelectedModelProvider),
                 Model = selected,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
@@ -209,6 +209,11 @@ public sealed class ReviewerService
         CancellationToken cancellationToken)
     {
         var combined = (await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false)).ToList();
+        if (!LmStudioModelFileBinding.ExactLoadedFileBindingSupported)
+        {
+            return combined;
+        }
+
         var registrations = state.RegisteredLocalModels
             .Where(item => string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
             .ToArray();
@@ -236,7 +241,7 @@ public sealed class ReviewerService
                     string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(model.Tag, registration.Model, StringComparison.Ordinal));
                 var api = inventory.FirstOrDefault(model => string.Equals(model.Key, registration.Model, StringComparison.Ordinal));
-                if (catalog is null || api is null || !RegistrationFileIsCurrent(registration)
+                if (catalog is null || api is null || !RegistrationFileIsCurrent(registration, catalog)
                     || !ModelIntegrity.DigestMatches(registration.Digest, catalog.ExpectedDigest)
                     || api.SizeBytes != catalog.ExpectedDownloadBytes)
                 {
@@ -291,7 +296,10 @@ public sealed class ReviewerService
         var registration = state.RegisteredLocalModels.SingleOrDefault(item =>
             string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
             && string.Equals(item.Model, route.Model, StringComparison.Ordinal));
-        if (registration is null || !RegistrationFileIsCurrent(registration))
+        var catalog = _catalogProvider().Models.FirstOrDefault(model =>
+            string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(model.Tag, route.Model, StringComparison.Ordinal));
+        if (registration is null || !RegistrationFileIsCurrent(registration, catalog))
         {
             throw new LmStudioException("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed or became unavailable before generation.");
         }
@@ -372,22 +380,11 @@ public sealed class ReviewerService
         };
     }
 
-    private static bool RegistrationFileIsCurrent(LocalModelRegistration registration)
-    {
-        try
-        {
-            var info = new FileInfo(Path.GetFullPath(registration.Path));
-            return info.Exists
-                && !info.Attributes.HasFlag(FileAttributes.ReparsePoint)
-                && info.Length == registration.Length
-                && (!registration.LastWriteTimeUtc.HasValue
-                    || info.LastWriteTimeUtc == registration.LastWriteTimeUtc.Value.UtcDateTime);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
-        {
-            return false;
-        }
-    }
+    internal static bool RegistrationFileIsCurrent(
+        LocalModelRegistration registration,
+        ModelCatalogEntry? catalog)
+        => LmStudioModelFileBinding.ExactLoadedFileBindingSupported
+            && LmStudioModelFileBinding.MatchesRegistration(registration, catalog);
 
     public async Task<ReviewerPlanResult> PlanAsync(ReviewRequest request, CancellationToken cancellationToken = default)
     {
@@ -451,7 +448,10 @@ public sealed class ReviewerService
                 var registration = state.RegisteredLocalModels.SingleOrDefault(item =>
                     string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(item.Model, route.Model, StringComparison.Ordinal));
-                if (registration is null || !RegistrationFileIsCurrent(registration))
+                var catalog = _catalogProvider().Models.FirstOrDefault(model =>
+                    string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(model.Tag, route.Model, StringComparison.Ordinal));
+                if (registration is null || !RegistrationFileIsCurrent(registration, catalog))
                 {
                     return PlanError(
                         "MODEL_FILE_IDENTITY_CHANGED",
@@ -661,7 +661,21 @@ public sealed class ReviewerService
 
                     if (!runtimeOwnership.SelectedModelAlreadyLoaded)
                     {
-                        _activeModelTracker.Set(route.Model);
+                        var routedInventoryModel = ModelIntegrity.FindSelectedModel(
+                            models.Where(model => string.Equals(
+                                ModelProviders.Normalize(model.Provider),
+                                ModelProviders.Ollama,
+                                StringComparison.Ordinal)),
+                            route.Model);
+                        var routedDigest = ModelValidationStore.NormalizeFullDigest(routedInventoryModel?.Digest);
+                        if (routedDigest is null)
+                        {
+                            throw new OllamaException(
+                                "MODEL_DIGEST_INVALID",
+                                "The routed Ollama model did not expose a current full digest; the helper refused to create a name-only ownership marker.");
+                        }
+
+                        _activeModelTracker.Set(route.Model, routedDigest);
                     }
                     return new OllamaGenerationSpec(
                         route.Model,

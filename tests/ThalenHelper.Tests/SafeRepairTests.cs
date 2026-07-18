@@ -17,7 +17,7 @@ public sealed class SafeRepairTests
         var suffix = "[mcp_servers.unrelated]\r\n# keep following comment\r\ncommand = \"other.exe\"\r\n";
         var original = prefix
             + $"[{reviewerKey}]\r\n# preserve root comment\r\ncommand = \"docker.exe\" # preserve command comment\r\ncustom_option = \"keep\"\r\n\r\n"
-            + $"[{reviewerKey}.env]\r\n# preserve env comment\r\nOLLAMA_HOST = \"http://127.0.0.1:11434\"\r\nCUSTOM_ENV = \"keep\"\r\n\r\n"
+            + $"[{reviewerKey}.env]\r\n# preserve env comment\r\nOLLAMA_HOST = \"http://127.0.0.1:11434\"\r\n\r\n"
             + $"[{reviewerKey}.tools.local_gpu_review]\r\napproval_mode = \"prompt\"\r\n\r\n"
             + suffix;
         File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
@@ -43,7 +43,6 @@ public sealed class SafeRepairTests
         Assert.EndsWith(suffix, migrated, StringComparison.Ordinal);
         Assert.DoesNotContain("docker.exe", migrated, StringComparison.Ordinal);
         Assert.Contains("custom_option = \"keep\"", migrated, StringComparison.Ordinal);
-        Assert.Contains("CUSTOM_ENV = \"keep\"", migrated, StringComparison.Ordinal);
         Assert.Contains("# preserve root comment", migrated, StringComparison.Ordinal);
         Assert.Contains("# preserve env comment", migrated, StringComparison.Ordinal);
         Assert.Contains("# preserve command comment", migrated, StringComparison.Ordinal);
@@ -66,6 +65,33 @@ public sealed class SafeRepairTests
         var uninstall = manager.Uninstall(paths, result.BackupPath);
         Assert.Equal("restored-exact-original", uninstall.Operation);
         Assert.Equal(Encoding.UTF8.GetBytes(original), File.ReadAllBytes(paths.CodexConfigFile));
+    }
+
+    [Theory]
+    [InlineData("DOTNET_STARTUP_HOOKS")]
+    [InlineData("CORECLR_PROFILER_PATH_64")]
+    public void ExplicitMigrationRefusesRuntimeInjectionEnvironmentWithoutMutation(string name)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = $$"""
+            [mcp_servers.local_gpu_reviewer]
+            command = "docker.exe"
+
+            [mcp_servers.local_gpu_reviewer.env]
+            CUSTOM_ENV = "keep"
+            {{name}} = "injected"
+            """;
+        File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
+        var before = File.ReadAllBytes(paths.CodexConfigFile);
+
+        var manager = new CodexConfigManager();
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            manager.PreviewInstall(paths, enabled: false, migrateExisting: true));
+
+        Assert.Contains("No automatic migration or repair was applied", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
+        Assert.Empty(Directory.GetFiles(paths.CodexHome, "config.toml.thalen-helper.*.bak"));
     }
 
     [Fact]
@@ -322,6 +348,88 @@ public sealed class SafeRepairTests
         Assert.Equal(beforeConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
         Assert.Equal(beforeAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
         Assert.Equal(beforeState, await File.ReadAllBytesAsync(paths.StateFile));
+    }
+
+    [Fact]
+    public async Task FailedStartupVerificationRollsBackFilesEnvironmentAndRunEntryWithoutProcessMutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        await File.WriteAllTextAsync(
+            paths.CodexConfigFile,
+            "[mcp_servers.local_gpu_reviewer]\ncommand = \"docker.exe\"\n");
+        await File.WriteAllTextAsync(paths.AgentsOverrideFile, "# unrelated personal instructions\n");
+        var modelDirectory = Path.Combine(temporary.Path, "models");
+        Directory.CreateDirectory(modelDirectory);
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            ProductVersion = "0.1.0-beta.4",
+            ManagedCodexHome = paths.CodexHome,
+            ExistingIntegrationPreserved = true,
+            HardwareTier = HardwareTier.High,
+            Availability = HelperAvailability.Enabled,
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "sha256:d7372fd828510000000000000000000000000000000000000000000000000000",
+            ModelStorageLocation = modelDirectory,
+            Preferences = new HelperPreferences(AutoStartOllama: true)
+        });
+        var beforeConfig = await File.ReadAllBytesAsync(paths.CodexConfigFile);
+        var beforeAgents = await File.ReadAllBytesAsync(paths.AgentsOverrideFile);
+        var beforeState = await File.ReadAllBytesAsync(paths.StateFile);
+        var platform = new FakeStartupPlatform
+        {
+            Executable = "ollama.exe",
+            LoopbackOnly = true,
+            ProcessRunning = false,
+            RunEntry = "custom-startup-command"
+        };
+        platform.UserEnvironment["OLLAMA_MODELS"] = "user-models-before";
+        platform.UserEnvironment["OLLAMA_HOST"] = "user-host-before";
+        platform.ProcessEnvironment["OLLAMA_MODELS"] = "process-models-before";
+        platform.ProcessEnvironment["OLLAMA_HOST"] = "process-host-before";
+        OllamaClient OfflineClient()
+        {
+            var handler = new FakeHttpMessageHandler((_, _) =>
+                throw new HttpRequestException("simulated loopback outage"));
+            return new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        }
+
+        var previewManager = new InstallationManager(hardwareProvider: ReviewerHardware);
+        var preview = await previewManager.PreviewRepairAsync(
+            paths,
+            Path.Combine(temporary.Path, "startup-rollback.diff"),
+            migrateExisting: true);
+        var autoStart = new OllamaAutoStartManager(OfflineClient, platform);
+        var manager = new InstallationManager(
+            autoStart: autoStart,
+            clientFactory: OfflineClient,
+            hardwareProvider: ReviewerHardware,
+            startupPlatform: platform,
+            processEnvironmentReader: name => platform.ProcessEnvironment.GetValueOrDefault(name));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => manager.RepairAsync(
+            paths,
+            codexStartupValidator: _ => true,
+            binding: new RepairHashBinding(
+                preview.CodexConfig.SourceSha256,
+                preview.CodexConfig.PlannedSha256,
+                preview.AgentsOverride.SourceSha256,
+                preview.AgentsOverride.PlannedSha256),
+            migrateExisting: true));
+
+        Assert.Contains("Repair verification failed", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(beforeConfig, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(beforeAgents, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(beforeState, await File.ReadAllBytesAsync(paths.StateFile));
+        Assert.Equal("user-models-before", platform.UserEnvironment["OLLAMA_MODELS"]);
+        Assert.Equal("user-host-before", platform.UserEnvironment["OLLAMA_HOST"]);
+        Assert.Equal("process-models-before", platform.ProcessEnvironment["OLLAMA_MODELS"]);
+        Assert.Equal("process-host-before", platform.ProcessEnvironment["OLLAMA_HOST"]);
+        Assert.Equal("custom-startup-command", platform.RunEntry);
+        Assert.False(platform.ProcessRunning);
+        Assert.Equal(0, platform.StartCount);
+        Assert.Equal(0, platform.StopCount);
+        Assert.False(File.Exists(InstallContextStore.GetPath(paths.InstallDirectory)));
     }
 
     [Fact]

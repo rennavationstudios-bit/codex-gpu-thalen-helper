@@ -131,6 +131,94 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
+    public async Task CanceledPostLoadVerificationUsesAnIndependentCleanupToken()
+    {
+        using var callerCancellation = new CancellationTokenSource();
+        var cleanupTokenWasCanceled = true;
+        var handler = new FakeHttpMessageHandler(async (request, token) =>
+        {
+            switch (request.RequestUri?.AbsolutePath)
+            {
+                case "/api/v1/models/load":
+                    return FakeHttpMessageHandler.Json(
+                        "{\"model\":\"model-9b\",\"instance_id\":\"model-9b:1\",\"load_config\":{\"context_length\":65536,\"flash_attention\":true,\"offload_kv_cache_to_gpu\":true}}");
+                case "/api/v1/models":
+                    callerCancellation.Cancel();
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                    throw new InvalidOperationException("The canceled verification request unexpectedly completed.");
+                case "/api/v1/models/unload":
+                    cleanupTokenWasCanceled = token.IsCancellationRequested;
+                    return FakeHttpMessageHandler.Json("{\"instance_id\":\"model-9b:1\"}");
+                default:
+                    return FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+            }
+        });
+        using var client = CreateClient(handler);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            client.LoadAsync("model-9b", callerCancellation.Token));
+
+        Assert.False(cleanupTokenWasCanceled);
+        Assert.Equal(
+            new[] { "/api/v1/models/load", "/api/v1/models", "/api/v1/models/unload" },
+            handler.Requests.Select(request => request.Path));
+    }
+
+    [Fact]
+    public void CatalogBindingRequiresTheExactIndexedModelPathForTheKey()
+    {
+        using var temporary = new TemporaryDirectory();
+        var catalog = new ModelCatalogService().LoadBundled().Models.Single(model =>
+            string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.Ordinal));
+        var exactPath = Path.Combine(
+            temporary.Path,
+            Path.Combine(catalog.IndexedModelPath!.Split('/')));
+        var unrelatedPath = Path.Combine(temporary.Path, Path.GetFileName(exactPath));
+
+        Assert.True(LmStudioModelFileBinding.IsCanonicalCatalogBinding(catalog, catalog.Tag, exactPath));
+        Assert.False(LmStudioModelFileBinding.IsCanonicalCatalogBinding(catalog, "unrelated-key", exactPath));
+        Assert.False(LmStudioModelFileBinding.IsCanonicalCatalogBinding(catalog, catalog.Tag, unrelatedPath));
+    }
+
+    [Fact]
+    public void AutomaticEligibilityStaysDisabledWhileFileProofStillRejectsReplacementAndLegacyEvidence()
+    {
+        using var temporary = new TemporaryDirectory();
+        var catalog = new ModelCatalogService().LoadBundled().Models.Single(model =>
+            string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.Ordinal));
+        var modelPath = Path.Combine(
+            temporary.Path,
+            Path.Combine(catalog.IndexedModelPath!.Split('/')));
+        Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
+        File.WriteAllText(modelPath, "AAAA");
+        Assert.True(LmStudioModelFileBinding.TryOpen(modelPath, out var stream, out var proof));
+        stream.Dispose();
+        var registration = new LocalModelRegistration(
+            ModelProviders.LmStudio,
+            catalog.Tag,
+            new string('a', 64),
+            modelPath,
+            DateTimeOffset.UtcNow,
+            proof.Length,
+            proof.LastWriteTimeUtc,
+            proof.FileIdentity);
+
+        Assert.True(LmStudioModelFileBinding.MatchesRegistration(registration, catalog));
+        Assert.False(ReviewerService.RegistrationFileIsCurrent(registration, catalog));
+        Assert.False(ReviewerService.RegistrationFileIsCurrent(registration with { FileIdentity = null }, catalog));
+
+        var replacement = modelPath + ".replacement";
+        File.WriteAllText(replacement, "BBBB");
+        File.SetLastWriteTimeUtc(replacement, proof.LastWriteTimeUtc.UtcDateTime);
+        File.Move(replacement, modelPath, overwrite: true);
+
+        var replacementInfo = new FileInfo(modelPath);
+        Assert.Equal(proof.Length, replacementInfo.Length);
+        Assert.Equal(proof.LastWriteTimeUtc.UtcDateTime, replacementInfo.LastWriteTimeUtc);
+        Assert.False(ReviewerService.RegistrationFileIsCurrent(registration, catalog));
+    }
+
+    [Fact]
     public async Task GenerationIsBoundedNonStreamingAndRequiresExactModelIdentity()
     {
         var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(

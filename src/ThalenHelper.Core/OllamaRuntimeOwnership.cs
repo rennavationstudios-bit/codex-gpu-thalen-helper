@@ -39,7 +39,8 @@ internal static class OllamaRuntimeOwnership
         if (reference is null
             || !MatchesTrackedOllamaModel(tracker, requestedModel)
             || runningModels.Count != 1
-            || !ModelIntegrity.NamesMatch(runningModels[0].Name, reference.Model))
+            || !ModelIntegrity.NamesMatch(runningModels[0].Name, reference.Model)
+            || !ExactDigestMatches(runningModels[0].Digest, reference.Digest))
         {
             return Refused("Ollama already has a model loaded that is not provably owned by this helper operation. It was left untouched.");
         }
@@ -60,7 +61,17 @@ internal static class OllamaRuntimeOwnership
             && reference is not null
             && string.Equals(ModelProviders.Normalize(reference.Provider), ModelProviders.Ollama, StringComparison.Ordinal)
             && string.IsNullOrWhiteSpace(reference.InstanceId)
+            && ModelValidationStore.NormalizeFullDigest(reference.Digest) is not null
             && ModelIntegrity.NamesMatch(reference.Model, requestedModel);
+    }
+
+    private static bool ExactDigestMatches(string? runningDigest, string? trackedDigest)
+    {
+        var running = ModelValidationStore.NormalizeFullDigest(runningDigest);
+        var tracked = ModelValidationStore.NormalizeFullDigest(trackedDigest);
+        return running is not null
+            && tracked is not null
+            && string.Equals(running, tracked, StringComparison.Ordinal);
     }
 
     private static OllamaRuntimeOwnershipCheck Refused(string message)

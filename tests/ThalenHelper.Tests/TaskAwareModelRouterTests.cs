@@ -368,8 +368,8 @@ public sealed class TaskAwareModelRouterTests
 
     [Theory]
     [InlineData(ReviewEffort.Quick, false, "Ollama", "qwen3:8b")]
-    [InlineData(ReviewEffort.Standard, false, "LM Studio", "qwythos-9b-claude-mythos-5-1m")]
-    [InlineData(ReviewEffort.Deep, false, "LM Studio", "qwythos-9b-claude-mythos-5-1m")]
+    [InlineData(ReviewEffort.Standard, false, "Ollama", "qwen3:14b")]
+    [InlineData(ReviewEffort.Deep, false, "Ollama", "qwen3-coder:30b")]
     [InlineData(ReviewEffort.Deep, true, "Ollama", "qwen3:8b")]
     public void AutomaticRoutingUsesExplicitCrossProviderPolicy(
         ReviewEffort effort,
@@ -394,6 +394,40 @@ public sealed class TaskAwareModelRouterTests
         Assert.True(route.Allowed, route.Reason);
         Assert.Equal(expectedProvider, route.Provider);
         Assert.Equal(expectedModel, route.Model);
+    }
+
+    [Fact]
+    public void PinnedLmStudioRouteFailsClosedUntilExactLoadedFileBindingExists()
+    {
+        var model = Catalog().Models.Single(item => item.Provider == ModelProviders.LmStudio);
+        var installed = new OllamaModelInfo(
+            model.Tag,
+            model.ExpectedDigest,
+            model.ExpectedDownloadBytes,
+            model.Family,
+            "9B",
+            "BF16",
+            ModelProviders.LmStudio,
+            model.IndexedModelPath);
+        var state = AutomaticState() with
+        {
+            SelectedModel = model.Tag,
+            SelectedModelDigest = model.ExpectedDigest,
+            SelectedModelProvider = ModelProviders.LmStudio,
+            Preferences = AutomaticState().Preferences with { ModelSelectionMode = ModelSelectionMode.Pinned }
+        };
+
+        var route = new TaskAwareModelRouter().Plan(
+            new ReviewRequest("Review.", Effort: ReviewEffort.Standard),
+            state,
+            Catalog(),
+            Rtx3090(),
+            [installed],
+            ValidationRegistry([installed]));
+
+        Assert.False(route.Allowed);
+        Assert.Equal(ModelProviders.LmStudio, route.Provider);
+        Assert.Contains("disabled until the runtime can prove", route.Reason, StringComparison.Ordinal);
     }
 
     [Fact]

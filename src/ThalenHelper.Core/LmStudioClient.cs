@@ -157,14 +157,15 @@ public sealed partial class LmStudioClient : IDisposable
         }
         catch
         {
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             try
             {
                 using var ignored = await SendJsonAsync(
                     HttpMethod.Post,
                     "/api/v1/models/unload",
                     new { instance_id = instanceId },
-                    TimeSpan.FromMinutes(1),
-                    cancellationToken).ConfigureAwait(false);
+                    TimeSpan.FromSeconds(15),
+                    cleanup.Token).ConfigureAwait(false);
             }
             catch
             {

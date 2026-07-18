@@ -23,21 +23,31 @@ public sealed class ModelsActivationTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
-        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+        OllamaClient ClientFactory()
+            => platform.ProcessRunning
+                ? runtime.CreateClient()
+                : new OllamaClient(
+                    new Uri("http://127.0.0.1:11434"),
+                    new HttpClient(new FakeHttpMessageHandler((_, _) =>
+                        throw new HttpRequestException("simulated stopped provider"))));
+        var autoStart = new OllamaAutoStartManager(ClientFactory, platform);
         var state = CreateState(source);
         state.PreviousUserEnvironment["OLLAMA_MODELS"] = "pre-helper-value";
         autoStart.Configure(paths, state, enabled: true);
+        // Storage activation requires the shared provider to be closed by the user;
+        // RequireIdle never stops a running Ollama process automatically.
+        platform.ProcessRunning = false;
         new CodexConfigManager().InstallOrRepair(paths, enabled: true);
         var store = new StateStore(paths.StateFile);
         var emptyRevision = (await store.LoadWithRevisionAsync()).Revision;
         await store.SaveIfUnchangedAsync(state, emptyRevision);
-        var control = new ControlService(paths, store, runtime.CreateClient, autoStart: autoStart);
+        var control = new ControlService(paths, store, ClientFactory, autoStart: autoStart);
 
         var sourceBefore = Snapshot(source);
         var result = await new ModelsActivationService(paths, store, control, autoStart)
             .ActivateExistingAsync(destination);
 
-        Assert.True(result.Success);
+        Assert.True(result.Success, $"{result.Code}: {result.Message}");
         Assert.Equal("MODELS_ACTIVATED_SOURCE_PRESERVED", result.Code);
         Assert.True(result.SourcePreserved);
         Assert.False(result.RolledBack);
@@ -210,7 +220,14 @@ public sealed class ModelsActivationTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
-        var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
+        OllamaClient ClientFactory()
+            => platform.ProcessRunning
+                ? runtime.CreateClient()
+                : new OllamaClient(
+                    new Uri("http://127.0.0.1:11434"),
+                    new HttpClient(new FakeHttpMessageHandler((_, _) =>
+                        throw new HttpRequestException("simulated stopped provider"))));
+        var autoStart = new OllamaAutoStartManager(ClientFactory, platform);
         var state = CreateState(destination);
         state.Availability = HelperAvailability.Paused;
         state.ModelStorageTransition = new ModelStorageTransition(
@@ -222,15 +239,17 @@ public sealed class ModelsActivationTests
             DateTimeOffset.UtcNow);
         state.PreviousUserEnvironment["OLLAMA_MODELS"] = "pre-helper-value";
         autoStart.Configure(paths, state, enabled: true);
+        // Recovery follows the same preservation boundary as activation.
+        platform.ProcessRunning = false;
         new CodexConfigManager().InstallOrRepair(paths, enabled: true);
         var store = new StateStore(paths.StateFile);
         var emptyRevision = (await store.LoadWithRevisionAsync()).Revision;
         await store.SaveIfUnchangedAsync(state, emptyRevision);
-        var control = new ControlService(paths, store, runtime.CreateClient, autoStart: autoStart);
+        var control = new ControlService(paths, store, ClientFactory, autoStart: autoStart);
 
         var result = await new ModelsActivationService(paths, store, control, autoStart).RecoverAsync();
 
-        Assert.True(result.Success);
+        Assert.True(result.Success, $"{result.Code}: {result.Message}");
         Assert.Equal("MODEL_STORAGE_RECOVERED_TO_SOURCE", result.Code);
         var saved = await store.LoadAsync();
         Assert.Equal(Path.GetFullPath(source), saved?.ModelStorageLocation);

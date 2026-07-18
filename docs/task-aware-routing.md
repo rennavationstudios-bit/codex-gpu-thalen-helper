@@ -21,7 +21,7 @@ Pinned mode remains available for users who always want one validated model. It 
 | Standard | 16K | Strongest safe installed audited model up to roughly 16B |
 | Deep | 64K | Strongest safe installed audited model |
 
-When a validated LM Studio Qwythos registration is explicitly enabled, quick work and GPU-busy work remain on the smallest safe Ollama model. Standard and deep work prefer the audited Qwythos route. If LM Studio is closed or its removable model path is unavailable, automatic mode excludes it and falls back to a validated Ollama candidate.
+LM Studio and Qwythos are excluded from routing in beta.12. The current LM Studio inventory API cannot bind a loaded model key to the exact absolute GGUF file that was audited, so the helper returns a fail-closed registration error without inference. Automatic mode selects only eligible Ollama candidates until that trust boundary can be proven.
 
 Every context request is capped by both the model catalog maximum and the helper-wide maximum. A GPU-intensive workload forces quick effort and the smallest safe tier. Current dedicated-VRAM and Windows memory/commit pressure can still refuse the review immediately before generation.
 
@@ -47,6 +47,6 @@ Use one coherent objective per model context. Checkpoint useful work between unr
 
 ## Provider boundary
 
-Ollama and LM Studio use separate verified loopback adapters and one shared cross-process GPU lease. Before Ollama generation, the helper accepts either an empty runtime or exactly one running model that matches both its current ownership marker and the requested route. Any untracked CPU-only, GPU-resident, additional, mismatched, or same-name model is foreign, causes `FOREIGN_MODEL_LOADED`, and is never unloaded. A stale or malformed ownership marker also fails closed. Cleanup and the Pause, Disable, and Release controls unload only a currently running model proven by that marker; the configured model name alone is never ownership evidence.
+Before Ollama generation, the helper accepts either an empty runtime or exactly one running model that matches both its current ownership marker and the requested route. Any untracked CPU-only, GPU-resident, additional, mismatched, or same-name model is foreign, causes `FOREIGN_MODEL_LOADED`, and is never unloaded. A stale or malformed ownership marker also fails closed. Generation uses `keep_alive=0s`; cleanup and the Pause, Disable, and Release controls only observe release and never issue a separate unload by mutable model name.
 
-LM Studio is opt-in per exact GGUF: the helper binds the model key, local file, size, full SHA-256, validation result, and provider identity. It refuses to replace a model already loaded by the user, explicitly loads only its selected instance, requests bounded reasoning-off generation, and verifies that exact instance is unloaded afterward. Automatic fallback never assigns an LM Studio directory to `OLLAMA_MODELS`.
+The LM Studio adapter remains present for future hardening, but registration, pinned routing, and automatic routing are disabled in beta.12. Automatic fallback never assigns an LM Studio directory to `OLLAMA_MODELS`.

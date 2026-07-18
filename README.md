@@ -1,10 +1,10 @@
 # Codex GPU Thalen Helper
 
-Use a hardware-appropriate local Ollama or explicitly registered LM Studio model as an optional, bounded, read-only GPU reviewer for Codex on Windows.
+Use a hardware-appropriate local Ollama model as an optional, bounded, read-only GPU reviewer for Codex on Windows.
 
 > **Independent community project:** This project is not made, endorsed, or supported by OpenAI or Ollama. Codex, ChatGPT, OpenAI, Ollama, Qwen, NVIDIA, AMD, and Intel are trademarks or names of their respective owners.
 
-Codex GPU Thalen Helper keeps Codex as the primary agent. It adds a local stdio MCP server named `local_gpu_reviewer`, which accepts only text Codex explicitly supplies and sends bounded requests to a verified loopback provider. Ollama is the default; LM Studio is opt-in for exact audited GGUF registrations. The local result is untrusted advice; Codex still orchestrates, verifies, integrates, and makes final decisions.
+Codex GPU Thalen Helper keeps Codex as the primary agent. It adds a local stdio MCP server named `local_gpu_reviewer`, which accepts only text Codex explicitly supplies and sends bounded requests to a verified loopback Ollama provider. The local result is untrusted advice; Codex still orchestrates, verifies, integrates, and makes final decisions. The LM Studio adapter remains experimental and is not routable in beta.12 because the current loopback inventory cannot prove which absolute GGUF file a model key will load.
 
 The helper does not replace Codex's OpenAI model, bypass Codex limits, or guarantee lower costs, reduced credits, less OpenAI usage, faster work, or better results. Small local models have sharply limited reasoning and code-review ability.
 
@@ -28,7 +28,7 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 - A self-contained stdio MCP server (`local-gpu-reviewer.exe`).
 - Dynamic Windows, CPU, RAM, GPU, driver, VRAM, and storage detection.
 - A versioned, audited Ollama model catalog and conservative selector.
-- Optional exact-digest LM Studio registration with provider-aware automatic routing, reasoning-off calls, and verified unload.
+- Fail-closed LM Studio boundary: registration and routing remain disabled until a loaded model key can be bound to the exact audited local file.
 - Preservation-first, backed-up, idempotent merging of `config.toml` and `AGENTS.override.md`.
 - A sanitized reusable reliability baseline that is installed only through an explicit opt-in preview.
 - A sanitized post-install Codex handoff that guides read-only discovery, consented setup, and verification on a new computer.
@@ -110,7 +110,7 @@ Approximate catalog tiers are conservative guardrails, not guarantees:
 
 Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models with a current exact-digest validation pass on that installation; shared graphics memory is never counted as dedicated VRAM. Validation stores only bounded timing/acceleration evidence and never prompts or responses. Guided setup keeps the user-confirmed tag and stops safely if validation fails; it never downloads a different fallback model without a new selection.
 
-Before Ollama review or validation, the helper checks runtime ownership inside its shared inference lease. An empty runtime may be claimed for the bounded operation. A loaded runtime is accepted only when exactly one running model matches both the current helper ownership marker and the requested route. CPU-only models, GPU models, and same-name models without that proof are treated as foreign and left untouched. Pause, disable, release, and validation cleanup never fall back to unloading the configured model merely by name.
+Before Ollama review or validation, the helper checks runtime ownership inside its shared inference lease. An empty runtime may be claimed for the bounded operation. A loaded runtime is accepted only when exactly one running model matches both the current helper ownership marker and the requested route. CPU-only models, GPU models, and same-name models without that proof are treated as foreign and left untouched. Generation uses `keep_alive=0s` by default and verifies that the runtime releases afterward. Pause, disable, release, validation, and uninstall never issue a separate unload or deletion request by mutable model name.
 
 Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), [docs/task-aware-routing.md](docs/task-aware-routing.md), and the auditable [model catalog](model-catalog/models.v1.json).
 
@@ -120,13 +120,13 @@ Automatic storage selection uses only suitable non-removable local volumes. An e
 
 Setup ranks suitable fixed local NVMe, SSD, unknown fixed media, then HDD with a warning. Removable and network drives are never auto-selected. Space calculations include temporary overhead and a safety reserve, with extra protection for the Windows system volume.
 
-The selected path is stored in product state and persisted as the current user's `OLLAMA_MODELS`. If the path changes, setup unloads active Ollama models, safely restarts Ollama once, and refuses to enable the reviewer unless the selected model manifest is present under that exact directory and the loopback API returns the selected tag.
+The selected path is stored in product state and persisted as the current user's `OLLAMA_MODELS`. If the path changes while Ollama is running, setup refuses to stop or unload the shared provider and asks the user to close Ollama before retrying. Once the provider is stopped, setup may start exactly one loopback process with the new path and refuses to enable the reviewer unless the selected model manifest is present under that exact directory and the loopback API returns the selected tag.
 
 The managed MCP entry explicitly whitelists the current user's `OLLAMA_MODELS` value through Codex's `env_vars` setting. After a fresh Codex restart, the MCP process requires that forwarded value to match product state. It checks the path and manifest before contacting Ollama and again immediately before generation, alongside the selected tag/digest and listener checks.
 
 `thalen-helper models move <directory> --yes` copies every model file, verifies size and SHA-256, activates and runtime-checks the new directory, then removes the old copy. Failure rolls back the path and preserves the source.
 
-`thalen-helper models activate <directory> --yes` is the non-destructive path for a pre-copied model store. It requires an exact path, size, metadata, and SHA-256 match, runtime-checks the new directory, refuses to unload a foreign model, and always preserves the old directory.
+`thalen-helper models activate <directory> --yes` is the non-destructive path for a pre-copied model store. It requires an exact path, size, metadata, and SHA-256 match, requires the shared Ollama process to be stopped before rebinding, runtime-checks the new directory, and always preserves the old directory.
 
 If Windows or the CLI exits during activation, the durable transition marker keeps local review paused. `thalen-helper models recover --yes` re-verifies both trees and restores the original path without deleting either copy.
 
@@ -174,7 +174,7 @@ thalen-helper update [--yes]
 thalen-helper uninstall --yes [--remove-owned-model]
 ```
 
-`pause` is temporary: it rejects new calls, cancels an active helper generation when possible, and unloads only a currently tracked helper-owned model while leaving the Codex MCP entry configured. `resume` verifies safety and allows calls again without preloading the model. `disable` persistently turns off the helper-owned MCP entry and may require a Codex restart to remove its tools from the current session; `enable` persistently turns it back on after safety checks. `release-gpu` only unloads a currently tracked helper-owned model and leaves future reviews allowed. All three controls preserve untracked Ollama models even when their names match the saved selection.
+`pause` is temporary: it rejects new calls and cancels an active helper generation when possible while leaving the Codex MCP entry configured. `resume` verifies safety and allows calls again without preloading a model. `disable` persistently turns off the helper-owned MCP entry and may require a Codex restart to remove its tools from the current session; `enable` persistently turns it back on after safety checks. `release-gpu` requests cancellation and waits for a tracked zero-keep-alive review to release. These controls never force-unload a tag by name; they report an unconfirmed release if the provider does not release it safely.
 
 Local generation is single-flight through a named per-user Windows semaphore shared by every Codex chat. A review skips immediately by default when busy, or may request a bounded queue of at most 120 seconds. Immediately before generation, the helper refuses optional work when measured dedicated VRAM, physical memory, or Windows commit reserve is unsafe. Low-impact mode unloads immediately; bounded idle keep-alive is opt-in.
 
@@ -197,7 +197,7 @@ thalen-helper doctor
 thalen-helper ollama verify
 ```
 
-See [docs/troubleshooting.md](docs/troubleshooting.md). Uninstall from Windows Settings or run `thalen-helper uninstall --yes`. The uninstaller removes only product-owned MCP/instruction sections, startup entry, state, shortcuts, and binaries. It preserves Codex authentication, unrelated settings, pre-existing Ollama, and pre-existing models. A helper-downloaded model is deleted only with explicit `--remove-owned-model` consent. See [docs/uninstall.md](docs/uninstall.md).
+See [docs/troubleshooting.md](docs/troubleshooting.md). Uninstall from Windows Settings or run `thalen-helper uninstall --yes`. The uninstaller removes only product-owned MCP/instruction sections, startup entry, state, shortcuts, and binaries. It preserves Codex authentication, unrelated settings, Ollama, and all model data. The legacy `--remove-owned-model` switch is accepted for compatibility but beta.12 does not delete a mutable model tag. See [docs/uninstall.md](docs/uninstall.md).
 
 ## Build from source
 

@@ -452,10 +452,10 @@ internal static class CliApplication
         }
         if (!parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "LM Studio validation loads the selected model for two bounded tests. Add --yes to continue.");
+            return Fail("CONFIRMATION_REQUIRED", "LM Studio registration is fail-closed in beta.12 and --yes only authorizes clearing stale registration evidence before returning the binding-unavailable result.");
         }
 
-        Console.Error.WriteLine($"Integration: {ProductInfo.IntegrationName} | Provider: {ModelProviders.LmStudio} | Model: {parsed.Positionals[2]} | Purpose: exact-output and bounded review validation");
+        Console.Error.WriteLine($"Integration: {ProductInfo.IntegrationName} | Provider: {ModelProviders.LmStudio} | Model: {parsed.Positionals[2]} | Purpose: fail-closed exact-file binding check; no inference");
         using var client = new LmStudioClient();
         var result = await new LmStudioRegistrationService(paths, store, client)
             .ValidateAndEnableAsync(parsed.Positionals[2], parsed.Positionals[3]).ConfigureAwait(false);
@@ -478,7 +478,7 @@ internal static class CliApplication
     {
         if (!parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "Use uninstall --yes. Add --remove-owned-model only to remove a model downloaded by this helper.");
+            return Fail("CONFIRMATION_REQUIRED", "Use uninstall --yes. Model data is always preserved; --remove-owned-model is accepted only for backward compatibility.");
         }
 
         var result = await new UninstallManager(paths, store)

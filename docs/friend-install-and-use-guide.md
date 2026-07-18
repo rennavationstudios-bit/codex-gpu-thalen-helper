@@ -43,11 +43,11 @@ Passive status never runs a model. **Test local review** is the explicit action 
 
 ## Controls
 
-- **Pause reviews** temporarily blocks helper reviews and unloads only a model currently tracked as helper-owned.
+- **Pause reviews** temporarily blocks helper reviews, requests cancellation, and waits for a tracked zero-keep-alive review to release. It never force-unloads a model tag.
 - **Resume reviews** repeats safety verification and allows reviews without preloading the model.
 - **Enable integration** persistently enables the helper-owned Codex MCP entry after safety checks.
 - **Disable integration** persistently disables that entry; restart Codex if its tools remain visible in the current session.
-- **Release GPU** unloads only a model currently tracked as helper-owned without blocking a future review. An untracked Ollama model is left alone.
+- **Release GPU** requests cancellation and waits for a tracked zero-keep-alive review to release without blocking future reviews. It reports an unconfirmed release rather than force-unloading a mutable model tag.
 - **Low impact** unloads immediately after each response and is recommended during emulator, Expo, graphics, or device work.
 - **Keep warm** retains the model for a bounded idle period when hardware headroom permits.
 - **Auto model** lets each Codex task passively choose the safest installed audited Q4 model for its task type, size, and current hardware headroom. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.
@@ -58,7 +58,7 @@ The helper does not control Codex or its cloud model. It offers Codex three opti
 
 Setup never silently downloads a model. A missing model can be downloaded only after a named model choice and confirmation. A user with existing models can point setup to that Ollama model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables review.
 
-Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models that have passed this installation's exact-digest validation. A missing or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. Models that exist only in LM Studio, including Qwythos or Qwen3.6 files, are not silently used by the current Ollama reviewer; a future provider adapter must first meet the same loopback, process-trust, locking, pressure, validation, and unload rules.
+Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models that passed this installation's exact-identity validation. A missing or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. LM Studio enrollment is disabled in beta.12 because the current inventory API cannot prove the exact GGUF file behind a loaded key.
 
 When automatic startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before local review works.
 

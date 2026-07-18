@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Net;
 using ThalenHelper.Core;
 
 namespace ThalenHelper.Tests;
@@ -55,6 +56,37 @@ public sealed class ModelValidationStoreTests
 
         var remaining = Assert.Single((await store.LoadAsync()).Entries);
         Assert.Equal("two:1b", remaining.Tag);
+    }
+
+    [Fact]
+    public async Task LmStudioValidationAttemptRemovesPriorPassBeforePathValidation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var catalog = new ModelCatalogService().LoadBundled().Models.Single(model =>
+            string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.Ordinal));
+        var validationStore = new ModelValidationStore(paths.StateDirectory);
+        await validationStore.UpsertAsync(Entry(catalog.Tag, catalog.ExpectedDigest!) with
+        {
+            Provider = ModelProviders.LmStudio
+        });
+        await validationStore.UpsertAsync(Entry("qwen3:8b", new string('b', 64)));
+        var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(
+            FakeHttpMessageHandler.Json("{}", HttpStatusCode.InternalServerError)));
+        using var client = new LmStudioClient(
+            new Uri("http://127.0.0.1:1234"),
+            new HttpClient(handler));
+        var service = new LmStudioRegistrationService(paths, new StateStore(paths.StateFile), client);
+
+        var result = await service.ValidateAndEnableAsync(
+            catalog.Tag,
+            Path.Combine(temporary.Path, "unrelated.gguf"));
+
+        Assert.False(result.Success);
+        Assert.Equal("LMSTUDIO_EXACT_FILE_BINDING_UNAVAILABLE", result.Code);
+        var remaining = Assert.Single((await validationStore.LoadAsync()).Entries);
+        Assert.Equal(ModelProviders.Ollama, remaining.Provider);
+        Assert.Empty(handler.Requests);
     }
 
     private static ModelValidationEntry Entry(string tag, string digest)

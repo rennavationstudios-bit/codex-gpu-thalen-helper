@@ -650,7 +650,7 @@ public sealed class OllamaAndReviewerTests
 
         Assert.False(result.Success);
         Assert.Equal("GPU_MEMORY_PRESSURE", result.Code);
-        Assert.Equal(["/api/tags", "/api/ps", "/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.Equal(["/api/tags", "/api/ps"], handler.Requests.Select(request => request.Path));
         Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
     }
 
@@ -716,7 +716,7 @@ public sealed class OllamaAndReviewerTests
         using var temporary = new TemporaryDirectory();
         var validations = new ModelValidationStore(temporary.Path);
         var tracker = new ActiveModelTracker(temporary.Path);
-        tracker.Set("qwen2.5-coder:1.5b");
+        tracker.Set("qwen2.5-coder:1.5b", FullDigest("d7372fd82851"));
         var loaded = true;
         var unloads = 0;
         var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
@@ -730,7 +730,7 @@ public sealed class OllamaAndReviewerTests
             if (path == "/api/ps")
             {
                 return FakeHttpMessageHandler.Json(loaded
-                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}]}"
+                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size_vram\":4000000000,\"context_length\":2048}]}"
                     : "{\"models\":[]}");
             }
 
@@ -740,14 +740,18 @@ public sealed class OllamaAndReviewerTests
                 using var document = JsonDocument.Parse(body);
                 if (!document.RootElement.TryGetProperty("prompt", out var prompt))
                 {
-                    loaded = false;
-                    unloads++;
                     return FakeHttpMessageHandler.Json("{}");
                 }
 
                 var response = prompt.GetString()!.Contains("THALEN_HELPER_OK", StringComparison.Ordinal)
                     ? "THALEN_HELPER_OK"
                     : "OFF_BY_ONE";
+                if (document.RootElement.TryGetProperty("keep_alive", out var keepAlive)
+                    && string.Equals(keepAlive.GetString(), "0s", StringComparison.Ordinal))
+                {
+                    loaded = false;
+                    unloads++;
+                }
                 return FakeHttpMessageHandler.Json($"{{\"model\":\"qwen2.5-coder:1.5b\",\"response\":\"{response}\",\"done\":true}}");
             }
 
@@ -762,9 +766,53 @@ public sealed class OllamaAndReviewerTests
         var result = await manager.ValidateSelectedModelForTestingAsync(ValidationState());
 
         Assert.True(result.Success, result.Message);
-        Assert.Equal(1, unloads);
+        Assert.Equal(2, unloads);
         Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
         Assert.Single((await validations.LoadAsync()).Entries);
+    }
+
+    [Fact]
+    public void RuntimeOwnershipRejectsTrackedSameNameWithDifferentDigest()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        tracker.Set("qwen2.5-coder:1.5b", FullDigest("d7372fd82851"));
+
+        var result = OllamaRuntimeOwnership.Inspect(
+            [new OllamaRunningModel(
+                "qwen2.5-coder:1.5b",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                100,
+                0,
+                2048,
+                null)],
+            tracker.Inspect(),
+            "qwen2.5-coder:1.5b");
+
+        Assert.False(result.Allowed);
+        Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.Code);
+    }
+
+    [Fact]
+    public void RuntimeOwnershipRejectsLegacyNameOnlyTracker()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        tracker.Set("qwen2.5-coder:1.5b");
+
+        var result = OllamaRuntimeOwnership.Inspect(
+            [new OllamaRunningModel(
+                "qwen2.5-coder:1.5b",
+                "sha256:d7372fd828510000000000000000000000000000000000000000000000000000",
+                100,
+                4_000_000_000,
+                2048,
+                null)],
+            tracker.Inspect(),
+            "qwen2.5-coder:1.5b");
+
+        Assert.False(result.Allowed);
+        Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.Code);
     }
 
     [Fact]
@@ -857,24 +905,29 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
-    public async Task AutomaticLmStudioPlanUsesRegisteredFileIdentityInsteadOfOllamaManifestValidation()
+    public async Task AutomaticLmStudioPlanFailsClosedUntilLoadedKeyCanBindToExactFile()
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
         var store = new StateStore(paths.StateFile);
         var catalog = new ModelCatalogService().LoadBundled();
         var model = catalog.Models.Single(item => item.Provider == ModelProviders.LmStudio);
-        var modelPath = Path.Combine(temporary.Path, "Qwythos.fixture.gguf");
+        var modelPath = Path.Combine(
+            temporary.Path,
+            Path.Combine(model.IndexedModelPath!.Split('/')));
+        Directory.CreateDirectory(Path.GetDirectoryName(modelPath)!);
         await File.WriteAllTextAsync(modelPath, "validated fixture identity");
-        var modelInfo = new FileInfo(modelPath);
+        Assert.True(LmStudioModelFileBinding.TryOpen(modelPath, out var modelStream, out var modelProof));
+        modelStream.Dispose();
         var registration = new LocalModelRegistration(
             ModelProviders.LmStudio,
             model.Tag,
             model.ExpectedDigest!,
             modelPath,
             DateTimeOffset.UtcNow,
-            modelInfo.Length,
-            new DateTimeOffset(modelInfo.LastWriteTimeUtc, TimeSpan.Zero));
+            modelProof.Length,
+            modelProof.LastWriteTimeUtc,
+            modelProof.FileIdentity);
         await store.SaveAsync(new InstallationState
         {
             SelectedModel = "qwen3:14b",
@@ -923,9 +976,9 @@ public sealed class OllamaAndReviewerTests
             TaskKind: ReviewTaskKind.DiffReview,
             Effort: ReviewEffort.Standard));
 
-        Assert.True(plan.Allowed, plan.ErrorMessage);
-        Assert.Equal(ModelProviders.LmStudio, plan.Provider);
-        Assert.Equal(model.Tag, plan.Model);
+        Assert.False(plan.Allowed);
+        Assert.Equal("MODEL_ROUTE_UNAVAILABLE", plan.ErrorCode);
+        Assert.Contains("No installed, validated, audited", plan.ErrorMessage, StringComparison.Ordinal);
         Assert.False(plan.ModelRan);
         Assert.DoesNotContain(ollamaHandler.Requests, request => request.Path == "/api/generate");
         Assert.DoesNotContain(lmHandler.Requests, request => request.Path.Contains("chat", StringComparison.Ordinal));
@@ -983,7 +1036,7 @@ public sealed class OllamaAndReviewerTests
             {
                 psCalls++;
                 return FakeHttpMessageHandler.Json(psCalls is 2 or 3 or 4
-                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}] }"
+                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size_vram\":4000000000,\"context_length\":2048}] }"
                     : "{\"models\":[]}");
             }
 
@@ -1017,8 +1070,8 @@ public sealed class OllamaAndReviewerTests
         var result = await manager.ValidateSelectedModelForTestingAsync(state);
 
         Assert.True(result.Success, result.Message);
-        Assert.Equal(3, leaseBlockedAtEveryGenerate);
-        Assert.Equal(5, psCalls);
+        Assert.Equal(2, leaseBlockedAtEveryGenerate);
+        Assert.Equal(8, psCalls);
         var entry = Assert.Single((await validations.LoadAsync()).Entries);
         Assert.Equal(state.SelectedModel, entry.Tag);
         Assert.Equal("d7372fd828510000000000000000000000000000000000000000000000000000", entry.Digest);
@@ -1044,7 +1097,7 @@ public sealed class OllamaAndReviewerTests
                 psCalls++;
                 var loaded = psCalls is >= 2 and <= 5;
                 return FakeHttpMessageHandler.Json(loaded
-                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"size_vram\":4000000000,\"context_length\":2048}] }"
+                    ? "{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size_vram\":4000000000,\"context_length\":2048}] }"
                     : "{\"models\":[]}");
             }
 
@@ -1071,7 +1124,7 @@ public sealed class OllamaAndReviewerTests
         var result = await manager.ValidateSelectedModelForTestingAsync(ValidationState());
 
         Assert.True(result.Success, result.Message);
-        Assert.Equal(6, psCalls);
+        Assert.Equal(9, psCalls);
         Assert.Single((await validations.LoadAsync()).Entries);
     }
 
@@ -1217,7 +1270,7 @@ public sealed class OllamaAndReviewerTests
         var tracker = new ActiveModelTracker(paths.StateDirectory);
         if (trackSelectedModel)
         {
-            tracker.Set(state.SelectedModel!);
+            tracker.Set(state.SelectedModel!, FullDigest("d7372fd82851"));
         }
 
         var runningJson = runningModel is null
@@ -1270,7 +1323,7 @@ public sealed class OllamaAndReviewerTests
         var tracker = new ActiveModelTracker(temporary.Path);
         if (trackSelectedModel)
         {
-            tracker.Set("qwen2.5-coder:1.5b");
+            tracker.Set("qwen2.5-coder:1.5b", FullDigest("d7372fd82851"));
         }
 
         var runningJson = runningModel is null
@@ -1300,7 +1353,7 @@ public sealed class OllamaAndReviewerTests
         Assert.False(result.Success);
         Assert.Equal(OllamaRuntimeOwnership.ForeignModelCode, result.Code);
         Assert.Equal(0, pressureChecks);
-        Assert.Equal(["/api/tags", "/api/ps", "/api/ps"], handler.Requests.Select(request => request.Path));
+        Assert.Equal(["/api/tags", "/api/ps"], handler.Requests.Select(request => request.Path));
         Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/generate");
         Assert.Equal(
             trackSelectedModel ? ActiveModelTrackerStatus.Valid : ActiveModelTrackerStatus.Absent,
@@ -1326,6 +1379,9 @@ public sealed class OllamaAndReviewerTests
             "GPU",
             1024,
             2048);
+
+    private static string FullDigest(string prefix)
+        => prefix + new string('0', 64 - prefix.Length);
 
     private static InstallationState ValidationState()
         => new()

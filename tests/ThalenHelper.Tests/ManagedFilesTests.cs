@@ -145,7 +145,7 @@ public sealed class ManagedFilesTests
     [InlineData("env_vars = [\"OTHER\"]")]
     [InlineData("env_vars = [\"OLLAMA_MODELS\", \"OTHER\"]")]
     [InlineData("env_vars = [\"OLLAMA_MODELS\", \"OLLAMA_MODELS\"]")]
-    public void CodexConfigRejectsAnIncorrectOllamaModelsEnvironmentWhitelist(string replacement)
+    public void CodexConfigPreservesAndRefusesAnIncorrectOllamaModelsEnvironmentWhitelist(string replacement)
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
@@ -157,17 +157,82 @@ public sealed class ManagedFilesTests
             current.Replace("env_vars = [\"OLLAMA_MODELS\"]", replacement, StringComparison.Ordinal),
             new UTF8Encoding(false));
 
+        var before = File.ReadAllBytes(paths.CodexConfigFile);
         Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
-        var preview = manager.PreviewInstall(paths, enabled: true);
-        Assert.True(preview.Changed);
-        var repaired = manager.InstallOrRepair(
-            paths,
-            enabled: true,
-            expectedSourceSha256: preview.SourceSha256,
-            expectedPlannedSha256: preview.PlannedSha256);
-        Assert.True(repaired.Changed);
-        Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
-        Assert.Equal(1, Count(File.ReadAllText(paths.CodexConfigFile), "env_vars = [\"OLLAMA_MODELS\"]"));
+        Assert.Throws<InvalidOperationException>(() => manager.PreviewInstall(paths, enabled: true));
+        Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
+    }
+
+    [Fact]
+    public void ManagedReviewerPreservesButRefusesUnknownEnvironmentEntries()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: true);
+        var withCustomEnvironment = File.ReadAllText(paths.CodexConfigFile).Replace(
+            "OLLAMA_HOST = \"http://127.0.0.1:11434\"",
+            "OLLAMA_HOST = \"http://127.0.0.1:11434\", CUSTOM_ENV = \"keep\"",
+            StringComparison.Ordinal);
+        File.WriteAllText(paths.CodexConfigFile, withCustomEnvironment, new UTF8Encoding(false));
+
+        var before = File.ReadAllBytes(paths.CodexConfigFile);
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        var exception = Assert.Throws<InvalidOperationException>(() => manager.PreviewInstall(paths, enabled: true));
+        Assert.Contains("unapproved environment entry", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
+        Assert.Contains("CUSTOM_ENV = \"keep\"", File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("DOTNET_STARTUP_HOOKS")]
+    [InlineData("COR_ENABLE_PROFILING")]
+    [InlineData("CORECLR_ENABLE_PROFILING")]
+    [InlineData("COR_PROFILER")]
+    [InlineData("COR_PROFILER_PATH_64")]
+    [InlineData("CORECLR_PROFILER")]
+    [InlineData("CORECLR_PROFILER_PATH_32")]
+    [InlineData("DOTNET_ENABLE_PROFILING")]
+    [InlineData("DOTNET_PROFILER_PATH_ARM64")]
+    [InlineData("DOTNET_DiagnosticPorts")]
+    [InlineData("DOTNET_GCPath")]
+    [InlineData("DOTNET_GCName")]
+    [InlineData("DOTNET_JitName")]
+    public void ManagedReviewerRefusesRuntimeInjectionEnvironmentEntries(string name)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: true);
+        var dangerous = File.ReadAllText(paths.CodexConfigFile).Replace(
+            "OLLAMA_HOST = \"http://127.0.0.1:11434\"",
+            $"OLLAMA_HOST = \"http://127.0.0.1:11434\", {name} = \"injected\"",
+            StringComparison.Ordinal);
+        File.WriteAllText(paths.CodexConfigFile, dangerous, new UTF8Encoding(false));
+        var before = File.ReadAllBytes(paths.CodexConfigFile);
+
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        var exception = Assert.Throws<InvalidOperationException>(() => manager.PreviewInstall(paths, enabled: true));
+        Assert.Contains("unapproved environment entry", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
+    }
+
+    [Fact]
+    public void ManagedReviewerRefusesRuntimeInjectionEnvironmentImport()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: true);
+        var dangerous = File.ReadAllText(paths.CodexConfigFile).Replace(
+            "env_vars = [\"OLLAMA_MODELS\"]",
+            "env_vars = [\"OLLAMA_MODELS\", \"DOTNET_STARTUP_HOOKS\"]",
+            StringComparison.Ordinal);
+        File.WriteAllText(paths.CodexConfigFile, dangerous, new UTF8Encoding(false));
+
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        Assert.Throws<InvalidOperationException>(() => manager.PreviewInstall(paths, enabled: true));
+        Assert.Equal(dangerous, File.ReadAllText(paths.CodexConfigFile));
     }
 
     [Fact]

@@ -201,18 +201,6 @@ public sealed partial class OllamaClient : IDisposable
         }
     }
 
-    public async Task UnloadAsync(string model, CancellationToken cancellationToken = default)
-    {
-        ValidateModelIdentifier(model);
-        var payload = new { model, keep_alive = 0, stream = false };
-        using var response = await SendJsonAsync(
-            HttpMethod.Post,
-            "/api/generate",
-            payload,
-            TimeSpan.FromSeconds(30),
-            cancellationToken).ConfigureAwait(false);
-    }
-
     public async Task PullAsync(string model, CancellationToken cancellationToken = default)
     {
         ValidateModelIdentifier(model);
@@ -229,17 +217,6 @@ public sealed partial class OllamaClient : IDisposable
         {
             throw new OllamaException("MODEL_PULL_FAILED", "Ollama did not report a successful model download.");
         }
-    }
-
-    public async Task DeleteAsync(string model, CancellationToken cancellationToken = default)
-    {
-        ValidateModelIdentifier(model);
-        using var response = await SendJsonAsync(
-            HttpMethod.Delete,
-            "/api/delete",
-            new { model },
-            TimeSpan.FromMinutes(2),
-            cancellationToken).ConfigureAwait(false);
     }
 
     public void Dispose()

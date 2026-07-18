@@ -13,7 +13,7 @@ These checks call inventory/runtime endpoints only and do not run model inferenc
 
 The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads and loads no model, so the dashboard reports that model setup is still required. Choose **Choose model** to point to an existing Ollama model folder or explicitly approve a download and bounded validation.
 
-Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** unloads only a currently tracked helper-owned model and never an untracked model merely because its name matches the configured selection.
+Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** requests cancellation and waits for zero-keep-alive release. It never force-unloads a mutable model tag and reports `GPU_RELEASE_UNCONFIRMED` when release cannot be proven.
 
 ## The Control Center says no model is loaded
 
@@ -39,13 +39,15 @@ Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROC
 
 `MODEL_STORAGE_TRANSITION_PENDING` means activation stopped after writing its crash-recovery marker. Keep both model directories unchanged and run `thalen-helper models recover --yes`; ordinary repair, enable, and resume remain blocked until recovery verifies and clears the marker.
 
+`OLLAMA_RESTART_REQUIRED` during setup, repair, move, activation, or recovery means `OLLAMA_MODELS` must change while a shared Ollama process is still running. The helper deliberately does not stop it or unload its models. Close Ollama normally, confirm no Ollama process remains, and retry the same command; do not kill an active generation.
+
 ## Network exposure warning
 
 Stop Ollama immediately if `OLLAMA_NETWORK_EXPOSURE` or **EXTERNAL RISK** appears. Remove any wildcard/LAN `OLLAMA_HOST` setting and firewall forwarding, set the user host to `127.0.0.1:11434`, restart Ollama, and rerun verification. The helper remains disabled until loopback-only status passes. An external reviewer remains outside packaged control even after its listener is corrected.
 
 ## GPU is needed by another application
 
-Use `thalen-helper pause` for immediate call blocking/cancellation plus unload, or `thalen-helper release-gpu` to unload without persistent disable. Leave keep-warm off and low-impact on.
+Use `thalen-helper pause` for immediate call blocking/cancellation, or `thalen-helper release-gpu` to request and observe release without persistent disable. Leave keep-warm off and low-impact on.
 
 ## Model validation fails
 

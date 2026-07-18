@@ -4,6 +4,14 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.12 - 2026-07-18
+
+- Removed name-based Ollama unload and deletion calls. Reviews and validation request `keep_alive=0s`, then observe release; pause, disable, release, and uninstall never target a mutable model tag destructively.
+- Closed provider-restart races so setup, repair, move, activation, recovery, and repair rollback never stop a shared Ollama process while changing `OLLAMA_MODELS`.
+- Temporarily disabled LM Studio registration and routing because its loopback inventory does not expose the absolute file behind a loaded model key. Prior validation is invalidated and no inference runs rather than claiming an unprovable file binding.
+- Restricted helper-managed MCP environment settings to the exact product allowlist. Unknown `env` or `env_vars` entries are preserved byte-for-byte and require explicit review instead of automatic repair.
+- Made repair precompute its exact startup/environment write set, restore only those values on failure, and preserve concurrent edits.
+
 ## 0.1.0-beta.11 - 2026-07-17
 
 - Added `OLLAMA_MODELS` to the managed Codex MCP `env_vars` whitelist so restarted stdio reviewer processes receive the helper-verified per-user model-store path.

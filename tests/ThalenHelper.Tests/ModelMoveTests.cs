@@ -20,6 +20,7 @@ public sealed class ModelMoveTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -85,6 +86,7 @@ public sealed class ModelMoveTests
                 mutationsAtDrift = platform.MutationCount;
             }
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -103,8 +105,8 @@ public sealed class ModelMoveTests
         Assert.True(platform.MutationCount > mutationsBeforeMove);
         Assert.NotNull(mutationsAtDrift);
         Assert.Equal(platform.StopCount, platform.MutationCount - mutationsAtDrift!.Value);
-        Assert.Equal(0, platform.StartCount);
-        Assert.Equal(1, platform.StopCount);
+        Assert.Equal(1, platform.StartCount);
+        Assert.Equal(0, platform.StopCount);
         Assert.True(File.Exists(Path.Combine(source, "blobs", "sha256-original")));
         Assert.True(File.Exists(Path.Combine(destination, "blobs", "sha256-original")));
         var saved = await store.LoadAsync();
@@ -129,6 +131,7 @@ public sealed class ModelMoveTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -172,6 +175,7 @@ public sealed class ModelMoveTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -209,6 +213,7 @@ public sealed class ModelMoveTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -272,6 +277,7 @@ public sealed class ModelMoveTests
             LoopbackOnly = true,
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe")
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -337,6 +343,7 @@ public sealed class ModelMoveTests
             if (Directory.Exists(destination) && !File.Exists(concurrentDestinationFile))
             {
                 File.WriteAllText(concurrentDestinationFile, "do not delete");
+                DriftManagedConfig(paths);
             }
         };
         var platform = new FakeStartupPlatform
@@ -345,6 +352,7 @@ public sealed class ModelMoveTests
             Executable = Path.Combine(temporary.Path, "Ollama", "ollama.exe"),
             StopSucceeds = false
         };
+        runtime.EndpointAvailable = () => platform.ProcessRunning;
         var autoStart = new OllamaAutoStartManager(runtime.CreateClient, platform);
         var state = CreateState(source);
         autoStart.Configure(paths, state, enabled: true);
@@ -354,8 +362,10 @@ public sealed class ModelMoveTests
         var control = new ControlService(paths, store, runtime.CreateClient, autoStart: autoStart);
         var service = new ModelsMoveService(paths, store, control, autoStart, (_, _) => { });
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => service.MoveAsync(destination));
+        var result = await service.MoveAsync(destination);
 
+        Assert.False(result.Success);
+        Assert.Equal("INTEGRATION_OWNERSHIP_DRIFT", result.Code);
         Assert.True(File.Exists(concurrentDestinationFile));
         Assert.True(Directory.Exists(destination));
         Assert.True(Directory.Exists(source));

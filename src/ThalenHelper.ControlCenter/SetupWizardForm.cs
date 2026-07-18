@@ -290,7 +290,7 @@ public sealed class SetupWizardForm : Form
         };
         var help = _page switch
         {
-            3 when _useModelNow.Checked => "Shows a final named confirmation, then lets Ollama verify or acquire only that selected model, validates it, and unloads it.",
+            3 when _useModelNow.Checked => "Shows a final named confirmation, then lets Ollama verify or acquire only that selected model, validates it with zero keep-alive, and verifies release.",
             3 => "Applies the reviewed managed settings without downloading or loading a model. Local review remains disabled until model setup is completed.",
             4 => "Closes setup and returns to the dashboard.",
             _ => "Continues to the next setup step without applying changes."
@@ -332,7 +332,7 @@ public sealed class SetupWizardForm : Form
                 : "No matching manifest was found in the selected folder.";
             var action = $"Selected model: {selectedModel.Tag} (about {FormatGiB(selectedModel.ExpectedDownloadBytes)}).\n\n"
                 + $"{manifestHint} Ollama may repair or download this same selected model if its inventory is missing or inconsistent. "
-                + "Setup will not switch to or download a different fallback model. It will validate the selected model locally and unload it when finished.";
+                + "Setup will not switch to or download a different fallback model. It will validate the selected model locally with zero keep-alive and verify release when finished.";
             var confirmation = MessageBox.Show(
                 this,
                 action + "\n\nContinue?",
@@ -356,7 +356,7 @@ public sealed class SetupWizardForm : Form
             var pullAndValidate = _useModelNow.Checked;
             if (pullAndValidate && selectedModel is not null)
             {
-                _result.Text = $"Using local_gpu_reviewer with Ollama and {selectedModel.Tag} for bounded validation. This model will be unloaded afterward.";
+                _result.Text = $"Using local_gpu_reviewer with Ollama and {selectedModel.Tag} for bounded validation. Zero keep-alive will be requested and release verified afterward.";
             }
 
             var outcome = await new InstallationManager().ConfigureAsync(

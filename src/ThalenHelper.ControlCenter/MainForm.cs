@@ -254,11 +254,11 @@ public sealed class MainForm : Form
         var left = ActionColumn();
         left.Controls.Add(UiTheme.SectionLabel("REVIEW CONTROLS"));
         var review = ActionFlow();
-        AddActionButton(review, "Pause reviews", "Temporarily rejects new helper-owned reviews, requests cancellation of an active review, and unloads only a model currently tracked as helper-owned. The Codex MCP entry remains configured.", async () => await Control().PauseAsync(), managedOnly: true);
+        AddActionButton(review, "Pause reviews", "Temporarily rejects new helper-owned reviews, requests cancellation, and waits for a tracked zero-keep-alive review to release. It never force-unloads a model tag. The Codex MCP entry remains configured.", async () => await Control().PauseAsync(), managedOnly: true);
         AddActionButton(review, "Resume reviews", "Verifies Ollama, loopback networking, model storage, and model integrity before allowing reviews again. It does not preload the model.", async () => await Control().ResumeAsync(), managedOnly: true);
-        AddActionButton(review, "Release GPU", "Unloads only a model currently tracked as helper-owned without disabling future reviews. Untracked Ollama models are left untouched.", async () => await Control().ReleaseGpuAsync(), managedOnly: true);
+        AddActionButton(review, "Release GPU", "Requests cancellation and waits for a tracked zero-keep-alive review to release without disabling future reviews. It never force-unloads a mutable model tag.", async () => await Control().ReleaseGpuAsync(), managedOnly: true);
         AddActionButton(review, "Enable integration", "Persistently enables the helper-owned Codex MCP entry after safety checks. Restart Codex only if the tools are not already visible.", async () => await Control().EnableAsync(), managedOnly: true);
-        AddActionButton(review, "Disable integration", "Persistently disables the helper-owned MCP entry, cancels helper work, and unloads only its tracked model. Restart Codex to remove the tools from the current session.", async () => await Control().DisableAsync(true), AppButtonStyle.Danger, managedOnly: true);
+        AddActionButton(review, "Disable integration", "Persistently disables the helper-owned MCP entry, cancels helper work, and observes zero-keep-alive release without force-unloading a tag. Restart Codex to remove the tools from the current session.", async () => await Control().DisableAsync(true), AppButtonStyle.Danger, managedOnly: true);
         left.Controls.Add(review);
         left.Controls.Add(UiTheme.SectionLabel("GPU BEHAVIOR"));
         var preferences = ActionFlow();
@@ -270,7 +270,7 @@ public sealed class MainForm : Form
         right.Padding = new Padding(18, 0, 0, 0);
         right.Controls.Add(UiTheme.SectionLabel("MODEL & SETUP"));
         var setup = ActionFlow();
-        AddActionButton(setup, "Test local review", "Runs one small, explicitly confirmed local inference and then unloads the model. This is the only button here that intentionally runs a model.", TestLocalReviewAsync, AppButtonStyle.Primary, managedOnly: true);
+        AddActionButton(setup, "Test local review", "Runs one small, explicitly confirmed local inference with zero keep-alive and verifies release afterward. This is the only button here that intentionally runs a model.", TestLocalReviewAsync, AppButtonStyle.Primary, managedOnly: true);
         _modelRoutingButton = AddActionButton(setup, "Auto model", "Switches between automatic task-aware routing and one pinned model. Automatic mode selects only installed, audited, digest-matching Q4 models after passive hardware checks. Changing this setting never loads a model.", ToggleModelRoutingAsync, managedOnly: true);
         AddActionButton(setup, "Choose model", "Shows hardware-safe supported models. After confirmation, it downloads only when missing, validates locally, and records ownership safely.", ChangeModelAsync, managedOnly: true);
         AddActionButton(setup, "Move model storage", "Moves helper-managed Ollama model files to an empty fixed local folder, verifies every file with SHA-256, and rolls back on failure.", MoveModelsAsync, managedOnly: true);
@@ -456,9 +456,9 @@ public sealed class MainForm : Form
                 _stateBadge.Text = "READY";
                 _heroTitle.Text = "Local review is ready";
                 _heroMessage.Text = health.ModelLoaded
-                    ? "A routed model is reported loaded. Release GPU unloads it only when current helper ownership can be proven."
+                    ? "A routed model is reported loaded. Release GPU requests cancellation and observes release without force-unloading a tag."
                     : "The model stays unloaded until Codex requests a review.";
-                ConfigurePrimary("Pause reviews", async () => await RunControlAsync(() => Control().PauseAsync()), "Pauses new reviews and unloads only a tracked helper-owned model while leaving the MCP entry configured.");
+                ConfigurePrimary("Pause reviews", async () => await RunControlAsync(() => Control().PauseAsync()), "Pauses new reviews, requests cancellation, and observes zero-keep-alive release while leaving the MCP entry configured.");
                 break;
             case HelperAvailability.Paused:
                 StyleBadge(_stateBadge, UiTheme.Warning);
@@ -554,7 +554,7 @@ public sealed class MainForm : Form
 
         if (MessageBox.Show(
             this,
-            $"Run one small local inference with {state.SelectedModel}, verify the response, and unload it afterward?",
+            $"Run one small local inference with {state.SelectedModel}, verify the response, and confirm zero-keep-alive release afterward?",
             "Test local review",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question) != DialogResult.Yes)
@@ -604,7 +604,7 @@ public sealed class MainForm : Form
 
         if (MessageBox.Show(
             this,
-            $"Use {dialog.SelectedModel.Tag}? It will download only if missing, run one bounded local validation, and unload afterward.",
+            $"Use {dialog.SelectedModel.Tag}? It will download only if missing, run one bounded local validation with zero keep-alive, and verify release afterward.",
             "Confirm model",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question) != DialogResult.Yes)

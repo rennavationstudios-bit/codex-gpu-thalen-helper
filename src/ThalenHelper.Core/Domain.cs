@@ -258,7 +258,8 @@ public sealed record LocalModelRegistration(
     string Path,
     DateTimeOffset ValidatedAtUtc,
     long Length = 0,
-    DateTimeOffset? LastWriteTimeUtc = null);
+    DateTimeOffset? LastWriteTimeUtc = null,
+    string? FileIdentity = null);
 
 public sealed record ProtectedFilePlanSummary(
     string Path,
@@ -432,7 +433,7 @@ public sealed record OllamaRoutedGenerationResult(
 public static class ProductInfo
 {
     public const string Name = "Codex GPU Thalen Helper";
-    public const string Version = "0.1.0-beta.11";
+    public const string Version = "0.1.0-beta.12";
     public const string IntegrationName = "local_gpu_reviewer";
     public const string ManagedConfigStart = "# BEGIN CODEX GPU THALEN HELPER (managed)";
     public const string ManagedConfigEnd = "# END CODEX GPU THALEN HELPER (managed)";
