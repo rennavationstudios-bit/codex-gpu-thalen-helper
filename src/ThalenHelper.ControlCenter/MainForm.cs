@@ -11,11 +11,14 @@ public sealed class MainForm : Form
     private readonly Label _heroMessage = UiTheme.Label("Reading passive local status. No model will be loaded.", 9.5F, UiTheme.Muted);
     private readonly Label _routeValue = MetricValue();
     private readonly Label _routeMeta = MetricMeta();
+    private readonly Label _deepRouteValue = MetricValue();
+    private readonly Label _deepRouteMeta = MetricMeta();
     private readonly Label _gpuValue = MetricValue();
     private readonly Label _gpuMeta = MetricMeta();
     private readonly Label _providersValue = MetricValue();
     private readonly Label _providersMeta = MetricMeta();
-    private readonly Label _notice = UiTheme.Label("Low-impact mode protects other GPU workloads.", 9F, UiTheme.Muted);
+    private readonly Label _notice = UiTheme.Label("Checking local GPU status…", 9.5F, UiTheme.Text, FontStyle.Bold);
+    private readonly Label _gpuModeValue = UiTheme.Label("CHECKING", 8F, UiTheme.Cyan, FontStyle.Bold);
     private readonly ToggleSwitch _reviewsToggle = UiTheme.Toggle("Local reviews");
     private readonly ToggleSwitch _lowImpactToggle = UiTheme.Toggle("Low-impact mode");
     private readonly ToggleSwitch _automaticRoutingToggle = UiTheme.Toggle("Automatic model routing");
@@ -28,18 +31,25 @@ public sealed class MainForm : Form
     private Button _advancedButton = null!;
     private Button _releaseGpuButton = null!;
     private RoundedPanel _advancedCard = null!;
+    private Label _normalRoutePurpose = null!;
+    private Control _deepRouteDivider = null!;
+    private Control _deepRouteRow = null!;
+    private RoundedPanel? _statePill;
+    private Image? _brandIcon;
     private InstallationState? _currentState;
     private bool _managedActionsAllowed;
     private bool _managedConfigEnabled;
     private bool _refreshingUi;
     private bool _advancedExpanded;
     private int _operationInProgress;
+    private long _refreshSequence;
+    private readonly SupersedingRefreshCoordinator _refreshCoordinator = new();
 
     public MainForm()
     {
         Text = "Thalen AI — Local Review for Codex";
-        Size = new Size(1040, 740);
-        UiTheme.Apply(this, new Size(860, 620));
+        Size = new Size(620, 570);
+        UiTheme.Apply(this, new Size(560, 520));
 
         var scroll = new Panel
         {
@@ -77,7 +87,9 @@ public sealed class MainForm : Form
     {
         if (disposing)
         {
+            _refreshCoordinator.Dispose();
             _toolTip.Dispose();
+            _brandIcon?.Dispose();
         }
 
         base.Dispose(disposing);
@@ -88,199 +100,346 @@ public sealed class MainForm : Form
         var hero = new GradientPanel
         {
             Dock = DockStyle.Top,
-            Height = 202,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0, 0, 0, 16),
-            Padding = new Padding(26, 21, 26, 21),
+            Padding = new Padding(18),
             AccessibleName = "Local reviewer overview"
         };
-        var grid = new TableLayoutPanel
+        var shell = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            RowCount = 2,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = Color.Transparent
+        };
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        shell.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var brand = new TableLayoutPanel
         {
             ColumnCount = 2,
             RowCount = 1,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(4, 0, 4, 12)
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        brand.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        var copy = new TableLayoutPanel
-        {
-            ColumnCount = 1,
-            RowCount = 5,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent
-        };
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var eyebrow = UiTheme.Label("THALEN AI  •  PRIVATE LOCAL REVIEW", 8.5F, UiTheme.Cyan, FontStyle.Bold);
-        eyebrow.Margin = new Padding(0, 0, 0, 8);
-        var product = UiTheme.Label("Local review for Codex", 22F, UiTheme.Text, FontStyle.Bold);
-        product.Margin = new Padding(0, 0, 0, 3);
-        var subtitle = UiTheme.Label("A task-aware second opinion on your own hardware. Codex stays in charge.", 10F, UiTheme.Muted);
-        subtitle.Margin = new Padding(0, 0, 0, 12);
-        var stateLine = new FlowLayoutPanel
+        var identity = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             AutoSize = true,
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
+        };
+        _brandIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath)?.ToBitmap();
+        if (_brandIcon is not null)
+        {
+            identity.Controls.Add(new PictureBox
+            {
+                Image = _brandIcon,
+                Size = new Size(28, 28),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Margin = new Padding(0, 0, 10, 0),
+                AccessibleName = "Thalen AI app icon"
+            });
+        }
+        var brandName = UiTheme.Label("Thalen AI", 10F, UiTheme.Text, FontStyle.Bold);
+        brandName.Margin = new Padding(0, 5, 0, 0);
+        identity.Controls.Add(brandName);
+
+        var brandActions = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
+        };
+        _statePill = new RoundedPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            CornerRadius = 14,
+            Padding = new Padding(10, 5, 10, 5),
+            Margin = new Padding(0, 1, 0, 0),
+            BackColor = Color.FromArgb(21, 47, 43),
+            OutlineColor = Color.FromArgb(64, UiTheme.Success)
+        };
+        _stateBadge.Margin = new Padding(0);
+        _stateBadge.Padding = new Padding(0);
+        _statePill.Controls.Add(_stateBadge);
+
+        _advancedButton = UiTheme.Button("•••", AppButtonStyle.Quiet);
+        _advancedButton.AutoSize = false;
+        _advancedButton.Size = new Size(38, 30);
+        _advancedButton.MinimumSize = new Size(38, 30);
+        _advancedButton.MaximumSize = new Size(38, 30);
+        _advancedButton.Padding = new Padding(7, 3, 7, 3);
+        _advancedButton.Margin = new Padding(0, 0, 8, 0);
+        _advancedButton.AccessibleName = "Advanced settings";
+        SetHelp(_advancedButton, "Open less-common routing, GPU, repair, diagnostics, and disconnect settings.");
+        _advancedButton.Click += (_, _) => _ = ToggleAdvancedAsync();
+        RegisterAction(_advancedButton, managedOnly: false);
+        brandActions.Controls.Add(_advancedButton);
+        brandActions.Controls.Add(_statePill);
+
+        brand.Controls.Add(identity, 0, 0);
+        brand.Controls.Add(brandActions, 1, 0);
+
+        var reviewCard = new RoundedPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0),
+            Padding = new Padding(18, 16, 18, 16),
+            CornerRadius = 16
+        };
+        var reviewGrid = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 1,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = Color.Transparent
         };
-        StyleBadge(_stateBadge, UiTheme.Muted);
-        _heroTitle.Margin = new Padding(10, 3, 0, 0);
-        stateLine.Controls.Add(_stateBadge);
-        stateLine.Controls.Add(_heroTitle);
-        _heroMessage.Margin = new Padding(0, 4, 0, 0);
-        copy.Controls.Add(eyebrow, 0, 0);
-        copy.Controls.Add(product, 0, 1);
-        copy.Controls.Add(subtitle, 0, 2);
-        copy.Controls.Add(stateLine, 0, 3);
-        copy.Controls.Add(_heroMessage, 0, 4);
+        reviewGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        reviewGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var copy = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            RowCount = 3,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
+        };
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+        copy.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+        var section = UiTheme.SectionLabel("LOCAL REVIEWS");
+        section.ForeColor = UiTheme.Cyan;
+        section.Margin = new Padding(0, 0, 0, 4);
+        _heroTitle.Font = UiTheme.BodyFont(18F, FontStyle.Bold);
+        _heroTitle.AutoSize = false;
+        _heroTitle.Dock = DockStyle.Fill;
+        _heroTitle.AutoEllipsis = true;
+        _heroTitle.TextAlign = ContentAlignment.MiddleLeft;
+        _heroTitle.Margin = new Padding(0);
+        _heroMessage.AutoSize = false;
+        _heroMessage.Dock = DockStyle.Fill;
+        _heroMessage.AutoEllipsis = true;
+        _heroMessage.TextAlign = ContentAlignment.MiddleLeft;
+        _heroMessage.Margin = new Padding(0);
+        copy.Controls.Add(section, 0, 0);
+        copy.Controls.Add(_heroTitle, 0, 1);
+        copy.Controls.Add(_heroMessage, 0, 2);
+        reviewGrid.Controls.Add(copy, 0, 0);
 
-        var switchHost = SettingRow(
-            "Local reviews",
-            "Off pauses reviews but keeps Codex connected.",
-            _reviewsToggle,
-            compact: true);
-        switchHost.Padding = new Padding(12, 38, 0, 0);
+        var switchHost = new Panel
+        {
+            AutoSize = false,
+            Size = new Size(72, 74),
+            BackColor = Color.Transparent,
+            Margin = new Padding(12, 0, 0, 0)
+        };
+        _reviewsToggle.Location = new Point(16, 25);
+        switchHost.Controls.Add(_reviewsToggle);
         SetHelp(_reviewsToggle, "Turn local reviews on or pause them without disconnecting Codex.");
         _reviewsToggle.CheckedChanged += async (_, _) =>
         {
             if (!_refreshingUi)
             {
-                await RunActionAsync(ToggleReviewsAsync);
+                var desiredEnabled = _reviewsToggle.Checked;
+                await RunToggleActionAsync(() => ToggleReviewsAsync(desiredEnabled));
             }
         };
         RegisterAction(_reviewsToggle, managedOnly: true);
+        reviewGrid.Controls.Add(switchHost, 1, 0);
+        reviewCard.Controls.Add(reviewGrid);
 
-        grid.Controls.Add(copy, 0, 0);
-        grid.Controls.Add(switchHost, 1, 0);
-        hero.Controls.Add(grid);
+        shell.Controls.Add(brand, 0, 0);
+        shell.Controls.Add(reviewCard, 0, 1);
+        hero.Controls.Add(shell);
+        StyleBadge(_stateBadge, UiTheme.Muted);
         return hero;
     }
 
     private Control BuildOverview()
     {
-        var grid = new TableLayoutPanel
-        {
-            ColumnCount = 3,
-            RowCount = 1,
-            Dock = DockStyle.Top,
-            Height = 134,
-            Margin = new Padding(0, 0, 0, 16),
-            BackColor = UiTheme.Canvas
-        };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 39F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
-        grid.Controls.Add(MetricCard("AUTOMATIC ROUTING", _routeValue, _routeMeta), 0, 0);
-        grid.Controls.Add(MetricCard("GPU", _gpuValue, _gpuMeta), 1, 0);
-        grid.Controls.Add(MetricCard("PROVIDERS", _providersValue, _providersMeta, last: true), 2, 0);
-        return grid;
-    }
-
-    private static Control MetricCard(string title, Label value, Label meta, bool last = false)
-    {
-        var card = new RoundedPanel
-        {
-            Dock = DockStyle.Fill,
-            Margin = last ? new Padding(0) : new Padding(0, 0, 12, 0),
-            Padding = new Padding(18, 15, 18, 14)
-        };
-        var table = new TableLayoutPanel
-        {
-            ColumnCount = 1,
-            RowCount = 3,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent
-        };
-        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-        var heading = UiTheme.SectionLabel(title);
-        value.AutoSize = false;
-        value.Dock = DockStyle.Fill;
-        value.AutoEllipsis = true;
-        meta.AutoSize = false;
-        meta.Dock = DockStyle.Fill;
-        meta.AutoEllipsis = true;
-        table.Controls.Add(heading, 0, 0);
-        table.Controls.Add(value, 0, 1);
-        table.Controls.Add(meta, 0, 2);
-        card.Controls.Add(table);
-        return card;
-    }
-
-    private Control BuildHomeControls()
-    {
         var card = new RoundedPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0, 0, 0, 16),
-            Padding = new Padding(20, 17, 20, 16)
+            Padding = new Padding(18, 15, 18, 13),
+            CornerRadius = 16,
+            AccessibleName = "Automatic routing overview"
         };
         var layout = new TableLayoutPanel
         {
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 7,
+            Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Dock = DockStyle.Top,
             BackColor = Color.Transparent
         };
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(UiTheme.SectionLabel("LOCAL REVIEW"), 0, 0);
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        for (var index = 0; index < 7; index++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var actions = ActionFlow();
-        _testReviewerButton = AddActionButton(
-            actions,
-            "Test reviewer",
-            "Runs one small confirmed review using the current automatic route, then verifies release.",
-            TestLocalReviewAsync,
-            AppButtonStyle.Primary,
-            managedOnly: true);
-        _retryStatusButton = AddActionButton(
-            actions,
-            "Retry status",
-            "Run the passive status checks again. This does not load a model.",
-            () => Task.CompletedTask,
-            AppButtonStyle.Primary);
-        _retryStatusButton.Visible = false;
-        _manageModelsButton = AddActionButton(
-            actions,
-            "Models & storage",
-            "Open guided model and storage setup. Nothing downloads without confirmation.",
-            ShowModelSetupAsync,
-            managedOnly: true);
-        _advancedButton = AddActionButton(
-            actions,
-            "Advanced settings",
-            "Show less-common controls, diagnostics, repair, and disconnect options.",
-            ToggleAdvancedAsync,
-            AppButtonStyle.Quiet);
-        layout.Controls.Add(actions, 0, 1);
-
-        var lowImpact = SettingRow(
-            "Low-impact mode",
-            "Keeps local review light and unloads immediately—recommended during emulators, Expo, and graphics work.",
-            _lowImpactToggle);
-        SetHelp(_lowImpactToggle, "Reduce GPU impact and unload immediately after each review.");
-        _lowImpactToggle.CheckedChanged += async (_, _) =>
+        var header = new TableLayoutPanel
         {
-            if (!_refreshingUi)
-            {
-                await RunActionAsync(ToggleLowImpactAsync);
-            }
+            ColumnCount = 2,
+            RowCount = 1,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 0, 0, 10)
         };
-        RegisterAction(_lowImpactToggle, managedOnly: true);
-        layout.Controls.Add(lowImpact, 0, 2);
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var title = UiTheme.SectionLabel("AUTOMATIC ROUTING");
+        title.ForeColor = UiTheme.Cyan;
+        title.Margin = new Padding(0);
+        _providersValue.Font = UiTheme.BodyFont(9F, FontStyle.Bold);
+        _providersValue.Margin = new Padding(8, 0, 0, 0);
+        header.Controls.Add(title, 0, 0);
+        header.Controls.Add(_providersValue, 1, 0);
+
+        layout.Controls.Add(header, 0, 0);
+        layout.Controls.Add(Divider(), 0, 1);
+        _normalRoutePurpose = RoutePurpose("Normal & deep");
+        layout.Controls.Add(RouteRow(_normalRoutePurpose, _routeValue, _routeMeta), 0, 2);
+        _deepRouteDivider = Divider();
+        _deepRouteRow = RouteRow(RoutePurpose("Deep"), _deepRouteValue, _deepRouteMeta);
+        _deepRouteDivider.Visible = false;
+        _deepRouteRow.Visible = false;
+        layout.Controls.Add(_deepRouteDivider, 0, 3);
+        layout.Controls.Add(_deepRouteRow, 0, 4);
+        layout.Controls.Add(Divider(), 0, 5);
+        layout.Controls.Add(RouteRow(RoutePurpose("Quick / GPU busy"), _gpuValue, _gpuMeta), 0, 6);
         card.Controls.Add(layout);
         return card;
+    }
+
+    private static Label RoutePurpose(string text)
+    {
+        var label = UiTheme.Label(text, 9F, UiTheme.Muted);
+        label.AutoSize = false;
+        label.Dock = DockStyle.Fill;
+        label.Height = 22;
+        label.AutoEllipsis = true;
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        label.Margin = new Padding(0, 2, 8, 0);
+        return label;
+    }
+
+    private static Control RouteRow(Label purposeLabel, Label model, Label provider)
+    {
+        var row = new TableLayoutPanel
+        {
+            ColumnCount = 3,
+            RowCount = 1,
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 8, 0, 8)
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
+        model.Font = UiTheme.BodyFont(9F, FontStyle.Bold);
+        model.AutoSize = false;
+        model.Size = new Size(160, 22);
+        model.AutoEllipsis = true;
+        model.TextAlign = ContentAlignment.MiddleRight;
+        model.Margin = new Padding(8, 2, 14, 0);
+        provider.Font = UiTheme.BodyFont(8F, FontStyle.Bold);
+        provider.AutoSize = false;
+        provider.Dock = DockStyle.Fill;
+        provider.Height = 22;
+        provider.AutoEllipsis = true;
+        provider.ForeColor = UiTheme.Cyan;
+        provider.TextAlign = ContentAlignment.MiddleRight;
+        provider.Margin = new Padding(0, 2, 0, 0);
+        row.Controls.Add(purposeLabel, 0, 0);
+        row.Controls.Add(model, 1, 0);
+        row.Controls.Add(provider, 2, 0);
+        return row;
+    }
+
+    private static Control Divider()
+        => new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 1,
+            BackColor = UiTheme.Border,
+            Margin = new Padding(0)
+        };
+
+    private Control BuildHomeControls()
+    {
+        var actions = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 1,
+            Dock = DockStyle.Top,
+            Height = 52,
+            Margin = new Padding(0, 0, 0, 16),
+            BackColor = UiTheme.Canvas
+        };
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        actions.RowStyles.Add(new RowStyle(SizeType.Absolute, 52F));
+
+        var primaryHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 5, 0),
+            BackColor = UiTheme.Canvas
+        };
+        _testReviewerButton = UiTheme.Button("Test reviewer", AppButtonStyle.Primary);
+        _testReviewerButton.AutoSize = false;
+        _testReviewerButton.Dock = DockStyle.Fill;
+        _testReviewerButton.Margin = new Padding(0);
+        SetHelp(_testReviewerButton, "Run one small confirmed review with the automatic route, then verify release.");
+        _testReviewerButton.Click += async (_, _) => await RunActionAsync(TestLocalReviewAsync);
+        RegisterAction(_testReviewerButton, managedOnly: true);
+        primaryHost.Controls.Add(_testReviewerButton);
+
+        _retryStatusButton = UiTheme.Button("Retry status", AppButtonStyle.Primary);
+        _retryStatusButton.AutoSize = false;
+        _retryStatusButton.Dock = DockStyle.Fill;
+        _retryStatusButton.Margin = new Padding(0);
+        SetHelp(_retryStatusButton, "Run the passive status checks again. This does not load a model.");
+        _retryStatusButton.Click += async (_, _) => await RunActionAsync(() => Task.CompletedTask);
+        RegisterAction(_retryStatusButton, managedOnly: false);
+        primaryHost.Controls.Add(_retryStatusButton);
+        _retryStatusButton.Visible = false;
+
+        _manageModelsButton = UiTheme.Button("Models & storage", AppButtonStyle.Secondary);
+        _manageModelsButton.AutoSize = false;
+        _manageModelsButton.Dock = DockStyle.Fill;
+        _manageModelsButton.Margin = new Padding(5, 0, 0, 0);
+        SetHelp(_manageModelsButton, "Open guided model and storage setup. Nothing downloads without confirmation.");
+        _manageModelsButton.Click += async (_, _) => await RunActionAsync(ShowModelSetupAsync);
+        RegisterAction(_manageModelsButton, managedOnly: true);
+
+        actions.Controls.Add(primaryHost, 0, 0);
+        actions.Controls.Add(_manageModelsButton, 1, 0);
+        return actions;
     }
 
     private RoundedPanel BuildAdvancedSettings()
@@ -305,6 +464,22 @@ public sealed class MainForm : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         AddStackRow(layout, UiTheme.SectionLabel("ADVANCED SETTINGS"));
 
+        var lowImpact = SettingRow(
+            "Low-impact mode",
+            "Keeps local review light and unloads immediately—recommended during emulators, Expo, and graphics work.",
+            _lowImpactToggle);
+        SetHelp(_lowImpactToggle, "Reduce GPU impact and unload immediately after each review.");
+        _lowImpactToggle.CheckedChanged += async (_, _) =>
+        {
+            if (!_refreshingUi)
+            {
+                var desiredEnabled = _lowImpactToggle.Checked;
+                await RunToggleActionAsync(() => ToggleLowImpactAsync(desiredEnabled));
+            }
+        };
+        RegisterAction(_lowImpactToggle, managedOnly: true);
+        AddStackRow(layout, lowImpact);
+
         var routing = SettingRow(
             "Automatic model routing",
             "Selects the best eligible installed model for each task. Turning this off pins the saved fallback model.",
@@ -314,7 +489,8 @@ public sealed class MainForm : Form
         {
             if (!_refreshingUi)
             {
-                await RunActionAsync(ToggleModelRoutingAsync);
+                var desiredEnabled = _automaticRoutingToggle.Checked;
+                await RunToggleActionAsync(() => ToggleModelRoutingAsync(desiredEnabled));
             }
         };
         RegisterAction(_automaticRoutingToggle, managedOnly: true);
@@ -329,7 +505,8 @@ public sealed class MainForm : Form
         {
             if (!_refreshingUi)
             {
-                await RunActionAsync(ToggleKeepWarmAsync);
+                var desiredEnabled = _keepWarmToggle.Checked;
+                await RunToggleActionAsync(() => ToggleKeepWarmAsync(desiredEnabled));
             }
         };
         RegisterAction(_keepWarmToggle, managedOnly: true);
@@ -355,26 +532,50 @@ public sealed class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             Margin = new Padding(0),
-            Padding = new Padding(18, 14, 18, 14),
-            OutlineColor = Color.FromArgb(52, 61, 84)
+            Padding = new Padding(14, 11, 14, 11),
+            CornerRadius = 14,
+            BackColor = Color.FromArgb(14, 28, 25),
+            OutlineColor = Color.FromArgb(51, 104, 83)
         };
         var row = new TableLayoutPanel
         {
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             AutoSize = true,
             Dock = DockStyle.Top,
-            BackColor = Color.Transparent
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
         };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 26));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-        var mark = UiTheme.Label("●", 10F, UiTheme.Cyan, FontStyle.Bold);
-        mark.Margin = new Padding(0, 2, 8, 0);
-        _notice.AutoSize = true;
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var mark = UiTheme.Label("●", 11F, UiTheme.Success, FontStyle.Bold);
+        mark.Margin = new Padding(0, 6, 0, 0);
+        var copy = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            RowCount = 2,
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
+        };
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+        var heading = UiTheme.SectionLabel("GPU STATUS");
+        heading.ForeColor = UiTheme.Cyan;
+        heading.Margin = new Padding(0, 0, 0, 1);
+        _notice.AutoSize = false;
         _notice.Dock = DockStyle.Fill;
-        _notice.MaximumSize = new Size(900, 0);
+        _notice.AutoEllipsis = true;
+        _notice.TextAlign = ContentAlignment.MiddleLeft;
+        _notice.Margin = new Padding(0);
+        copy.Controls.Add(heading, 0, 0);
+        copy.Controls.Add(_notice, 0, 1);
+        _gpuModeValue.Margin = new Padding(12, 11, 0, 0);
         row.Controls.Add(mark, 0, 0);
-        row.Controls.Add(_notice, 1, 0);
+        row.Controls.Add(copy, 1, 0);
+        row.Controls.Add(_gpuModeValue, 2, 0);
         card.Controls.Add(row);
         return card;
     }
@@ -402,54 +603,74 @@ public sealed class MainForm : Form
 
     private async Task RefreshAsync()
     {
+        var refreshSequence = Interlocked.Increment(ref _refreshSequence);
+        var refreshCancellation = _refreshCoordinator.Begin();
+        var cancellationToken = refreshCancellation.Token;
         try
         {
             var hardware = new HardwareDetector().Detect();
             var store = new StateStore(_paths.StateFile);
-            var state = await store.LoadAsync().ConfigureAwait(true);
-            _currentState = state;
+            var state = await store.LoadAsync(cancellationToken).ConfigureAwait(true);
             using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
             var reviewer = new ReviewerService(_paths, store, client);
-            var health = await reviewer.GetHealthAsync().ConfigureAwait(true);
             var configManager = new CodexConfigManager();
             var managed = IntegrationOwnership.Inspect(_paths, state, configManager).Status == IntegrationOwnershipStatus.ManagedValid;
             var configEnabled = managed && configManager.TryReadManagedEnabled(_paths, out var enabledValue) && enabledValue;
-            _managedActionsAllowed = managed;
-            _managedConfigEnabled = configEnabled;
             var listener = OllamaAutoStartManager.GetListenerStatus(11434);
             var externalExposure = !managed && listener.HasListeners && !listener.LoopbackOnly;
 
-            ReviewerPlanResult? quickPlan = null;
-            ReviewerPlanResult? standardPlan = null;
-            ReviewerPlanResult? deepPlan = null;
+            var healthTask = reviewer.GetHealthAsync(cancellationToken);
+            Task<ReviewerPlanResult>? quickPlanTask = null;
+            Task<ReviewerPlanResult>? standardPlanTask = null;
+            Task<ReviewerPlanResult>? deepPlanTask = null;
             if (managed && state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
             {
-                quickPlan = await reviewer.PlanAsync(new ReviewRequest(
+                quickPlanTask = reviewer.PlanAsync(new ReviewRequest(
                     "Preview a small local review route.",
                     TaskKind: ReviewTaskKind.LogTriage,
                     Effort: ReviewEffort.Quick,
-                    EstimatedInputCharacters: 1_000)).ConfigureAwait(true);
-                standardPlan = await reviewer.PlanAsync(new ReviewRequest(
+                    EstimatedInputCharacters: 1_000), cancellationToken);
+                standardPlanTask = reviewer.PlanAsync(new ReviewRequest(
                     "Preview a normal code review route.",
                     TaskKind: ReviewTaskKind.DiffReview,
                     Effort: ReviewEffort.Standard,
-                    EstimatedInputCharacters: 8_000)).ConfigureAwait(true);
-                deepPlan = await reviewer.PlanAsync(new ReviewRequest(
+                    EstimatedInputCharacters: 8_000), cancellationToken);
+                deepPlanTask = reviewer.PlanAsync(new ReviewRequest(
                     "Preview a deep code review route.",
                     TaskKind: ReviewTaskKind.DiffReview,
                     Effort: ReviewEffort.Deep,
-                    EstimatedInputCharacters: 24_000)).ConfigureAwait(true);
+                    EstimatedInputCharacters: 24_000), cancellationToken);
             }
 
+            var passiveTasks = new List<Task> { healthTask };
+            if (quickPlanTask is not null) passiveTasks.Add(quickPlanTask);
+            if (standardPlanTask is not null) passiveTasks.Add(standardPlanTask);
+            if (deepPlanTask is not null) passiveTasks.Add(deepPlanTask);
+            await Task.WhenAll(passiveTasks).ConfigureAwait(true);
+
+            if (refreshSequence != Volatile.Read(ref _refreshSequence) || IsDisposed || Disposing)
+            {
+                return;
+            }
+
+            var health = await healthTask.ConfigureAwait(true);
+            var quickPlan = quickPlanTask is null ? null : await quickPlanTask.ConfigureAwait(true);
+            var standardPlan = standardPlanTask is null ? null : await standardPlanTask.ConfigureAwait(true);
+            var deepPlan = deepPlanTask is null ? null : await deepPlanTask.ConfigureAwait(true);
+            _currentState = state;
+            _managedActionsAllowed = managed;
+            _managedConfigEnabled = configEnabled;
+
             UpdateHero(state, health, managed, configEnabled, listener);
+            _toolTip.SetToolTip(_heroTitle, _heroTitle.Text);
+            _toolTip.SetToolTip(_heroMessage, _heroMessage.Text);
             UpdateRoutePresentation(state, health, quickPlan, standardPlan, deepPlan);
             _testReviewerButton.Visible = true;
             _retryStatusButton.Visible = false;
             var gpu = hardware.Gpus.OrderByDescending(item => item.DedicatedMemoryBytes).FirstOrDefault();
-            _gpuValue.Text = gpu?.Name.Replace("NVIDIA GeForce ", string.Empty, StringComparison.OrdinalIgnoreCase) ?? "CPU only";
-            _gpuMeta.Text = gpu is null
-                ? "CPU fallback is never automatic"
-                : $"{FormatBytes(gpu.DedicatedMemoryBytes)} VRAM  •  {(health.ModelLoaded ? "Model loaded" : "GPU free")}";
+            _toolTip.SetToolTip(_notice, gpu is null
+                ? "No discrete GPU was detected. CPU fallback is never automatic."
+                : $"{gpu.Name} • {FormatBytes(gpu.DedicatedMemoryBytes)} VRAM");
             _releaseGpuButton.Visible = managed && health.ModelLoaded;
 
             _refreshingUi = true;
@@ -461,17 +682,27 @@ public sealed class MainForm : Form
 
             _notice.Text = !managed
                 ? externalExposure
-                    ? "This preserved external reviewer is network-exposed and outside Thalen's safety controls."
-                    : "An existing external reviewer was preserved. Thalen will not take control without a reviewed migration."
+                    ? "External reviewer is network-exposed"
+                    : "External reviewer preserved"
                 : string.Equals(state?.LastHealthCheckCode, "EXTERNAL_AUTOSTART_UNVERIFIED", StringComparison.Ordinal)
-                    ? "An existing Ollama startup entry was preserved but could not be verified."
+                    ? "Ollama startup needs attention"
                     : state?.Preferences.AutoStartOllama == false
-                        ? "Automatic Ollama startup is off. Start Ollama manually after sign-in when that provider is needed."
-                        : "Models stay unloaded until Codex requests a review. Low-impact mode is recommended during GPU-heavy work.";
+                        ? "Manual Ollama startup"
+                        : health.ModelLoaded ? "Helper model loaded" : "No model loaded";
+            _gpuModeValue.Text = state?.Preferences.LowImpactMode == true ? "LOW IMPACT" : "BALANCED";
             SetActionControlsEnabled(!IsOperationInProgress);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A newer refresh or user action superseded this passive read.
         }
         catch (Exception exception)
         {
+            if (refreshSequence != Volatile.Read(ref _refreshSequence) || IsDisposed || Disposing)
+            {
+                return;
+            }
+
             _managedActionsAllowed = false;
             _refreshingUi = true;
             _reviewsToggle.Checked = false;
@@ -481,12 +712,25 @@ public sealed class MainForm : Form
             _heroTitle.Text = "Status could not be read";
             _heroMessage.Text = "No configuration was changed.";
             _routeValue.Text = "Unavailable";
-            _routeMeta.Text = FriendlyHealth("STATUS_UNAVAILABLE", exception.Message);
+            _routeMeta.Text = "—";
+            _deepRouteValue.Text = "Unavailable";
+            _deepRouteMeta.Text = "—";
+            _deepRouteDivider.Visible = false;
+            _deepRouteRow.Visible = false;
+            _gpuValue.Text = "Unavailable";
+            _gpuMeta.Text = "—";
+            _providersValue.Text = "Needs attention";
             _notice.Text = exception.Message;
+            _toolTip.SetToolTip(_notice, exception.Message);
+            _gpuModeValue.Text = "UNAVAILABLE";
             SetActionControlsEnabled(false);
             _testReviewerButton.Visible = false;
             _retryStatusButton.Visible = true;
             _retryStatusButton.Enabled = true;
+        }
+        finally
+        {
+            _refreshCoordinator.Complete(refreshCancellation);
         }
     }
 
@@ -501,33 +745,60 @@ public sealed class MainForm : Form
         {
             var quick = PlanLabel(quickPlan, "Quick route unavailable");
             var deep = PlanLabel(deepPlan, "Deep route unavailable");
+            var sharedNormalAndDeepRoute = PlansShareRoute(standardPlan, deepPlan);
+            _normalRoutePurpose.Text = sharedNormalAndDeepRoute ? "Normal & deep" : "Normal";
+            _deepRouteDivider.Visible = !sharedNormalAndDeepRoute;
+            _deepRouteRow.Visible = !sharedNormalAndDeepRoute;
             _routeValue.Text = standardPlan?.Allowed == true && !string.IsNullOrWhiteSpace(standardPlan.Model)
-                ? $"{DisplayModel(standardPlan.Model)}  •  {standardPlan.Provider}"
-                : "Automatic route unavailable";
-            _routeMeta.Text = $"Normal review  •  automatic   |   Quick: {quick}";
+                ? DisplayModel(standardPlan.Model)
+                : "Unavailable";
+            _routeMeta.Text = standardPlan?.Allowed == true ? standardPlan.Provider ?? "—" : "—";
+            _deepRouteValue.Text = deepPlan?.Allowed == true && !string.IsNullOrWhiteSpace(deepPlan.Model)
+                ? DisplayModel(deepPlan.Model)
+                : "Unavailable";
+            _deepRouteMeta.Text = deepPlan?.Allowed == true ? deepPlan.Provider ?? "—" : "—";
+            _gpuValue.Text = quickPlan?.Allowed == true && !string.IsNullOrWhiteSpace(quickPlan.Model)
+                ? DisplayModel(quickPlan.Model)
+                : "Unavailable";
+            _gpuMeta.Text = quickPlan?.Allowed == true ? quickPlan.Provider ?? "—" : "—";
             _toolTip.SetToolTip(_routeMeta, $"Quick: {quick}\nNormal: {PlanLabel(standardPlan, "Unavailable")}\nDeep: {deep}");
             var providers = new[] { quickPlan, standardPlan, deepPlan }
                 .Where(plan => plan?.Allowed == true && !string.IsNullOrWhiteSpace(plan.Provider))
                 .Select(plan => plan!.Provider)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            _providersValue.Text = providers.Length == 0 ? "No ready provider" : string.Join(" + ", providers);
+            _providersValue.Text = providers.Length == 0 ? "Unavailable" : "Task-aware";
             _providersMeta.Text = $"{health.EligibleInstalledModels} installed + validated model{(health.EligibleInstalledModels == 1 ? string.Empty : "s")} eligible";
+            _toolTip.SetToolTip(_routeValue, PlanLabel(standardPlan, "Normal route unavailable"));
+            _toolTip.SetToolTip(_deepRouteValue, deep);
+            _toolTip.SetToolTip(_gpuValue, quick);
             return;
         }
 
-        var catalog = new ModelCatalogService().LoadBundled();
-        var selected = catalog.Models.FirstOrDefault(item =>
-            string.Equals(item.Tag, state?.SelectedModel, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(ModelProviders.Normalize(item.Provider), ModelProviders.Normalize(state?.SelectedModelProvider), StringComparison.Ordinal));
+        _normalRoutePurpose.Text = "Normal & deep";
+        _deepRouteDivider.Visible = false;
+        _deepRouteRow.Visible = false;
         _routeValue.Text = state?.SelectedModel is null ? "No model selected" : DisplayModel(state.SelectedModel);
         _routeMeta.Text = health.ModelAvailable
-            ? $"Installed + validated  •  {ModelProviders.Normalize(state?.SelectedModelProvider)}"
-            : selected is null
-                ? "Choose a supported installed model"
-                : $"Not installed  •  {FormatBytes(selected.ExpectedDownloadBytes)} download if approved";
-        _providersValue.Text = ModelProviders.Normalize(state?.SelectedModelProvider);
+            ? ModelProviders.Normalize(state?.SelectedModelProvider)
+            : "Needs setup";
+        _gpuValue.Text = state?.SelectedModel is null ? "No model selected" : DisplayModel(state.SelectedModel);
+        _gpuMeta.Text = _routeMeta.Text;
+        _providersValue.Text = "Pinned";
         _providersMeta.Text = health.EndpointReachable ? "Loopback provider ready" : "Provider needs attention";
+    }
+
+    internal static bool PlansShareRoute(ReviewerPlanResult? standardPlan, ReviewerPlanResult? deepPlan)
+    {
+        if (standardPlan?.Allowed != true || deepPlan?.Allowed != true)
+        {
+            return standardPlan?.Allowed != true && deepPlan?.Allowed != true;
+        }
+
+        return !string.IsNullOrWhiteSpace(standardPlan.Model)
+            && !string.IsNullOrWhiteSpace(deepPlan.Model)
+            && string.Equals(standardPlan.Model, deepPlan.Model, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(standardPlan.Provider, deepPlan.Provider, StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateHero(
@@ -594,42 +865,46 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task ToggleReviewsAsync()
+    private async Task ToggleReviewsAsync(bool desiredEnabled)
     {
-        var state = _currentState ?? await new StateStore(_paths.StateFile).LoadAsync();
+        var state = await new StateStore(_paths.StateFile).LoadAsync();
         if (state is null)
         {
             await ShowModelSetupAsync();
             return;
         }
 
-        if (IntegrationOwnership.Inspect(_paths, state).Status != IntegrationOwnershipStatus.ManagedValid)
+        var configManager = new CodexConfigManager();
+        if (IntegrationOwnership.Inspect(_paths, state, configManager).Status != IntegrationOwnershipStatus.ManagedValid)
         {
             await ShowProtectedStatusAsync();
             return;
         }
 
-        if (_reviewsToggle.Checked)
+        var configEnabled = configManager.TryReadManagedEnabled(_paths, out var enabledValue) && enabledValue;
+        switch (SelectReviewToggleMutation(desiredEnabled, state.Availability, configEnabled))
         {
-            await RunControlAsync(() => ShouldEnableCodexEntry(state.Availability, _managedConfigEnabled)
-                ? Control().EnableAsync()
-                : Control().ResumeAsync());
-        }
-        else if (state.Availability == HelperAvailability.Enabled)
-        {
-            await RunControlAsync(() => Control().PauseAsync());
+            case ReviewToggleMutation.Enable:
+                await RunControlAsync(() => Control().EnableAsync());
+                break;
+            case ReviewToggleMutation.Resume:
+                await RunControlAsync(() => Control().ResumeAsync());
+                break;
+            case ReviewToggleMutation.Pause:
+                await RunControlAsync(() => Control().PauseAsync());
+                break;
         }
     }
 
-    private async Task ToggleLowImpactAsync()
-        => await RunControlAsync(() => Control().SetLowImpactAsync(_lowImpactToggle.Checked));
+    private async Task ToggleLowImpactAsync(bool desiredEnabled)
+        => await RunControlAsync(() => Control().SetLowImpactAsync(desiredEnabled));
 
-    private async Task ToggleKeepWarmAsync()
-        => await RunControlAsync(() => Control().SetKeepWarmAsync(_keepWarmToggle.Checked));
+    private async Task ToggleKeepWarmAsync(bool desiredEnabled)
+        => await RunControlAsync(() => Control().SetKeepWarmAsync(desiredEnabled));
 
-    private async Task ToggleModelRoutingAsync()
+    private async Task ToggleModelRoutingAsync(bool automaticEnabled)
     {
-        var mode = _automaticRoutingToggle.Checked ? ModelSelectionMode.Automatic : ModelSelectionMode.Pinned;
+        var mode = automaticEnabled ? ModelSelectionMode.Automatic : ModelSelectionMode.Pinned;
         await RunControlAsync(() => Control().SetModelSelectionModeAsync(mode));
     }
 
@@ -637,7 +912,7 @@ public sealed class MainForm : Form
     {
         _advancedExpanded = !_advancedExpanded;
         _advancedCard.Visible = _advancedExpanded;
-        _advancedButton.Text = _advancedExpanded ? "Hide advanced" : "Advanced settings";
+        _advancedButton.Text = _advancedExpanded ? "×" : "•••";
         return Task.CompletedTask;
     }
 
@@ -703,6 +978,35 @@ public sealed class MainForm : Form
 
     internal static bool ShouldEnableCodexEntry(HelperAvailability availability, bool managedConfigEnabled)
         => availability == HelperAvailability.Disabled || !managedConfigEnabled;
+
+    internal static ReviewToggleMutation SelectReviewToggleMutation(
+        bool desiredEnabled,
+        HelperAvailability availability,
+        bool managedConfigEnabled)
+    {
+        if (!desiredEnabled)
+        {
+            return availability == HelperAvailability.Enabled
+                ? ReviewToggleMutation.Pause
+                : ReviewToggleMutation.None;
+        }
+
+        return ShouldEnableCodexEntry(availability, managedConfigEnabled)
+            ? ReviewToggleMutation.Enable
+            : ReviewToggleMutation.Resume;
+    }
+
+    internal static async Task ReconcileBeforeReenableAsync(Func<Task> reconcile, Action reenable)
+    {
+        try
+        {
+            await reconcile().ConfigureAwait(true);
+        }
+        finally
+        {
+            reenable();
+        }
+    }
 
     private async Task ShowModelSetupAsync()
     {
@@ -816,10 +1120,42 @@ public sealed class MainForm : Form
         return Task.CompletedTask;
     }
 
-    private async Task RunControlAsync(Func<Task<ControlResult>> action)
+    private async Task<ControlResult> RunControlAsync(Func<Task<ControlResult>> action)
     {
         var result = await action();
+        if (result.State is not null)
+        {
+            _currentState = result.State;
+        }
+
         _notice.Text = result.Message;
+        _toolTip.SetToolTip(_notice, result.Message);
+        return result;
+    }
+
+    private async Task ReconcileToggleStateAsync()
+    {
+        var store = new StateStore(_paths.StateFile);
+        var state = await store.LoadAsync().ConfigureAwait(true);
+        var configManager = new CodexConfigManager();
+        var managed = IntegrationOwnership.Inspect(_paths, state, configManager).Status == IntegrationOwnershipStatus.ManagedValid;
+        var configEnabled = managed && configManager.TryReadManagedEnabled(_paths, out var enabledValue) && enabledValue;
+
+        _currentState = state;
+        _managedActionsAllowed = managed;
+        _managedConfigEnabled = configEnabled;
+        _refreshingUi = true;
+        try
+        {
+            _reviewsToggle.Checked = state?.Availability == HelperAvailability.Enabled && configEnabled;
+            _lowImpactToggle.Checked = state?.Preferences.LowImpactMode == true;
+            _automaticRoutingToggle.Checked = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic;
+            _keepWarmToggle.Checked = state?.Preferences.KeepWarm == true;
+        }
+        finally
+        {
+            _refreshingUi = false;
+        }
     }
 
     private Button AddActionButton(
@@ -854,6 +1190,9 @@ public sealed class MainForm : Form
             return;
         }
 
+        Interlocked.Increment(ref _refreshSequence);
+        _refreshCoordinator.CancelCurrent();
+
         try
         {
             SetActionControlsEnabled(false);
@@ -880,6 +1219,58 @@ public sealed class MainForm : Form
                     SetActionControlsEnabled(true);
                 }
             }
+        }
+    }
+
+    private async Task RunToggleActionAsync(Func<Task> action)
+    {
+        if (Interlocked.CompareExchange(ref _operationInProgress, 1, 0) != 0)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _refreshSequence);
+        _refreshCoordinator.CancelCurrent();
+        try
+        {
+            SetActionControlsEnabled(false);
+            await action();
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            try
+            {
+                await ReconcileBeforeReenableAsync(
+                    async () =>
+                    {
+                        if (!IsDisposed && !Disposing)
+                        {
+                            await ReconcileToggleStateAsync();
+                        }
+                    },
+                    () =>
+                    {
+                        Interlocked.Exchange(ref _operationInProgress, 0);
+                        if (!IsDisposed && !Disposing)
+                        {
+                            SetActionControlsEnabled(true);
+                        }
+                    });
+            }
+            catch (Exception exception)
+            {
+                _notice.Text = exception.Message;
+                _toolTip.SetToolTip(_notice, exception.Message);
+            }
+        }
+
+        if (!IsDisposed && !Disposing)
+        {
+            await RefreshAsync();
         }
     }
 
@@ -958,12 +1349,18 @@ public sealed class MainForm : Form
         stack.Controls.Add(control, 0, row);
     }
 
-    private static void StyleBadge(Label badge, Color color)
+    private void StyleBadge(Label badge, Color color)
     {
         badge.ForeColor = color;
-        badge.BackColor = Color.FromArgb(34, color);
-        badge.Padding = new Padding(9, 5, 9, 5);
+        badge.BackColor = Color.Transparent;
+        badge.Padding = new Padding(0);
         badge.Margin = new Padding(0);
+        if (_statePill is not null)
+        {
+            _statePill.BackColor = Color.FromArgb(24, color);
+            _statePill.OutlineColor = Color.FromArgb(115, color);
+            _statePill.Invalidate();
+        }
     }
 
     private static string PlanLabel(ReviewerPlanResult? plan, string fallback)
@@ -1012,5 +1409,47 @@ public sealed class MainForm : Form
         }
 
         return $"{value:F1} {units[unit]}";
+    }
+}
+
+internal enum ReviewToggleMutation
+{
+    None,
+    Enable,
+    Resume,
+    Pause
+}
+
+internal sealed class SupersedingRefreshCoordinator : IDisposable
+{
+    private CancellationTokenSource? _current;
+
+    public CancellationTokenSource Begin()
+    {
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _current, next);
+        previous?.Cancel();
+        return next;
+    }
+
+    public void CancelCurrent()
+        => Volatile.Read(ref _current)?.Cancel();
+
+    public void Complete(CancellationTokenSource completed)
+    {
+        _ = Interlocked.CompareExchange(ref _current, null, completed);
+        completed.Dispose();
+    }
+
+    public void Dispose()
+    {
+        var current = Interlocked.Exchange(ref _current, null);
+        if (current is null)
+        {
+            return;
+        }
+
+        current.Cancel();
+        current.Dispose();
     }
 }

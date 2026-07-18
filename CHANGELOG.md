@@ -4,6 +4,14 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.17 - 2026-07-18
+
+- Matched the desktop Control Center to the compact public-site card: one local-review switch, compact task-aware routes, two primary actions, and one GPU status strip. A separate Deep row appears only when it differs from Normal.
+- Replaced native checkbox rendering with a fully owner-drawn, keyboard-accessible toggle so selected controls keep clean rounded edges without rectangular focus artifacts.
+- Constrained long hero and GPU-status text to the compact card with ellipsis plus full hover detail, and added nested-ancestor layout checks at the minimum and default window sizes.
+- Parallelized passive provider planning, cancel superseded passive work, immediately reconcile rejected or reversed toggle changes from persisted state, and decouple toggle mutations from the longer status refresh so one preference change no longer locks every switch for roughly twenty seconds.
+- Kept Qwythos through LM Studio prominent for normal and deep work, Qwen3 8B through Ollama for quick or GPU-busy work, and all advanced safety controls behind one quiet menu.
+
 ## 0.1.0-beta.16 - 2026-07-18
 
 - Rebuilt the Control Center around one local-review switch, a prominent automatic route, one bounded reviewer test, guided model setup, and a collapsed advanced area.
