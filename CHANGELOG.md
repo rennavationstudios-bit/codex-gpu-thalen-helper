@@ -4,6 +4,16 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.13 - 2026-07-18
+
+- Restored catalog-audited LM Studio/GGUF routing with a signed current-user CLI binding that proves the exact indexed file before and after each bounded load, generation, and exact-instance unload.
+- Added a provider-correct first-run experience: hardware-compatible Ollama acquisition choices stay separate from existing LM Studio/GGUF registration, and setup never silently downloads or loads a model.
+- Expanded model-storage guidance with a user-selected destination, fixed-volume and free-space reserve checks, approximate download sizes, existing-model paths, and clear opt-in consent.
+- Preserved legacy beta.11 LM Studio records as non-routable history until explicit beta.13 revalidation establishes current file identity and validation evidence.
+- Made fresh LM Studio-only installations work without an unrelated Ollama model path or daemon while preserving loopback and dual-provider foreign-model guards.
+- Added durable provisional LM Studio instance ownership, exact failure-path unload proofs, and recovery evidence when a helper-created instance cannot be proven released.
+- Pinned the signed LM Studio CLI executable namespace across signature verification and process execution, and reject redirected Ollama storage paths before configuration or acquisition.
+
 ## 0.1.0-beta.12 - 2026-07-18
 
 - Rounded every themed setup and Control Center action button with DPI-aware clipping and borders while preserving hover, disabled, focus, keyboard, and accessibility behavior.

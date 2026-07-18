@@ -18,7 +18,7 @@ Codex should locate the installed application from the packaged documentation an
 
 ## Goal
 
-Finish or verify a safe, working `local_gpu_reviewer` integration for the current Windows user while preserving all unrelated Codex and Ollama configuration. Codex should carry out the technical steps; the user should not need to understand PowerShell, TOML, MCP, model tags, or GPU terminology.
+Finish or verify a safe, working `local_gpu_reviewer` integration for the current Windows user while preserving all unrelated Codex, Ollama, and LM Studio configuration. Codex should carry out the technical steps; the user should not need to understand PowerShell, TOML, MCP, model tags, GGUF files, or GPU terminology.
 
 ## Beginner interaction rules
 
@@ -61,12 +61,12 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
 - Preserve an existing unmarked `local_gpu_reviewer` integration by default. Do not claim control of it, repair it, test it, or add helper invocation guidance unless the user explicitly chooses a supported migration later.
 - Use the helper's backup, reviewed-choice/diff, managed-marker, idempotency, rollback, repair, and surgical-uninstall paths. Do not hand-edit protected Codex files as a shortcut.
 - Do not display or copy secrets, Codex authentication, private instructions, prompts, responses, backups, or unrelated configuration into logs or chat.
-- Keep Ollama on a loopback address. Treat a listener reachable beyond loopback as unsafe and do not enable review while it exists.
+- Keep every provider loopback-only: Ollama on `127.0.0.1:11434` and LM Studio on `127.0.0.1:1234`. Treat a provider listener reachable beyond loopback as unsafe and do not enable that route while it exists.
 - Do not download, pull, load, validate, move, or delete a model without the user's explicit model and storage choice. Passive status and installation must not run inference.
 - For modest hardware, prefer the smallest model that the current catalog marks safe for the detected dedicated VRAM and system memory. Keep shared GPU memory separate from dedicated VRAM, never use a larger model based on shared memory, and do not enable CPU-only fallback without explicit informed consent.
 - Keep local review single-flight. Do not bypass the helper's lock, queue-or-skip behavior, pressure refusal, workload guard, or idle unloading.
-- Prefer automatic task-aware routing after at least one supported Ollama model is validated. Before each non-trivial local review, use passive `local_gpu_plan`, then announce the returned provider, actual planned model, and bounded purpose before calling `local_gpu_review` with the same task kind, effort, context, and GPU-workload fields. Planning must not download, load, or run a model.
-- Ollama is the active provider in beta.12. Do not claim an LM Studio file is in the automatic pool: registration is deliberately disabled until the runtime can prove the exact absolute GGUF file behind a loaded key.
+- Prefer [automatic task-aware routing](task-aware-routing.md) after at least one supported provider model is validated. Before each non-trivial local review, use passive `local_gpu_plan`, then announce the returned provider, actual planned model, and bounded purpose before calling `local_gpu_review` with the same task kind, effort, context, and GPU-workload fields. Planning must not download, load, validate, or run a model.
+- Treat providers differently where their trust boundaries differ. Ollama models must pass the [exact installed-digest checks](model-selection.md#ollama-acquisition-and-runtime-validation). An LM Studio model is eligible only through the [current catalog-audited registration flow](model-selection.md#lm-studio-registration), which currently supports the existing Qwythos GGUF. Do not claim arbitrary GGUF support, and do not trust a legacy beta.11 registration until it is explicitly revalidated.
 - Do not interrupt Codex, Expo, Android, iPhone, emulator, graphics, build, or device-testing processes. Prefer low-impact mode during GPU-intensive work.
 - Default to low-impact mode on, keep-warm off, queue-or-skip set to skip, and immediate unloading after review on entry-level or uncertain hardware. Increase resource use only after fresh measurements and explicit consent.
 - If automatic Ollama startup was declined, leave it declined and explain that Ollama must be started manually after sign-in. Do not create a startup entry without consent.
@@ -77,14 +77,15 @@ Finish or verify a safe, working `local_gpu_reviewer` integration for the curren
 1. Present a short plain-language summary of the passive status results and the exact installation, Codex-home, model-store, selected-model, endpoint, startup, and ownership state without exposing file contents or secret values. Put technical details after the recommendation, not before it.
 2. If setup is incomplete, offer these mutually exclusive paths:
    - point the helper to an existing Ollama model store and selected installed model;
-   - explicitly approve downloading the helper's smallest safe current recommendation into one confirmed fixed local directory; or
+   - explicitly approve downloading the helper's smallest safe current recommendation into one confirmed fixed local directory;
+   - register the exact existing Qwythos GGUF already indexed by the signed current-user LM Studio inventory, with no download, copy, move, or substitution; or
    - leave model setup deferred with no download or inference.
-3. Recommend the safest path. On an entry-level or uncertain GPU, recommend the smallest supported model and low-impact settings even when a larger model might technically fit.
+3. Recommend the safest path. On an entry-level or uncertain GPU, recommend the smallest supported model and low-impact settings even when a larger model might technically fit. For an Ollama acquisition, let the user choose the storage folder and show its drive type, current free space, the exact model's approximate size, temporary overhead, and required safety reserve before asking for consent. Add additional eligible models only through a separate named confirmation; do not silently batch downloads.
 4. Before a helper-owned repair or explicit migration, run `thalen-helper repair --dry-run --diff-out <private-local-file>` and add `--migrate-existing` only when the user explicitly chose to replace a preserved external reviewer. Keep the full diff local and private, summarize the expected managed-file effects in plain language, and apply only with all four source/planned SHA-256 values returned by that dry-run. Use the Control Center's separate before/after preview for the optional reliability baseline.
 5. Apply only the chosen managed action. External ownership remains preserved unless the user explicitly approved the reviewed `--migrate-existing` plan. If the helper reports ambiguous TOML ownership, drift, unsafe network exposure, pressure, or an unverifiable startup owner, stop and report it instead of bypassing the guard.
-6. Explicitly validate each installed audited Ollama model intended for the automatic pool, one at a time, without pulling a replacement; stop on pressure or release failure. Do not attempt LM Studio enrollment in beta.12. Then turn on automatic model routing and low-impact mode, and leave keep-warm off for modest or uncertain hardware. Automatic routing selects dynamically only from exact-identity models that passed this installation's validation and requests zero keep-alive for every response. Confirm no model is resident before asking the user to restart Codex.
+6. Explicitly validate each installed audited model intended for the automatic pool, one at a time, without substituting a replacement; stop on pressure or release failure. For Ollama, do not pull anything unless the user separately approved that named model and destination after seeing free space and the required reserve. For LM Studio, register only the current catalog-audited existing Qwythos file. Require the signed current-user `lms` inventory, exact catalog-relative path and size, stable regular-file identity, full SHA-256, pinned models-root/path lease, verified loopback REST instance, exact-instance unload, and post-unload CLI absence. A beta.11 record must go through this explicit revalidation before routing. Then turn on automatic model routing and low-impact mode, and leave keep-warm off for modest or uncertain hardware. Automatic routing selects dynamically only from exact-identity models that passed this installation's provider-specific validation and requests immediate unload for every response. Confirm no helper-created model is resident before asking the user to restart Codex.
 7. Restart every Codex window only after a successful helper-owned integration change. A Codex restart is required for MCP discovery; restarting the Control Center alone is insufficient. Ask the user to close and reopen Codex only when this point is reached.
-8. After the fresh Codex restart, re-run passive status. Run **Test local review** only with explicit consent because it performs a small Ollama inference; unload the model afterward.
+8. After the fresh Codex restart, re-run passive status. Run **Test local review** only with explicit consent because it performs a small local inference through the selected provider; verify the exact helper-created instance is unloaded afterward.
 9. Provide the backup/restore information and a concise post-change diff summary. Run the same passive checks a second time to confirm the operation was idempotent and did not append duplicates.
 
 ## Done
@@ -93,13 +94,16 @@ Do not say setup is complete unless the applicable items are verified:
 
 - protected Codex files were preserved except for the expected marked helper-owned additions;
 - a second run creates no duplicate TOML table or instruction section;
-- the endpoint responds on loopback and no port 11434 listener is exposed beyond loopback;
-- the managed MCP entry whitelists only `OLLAMA_MODELS`, and its forwarded value resolves to the confirmed model store;
-- the selected model remains listed and its manifest is present in that store;
+- every configured provider endpoint responds only on loopback, and neither port 11434 nor 1234 is exposed beyond loopback;
+- when Ollama is configured, the managed MCP entry whitelists only `OLLAMA_MODELS`, and its forwarded value resolves to the confirmed model store;
+- each routed model remains present in its provider inventory and still matches its current provider-specific validation evidence;
+- an LM Studio route, when configured, maps the exact catalog-audited Qwythos key to the exact existing GGUF and no legacy beta.11 record is treated as current validation;
 - automatic startup is helper-owned and verified, or manual startup is clearly reported as the user's choice;
 - the MCP reviewer appears after a fresh Codex restart when the integration is helper-owned and enabled;
 - `local_gpu_health`, `local_gpu_plan`, and `local_gpu_review` appear after restart, and a passive plan reports the task kind, effort, model, context cap, and no inference;
-- no model is left loaded after a consented validation when low-impact mode requires unloading;
+- no helper-created model is left loaded after a consented validation when low-impact mode requires unloading; for LM Studio, both REST inventory and the signed `lms ps` inventory must show the exact instance absent;
 - restore instructions and any remaining manual step are reported honestly.
 
 An external/unmarked reviewer may remain preserved and operational, but the packaged helper must label it external and must not claim that the checklist above was verified or controlled on its behalf.
+
+For the residual LM Studio same-key REST-load race and its fail-closed mitigations, read [Provider boundary](task-aware-routing.md#provider-boundary). Do not manually load the same LM Studio key while registration or review is in progress.

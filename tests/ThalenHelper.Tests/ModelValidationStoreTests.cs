@@ -83,7 +83,7 @@ public sealed class ModelValidationStoreTests
             Path.Combine(temporary.Path, "unrelated.gguf"));
 
         Assert.False(result.Success);
-        Assert.Equal("LMSTUDIO_EXACT_FILE_BINDING_UNAVAILABLE", result.Code);
+        Assert.Equal("MODEL_FILE_CATALOG_BINDING_MISMATCH", result.Code);
         var remaining = Assert.Single((await validationStore.LoadAsync()).Entries);
         Assert.Equal(ModelProviders.Ollama, remaining.Provider);
         Assert.Empty(handler.Requests);

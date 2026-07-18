@@ -2,7 +2,7 @@
 
 This project is MIT-licensed. Third-party components retain their own licenses.
 
-Runtime/build dependencies used by version 0.1.0-beta.12 include:
+Runtime/build dependencies used by version 0.1.0-beta.13 include:
 
 | Component | Pinned version | License/source |
 |---|---:|---|

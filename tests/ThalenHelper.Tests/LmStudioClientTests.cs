@@ -67,6 +67,8 @@ public sealed class LmStudioClientTests
     [Fact]
     public async Task LoadUsesTheAuditedSafeStartingConfiguration()
     {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
         var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
             request.RequestUri?.AbsolutePath switch
             {
@@ -78,11 +80,18 @@ public sealed class LmStudioClientTests
             }));
         using var client = CreateClient(handler);
 
-        var result = await client.LoadAsync("model-9b");
+        var result = await client.LoadOwnedAsync(
+            "model-9b",
+            tracker,
+            static (_, _) => Task.CompletedTask);
 
         Assert.Equal(LmStudioClient.ProviderName, result.Provider);
         Assert.Equal("model-9b", result.ModelKey);
         Assert.Equal("model-9b:1", result.InstanceId);
+        var tracked = Assert.IsType<ActiveModelReference>(tracker.ReadReference());
+        Assert.Equal(ModelProviders.LmStudio, tracked.Provider);
+        Assert.Equal("model-9b", tracked.Model);
+        Assert.Equal("model-9b:1", tracked.InstanceId);
         var request = handler.Requests[0];
         Assert.Equal(HttpMethod.Post, request.Method);
         Assert.Equal("/api/v1/models/load", request.Path);
@@ -98,19 +107,45 @@ public sealed class LmStudioClientTests
     [Fact]
     public async Task LoadRejectsAResponseForADifferentModelIdentity()
     {
-        var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(
-            FakeHttpMessageHandler.Json(
-                "{\"model\":\"other-9b\",\"instance_id\":\"other-9b:1\"}")));
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        var cliAbsenceProofs = 0;
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/v1/models/load" => FakeHttpMessageHandler.Json(
+                    "{\"model\":\"other-9b\",\"instance_id\":\"other-9b:1\"}"),
+                "/api/v1/models/unload" => FakeHttpMessageHandler.Json(
+                    "{\"instance_id\":\"other-9b:1\"}"),
+                "/api/v1/models" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
         using var client = CreateClient(handler);
 
-        var exception = await Assert.ThrowsAsync<LmStudioException>(() => client.LoadAsync("model-9b"));
+        var exception = await Assert.ThrowsAsync<LmStudioException>(() =>
+            client.LoadOwnedAsync(
+                "model-9b",
+                tracker,
+                (_, _) =>
+                {
+                    cliAbsenceProofs++;
+                    return Task.CompletedTask;
+                }));
 
         Assert.Equal("MODEL_RESPONSE_IDENTITY_MISMATCH", exception.Code);
+        Assert.Equal(1, cliAbsenceProofs);
+        Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
+        Assert.Equal(
+            new[] { "/api/v1/models/load", "/api/v1/models/unload", "/api/v1/models" },
+            handler.Requests.Select(request => request.Path));
     }
 
     [Fact]
-    public async Task LoadConfigMismatchFailsClosedAndBestEffortUnloadsTheReturnedInstance()
+    public async Task LoadConfigMismatchRequiresExactRestAndCliAbsenceBeforeClearingOwnership()
     {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        var cliAbsenceProofs = 0;
         var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
             request.RequestUri?.AbsolutePath switch
             {
@@ -118,23 +153,39 @@ public sealed class LmStudioClientTests
                     "{\"instance_id\":\"model-9b:1\",\"load_config\":{\"context_length\":32768,\"flash_attention\":true,\"offload_kv_cache_to_gpu\":true}}"),
                 "/api/v1/models/unload" => FakeHttpMessageHandler.Json(
                     "{\"instance_id\":\"model-9b:1\"}"),
+                "/api/v1/models" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
                 _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
             }));
         using var client = CreateClient(handler);
 
-        var exception = await Assert.ThrowsAsync<LmStudioException>(() => client.LoadAsync("model-9b"));
+        var exception = await Assert.ThrowsAsync<LmStudioException>(() =>
+            client.LoadOwnedAsync(
+                "model-9b",
+                tracker,
+                (_, _) =>
+                {
+                    cliAbsenceProofs++;
+                    return Task.CompletedTask;
+                }));
 
         Assert.Equal("LMSTUDIO_LOAD_CONFIG_MISMATCH", exception.Code);
+        Assert.Equal(1, cliAbsenceProofs);
+        Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
         Assert.Equal(
-            new[] { "/api/v1/models/load", "/api/v1/models/unload" },
+            new[] { "/api/v1/models/load", "/api/v1/models/unload", "/api/v1/models" },
             handler.Requests.Select(request => request.Path));
     }
 
     [Fact]
     public async Task CanceledPostLoadVerificationUsesAnIndependentCleanupToken()
     {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
         using var callerCancellation = new CancellationTokenSource();
         var cleanupTokenWasCanceled = true;
+        var cliCleanupTokenWasCanceled = true;
+        var cliAbsenceProofs = 0;
+        var inventoryRequests = 0;
         var handler = new FakeHttpMessageHandler(async (request, token) =>
         {
             switch (request.RequestUri?.AbsolutePath)
@@ -143,9 +194,13 @@ public sealed class LmStudioClientTests
                     return FakeHttpMessageHandler.Json(
                         "{\"model\":\"model-9b\",\"instance_id\":\"model-9b:1\",\"load_config\":{\"context_length\":65536,\"flash_attention\":true,\"offload_kv_cache_to_gpu\":true}}");
                 case "/api/v1/models":
-                    callerCancellation.Cancel();
-                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
-                    throw new InvalidOperationException("The canceled verification request unexpectedly completed.");
+                    if (++inventoryRequests == 1)
+                    {
+                        callerCancellation.Cancel();
+                        await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                        throw new InvalidOperationException("The canceled verification request unexpectedly completed.");
+                    }
+                    return FakeHttpMessageHandler.Json("{\"models\":[]}");
                 case "/api/v1/models/unload":
                     cleanupTokenWasCanceled = token.IsCancellationRequested;
                     return FakeHttpMessageHandler.Json("{\"instance_id\":\"model-9b:1\"}");
@@ -156,11 +211,56 @@ public sealed class LmStudioClientTests
         using var client = CreateClient(handler);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            client.LoadAsync("model-9b", callerCancellation.Token));
+            client.LoadOwnedAsync(
+                "model-9b",
+                tracker,
+                (_, token) =>
+                {
+                    cliAbsenceProofs++;
+                    cliCleanupTokenWasCanceled = token.IsCancellationRequested;
+                    return Task.CompletedTask;
+                },
+                callerCancellation.Token));
 
         Assert.False(cleanupTokenWasCanceled);
+        Assert.False(cliCleanupTokenWasCanceled);
+        Assert.Equal(1, cliAbsenceProofs);
+        Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
         Assert.Equal(
-            new[] { "/api/v1/models/load", "/api/v1/models", "/api/v1/models/unload" },
+            new[] { "/api/v1/models/load", "/api/v1/models", "/api/v1/models/unload", "/api/v1/models" },
+            handler.Requests.Select(request => request.Path));
+    }
+
+    [Fact]
+    public async Task FailedPostLoadCleanupReportsGpuReleaseFailureAndRetainsExactOwnership()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri?.AbsolutePath switch
+            {
+                "/api/v1/models/load" => FakeHttpMessageHandler.Json(
+                    "{\"model\":\"model-9b\",\"instance_id\":\"model-9b:1\",\"load_config\":{\"context_length\":32768,\"flash_attention\":true,\"offload_kv_cache_to_gpu\":true}}"),
+                "/api/v1/models/unload" => FakeHttpMessageHandler.Json(
+                    "{}",
+                    HttpStatusCode.InternalServerError),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            }));
+        using var client = CreateClient(handler);
+
+        var exception = await Assert.ThrowsAsync<LmStudioException>(() =>
+            client.LoadOwnedAsync(
+                "model-9b",
+                tracker,
+                static (_, _) => Task.CompletedTask));
+
+        Assert.Equal("GPU_RELEASE_FAILED", exception.Code);
+        var tracked = Assert.IsType<ActiveModelReference>(tracker.ReadReference());
+        Assert.Equal(ModelProviders.LmStudio, tracked.Provider);
+        Assert.Equal("model-9b", tracked.Model);
+        Assert.Equal("model-9b:1", tracked.InstanceId);
+        Assert.Equal(
+            new[] { "/api/v1/models/load", "/api/v1/models/unload" },
             handler.Requests.Select(request => request.Path));
     }
 
@@ -181,7 +281,7 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
-    public void AutomaticEligibilityStaysDisabledWhileFileProofStillRejectsReplacementAndLegacyEvidence()
+    public void AutomaticEligibilityAcceptsCurrentProofAndRejectsReplacementAndLegacyEvidence()
     {
         using var temporary = new TemporaryDirectory();
         var catalog = new ModelCatalogService().LoadBundled().Models.Single(model =>
@@ -204,7 +304,7 @@ public sealed class LmStudioClientTests
             proof.FileIdentity);
 
         Assert.True(LmStudioModelFileBinding.MatchesRegistration(registration, catalog));
-        Assert.False(ReviewerService.RegistrationFileIsCurrent(registration, catalog));
+        Assert.True(ReviewerService.RegistrationFileIsCurrent(registration, catalog));
         Assert.False(ReviewerService.RegistrationFileIsCurrent(registration with { FileIdentity = null }, catalog));
 
         var replacement = modelPath + ".replacement";

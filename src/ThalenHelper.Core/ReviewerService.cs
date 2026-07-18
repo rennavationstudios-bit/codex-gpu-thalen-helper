@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace ThalenHelper.Core;
 
@@ -9,6 +10,7 @@ public sealed class ReviewerService
     private readonly StateStore _stateStore;
     private readonly OllamaClient _ollama;
     private readonly LmStudioClient? _lmStudio;
+    private readonly ILmStudioCliModelBinding? _lmStudioCliBinding;
     private readonly Func<int, bool> _listenerCheck;
     private readonly Func<InstallationState, ReviewerModelStorageVerification> _modelStorageValidator;
     private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
@@ -31,7 +33,8 @@ public sealed class ReviewerService
             null,
             state => IntegrationOwnership.Inspect(paths, state),
             validationStore: new ModelValidationStore(paths.StateDirectory),
-            lmStudio: new LmStudioClient())
+            lmStudio: new LmStudioClient(),
+            lmStudioCliBinding: TryCreateLmStudioCliBinding())
     {
     }
 
@@ -53,11 +56,13 @@ public sealed class ReviewerService
         Func<ModelManifest>? catalogProvider = null,
         Func<HardwareProfile>? hardwareProvider = null,
         ModelValidationStore? validationStore = null,
-        LmStudioClient? lmStudio = null)
+        LmStudioClient? lmStudio = null,
+        ILmStudioCliModelBinding? lmStudioCliBinding = null)
     {
         _stateStore = stateStore;
         _ollama = ollama;
         _lmStudio = lmStudio;
+        _lmStudioCliBinding = lmStudioCliBinding;
         _listenerCheck = listenerCheck ?? OllamaAutoStartManager.IsPortLoopbackOnly;
         _modelStorageValidator = modelStorageValidator ?? (state => ValidateModelStorage(
             state,
@@ -94,27 +99,50 @@ public sealed class ReviewerService
             return HealthError(
                 state,
                 OwnershipErrorCode(ownership),
-                OwnershipErrorMessage(ownership, "probe Ollama"));
-        }
-
-        if (!_listenerCheck(_ollama.BaseUri.Port))
-        {
-            return HealthError(state, "OLLAMA_NETWORK_EXPOSURE", "Ollama is listening on a non-loopback address; local review is blocked.");
-        }
-
-        var storage = _modelStorageValidator(state);
-        if (!storage.Success)
-        {
-            return HealthError(state, storage.Code, storage.Message);
+                OwnershipErrorMessage(ownership, "probe local reviewer providers"));
         }
 
         try
         {
             var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-            var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
-            var running = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            var ollamaConfigured = HasConfiguredOllamaProvider(state, validations);
+            if (!_listenerCheck(_ollama.BaseUri.Port))
+            {
+                return HealthError(state, "OLLAMA_NETWORK_EXPOSURE", "Ollama is listening on a non-loopback address; local review is blocked.");
+            }
+
+            if (ollamaConfigured)
+            {
+                var storage = _modelStorageValidator(state);
+                if (!storage.Success)
+                {
+                    return HealthError(state, storage.Code, storage.Message);
+                }
+            }
+
+            var models = await GetCombinedModelsAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
+            var running = ollamaConfigured
+                ? await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false)
+                : [];
+            var lmRuntimeRequired = !ollamaConfigured
+                || (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+                    && string.Equals(
+                        ModelProviders.Normalize(state.SelectedModelProvider),
+                        ModelProviders.LmStudio,
+                        StringComparison.Ordinal));
+            var lmInventory = lmRuntimeRequired
+                && state.RegisteredLocalModels.Any(item => string.Equals(
+                    item.Provider,
+                    ModelProviders.LmStudio,
+                    StringComparison.OrdinalIgnoreCase))
+                && _lmStudio is not null
+                ? await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false)
+                : [];
             var selected = state.SelectedModel;
-            var selectedModel = ModelIntegrity.FindSelectedModel(models, selected);
+            var selectedProvider = ModelProviders.Normalize(state.SelectedModelProvider);
+            var selectedModel = models.FirstOrDefault(model =>
+                string.Equals(ModelProviders.Normalize(model.Provider), selectedProvider, StringComparison.Ordinal)
+                && ModelIntegrity.NamesMatch(model.Name, selected ?? string.Empty));
             var eligibleModelTags = _router.GetEligibleInstalledModelTags(
                 state,
                 _catalogProvider(),
@@ -132,6 +160,17 @@ public sealed class ReviewerService
                 : selected is null
                     ? null
                     : running.FirstOrDefault(model => ModelIntegrity.NamesMatch(model.Name, selected));
+            var runningLmInstance = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                ? lmInventory
+                    .Where(model => eligibleModelTags.Any(tag => string.Equals(model.Key, tag, StringComparison.Ordinal)))
+                    .SelectMany(model => model.LoadedInstances)
+                    .FirstOrDefault()
+                : string.Equals(selectedProvider, ModelProviders.LmStudio, StringComparison.Ordinal)
+                    ? lmInventory
+                        .Where(model => string.Equals(model.Key, selected, StringComparison.Ordinal))
+                        .SelectMany(model => model.LoadedInstances)
+                        .FirstOrDefault()
+                    : null;
             if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
                 && selected is not null
                 && available
@@ -148,23 +187,34 @@ public sealed class ReviewerService
             return new ReviewerHealthResult
             {
                 Provider = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                    ? "Automatic (Ollama)"
-                    : ModelProviders.Normalize(state.SelectedModelProvider),
+                    ? (ollamaConfigured ? "Automatic (Ollama)" : "Automatic (LM Studio)")
+                    : selectedProvider,
                 Model = selected,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
                 SelectionMode = state.Preferences.ModelSelectionMode,
                 EligibleInstalledModels = eligibleInstalledModels,
                 EndpointReachable = true,
                 ModelAvailable = available,
-                ModelLoaded = runningModel is not null,
+                ModelLoaded = runningModel is not null || runningLmInstance is not null,
                 ModelRan = false,
                 Paused = state.Availability == HelperAvailability.Paused,
                 Availability = state.Availability,
-                Acceleration = runningModel is null ? state.Acceleration : new AccelerationResult(
-                    runningModel.SizeVramBytes > 0 ? "GPU or partial GPU (verify with ollama ps)" : "CPU or unknown",
-                    runningModel.SizeVramBytes,
-                    runningModel.ContextLength,
-                    runningModel.ExpiresAt)
+                Endpoint = ollamaConfigured
+                    ? _ollama.BaseUri.ToString().TrimEnd('/')
+                    : (_lmStudio?.BaseUri.ToString().TrimEnd('/') ?? "http://127.0.0.1:1234"),
+                Acceleration = runningModel is not null
+                    ? new AccelerationResult(
+                        runningModel.SizeVramBytes > 0 ? "GPU or partial GPU (verify with ollama ps)" : "CPU or unknown",
+                        runningModel.SizeVramBytes,
+                        runningModel.ContextLength,
+                        runningModel.ExpiresAt)
+                    : runningLmInstance is not null
+                        ? new AccelerationResult(
+                            "LM Studio managed placement",
+                            null,
+                            runningLmInstance.ContextLength,
+                            null)
+                        : state.Acceleration
             };
         }
         catch (OllamaException exception)
@@ -206,14 +256,12 @@ public sealed class ReviewerService
 
     private async Task<IReadOnlyList<OllamaModelInfo>> GetCombinedModelsAsync(
         InstallationState state,
+        bool includeOllama,
         CancellationToken cancellationToken)
     {
-        var combined = (await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false)).ToList();
-        if (!LmStudioModelFileBinding.ExactLoadedFileBindingSupported)
-        {
-            return combined;
-        }
-
+        var combined = includeOllama
+            ? (await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false)).ToList()
+            : [];
         var registrations = state.RegisteredLocalModels
             .Where(item => string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
             .ToArray();
@@ -222,30 +270,56 @@ public sealed class ReviewerService
             return combined;
         }
 
-        if (_lmStudio is null)
+        if (_lmStudio is null || _lmStudioCliBinding is null)
         {
-            if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
-                && string.Equals(state.SelectedModelProvider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
+            if (!includeOllama
+                || (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+                    && string.Equals(state.SelectedModelProvider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)))
             {
-                throw new LmStudioException("LMSTUDIO_UNAVAILABLE", "LM Studio support is not available in this reviewer process.");
+                throw new LmStudioException(
+                    "LMSTUDIO_CLI_UNAVAILABLE",
+                    "The signed current-user LM Studio CLI is unavailable, so the reviewer cannot bind a model key to its audited GGUF file.");
             }
             return combined;
         }
 
         try
         {
+            var catalog = _catalogProvider();
             var inventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
             foreach (var registration in registrations)
             {
-                var catalog = _catalogProvider().Models.FirstOrDefault(model =>
+                var catalogModel = catalog.Models.FirstOrDefault(model =>
                     string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(model.Tag, registration.Model, StringComparison.Ordinal));
                 var api = inventory.FirstOrDefault(model => string.Equals(model.Key, registration.Model, StringComparison.Ordinal));
-                if (catalog is null || api is null || !RegistrationFileIsCurrent(registration, catalog)
-                    || !ModelIntegrity.DigestMatches(registration.Digest, catalog.ExpectedDigest)
-                    || api.SizeBytes != catalog.ExpectedDownloadBytes)
+                if (catalogModel is null
+                    || api is null
+                    || string.IsNullOrWhiteSpace(catalogModel.IndexedModelPath)
+                    || !FullDigestsEqual(registration.Digest, catalogModel.ExpectedDigest)
+                    || registration.Length < 0
+                    || (ulong)registration.Length != catalogModel.ExpectedDownloadBytes
+                    || api.SizeBytes != catalogModel.ExpectedDownloadBytes
+                    || !LmStudioModelFileBinding.TryOpen(registration.Path, out var registeredFile, out var registeredProof))
                 {
                     continue;
+                }
+
+                using (registeredFile)
+                {
+                    if (!RegistrationMatchesOpenFile(registration, catalogModel, registeredProof))
+                    {
+                        continue;
+                    }
+
+                    using var modelPathLease = _lmStudioCliBinding.AcquireModelPathLease(
+                        catalogModel.IndexedModelPath,
+                        registeredProof);
+                    await _lmStudioCliBinding.VerifyDownloadedAsync(
+                        registration.Model,
+                        catalogModel.IndexedModelPath,
+                        registeredProof,
+                        cancellationToken).ConfigureAwait(false);
                 }
                 combined.Add(new OllamaModelInfo(
                     api.Key,
@@ -258,12 +332,27 @@ public sealed class ReviewerService
                     registration.Path));
             }
         }
-        catch (LmStudioException) when (state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
+        catch (LmStudioException) when (includeOllama
+            && state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
         {
             // Automatic mode degrades to a validated Ollama route when LM Studio is closed or untrusted.
         }
         return combined;
     }
+
+    private static bool HasConfiguredOllamaProvider(
+        InstallationState state,
+        ModelValidationRegistry validations)
+        => !string.IsNullOrWhiteSpace(state.ModelStorageLocation)
+            || (!string.IsNullOrWhiteSpace(state.SelectedModel)
+                && string.Equals(
+                    ModelProviders.Normalize(state.SelectedModelProvider),
+                    ModelProviders.Ollama,
+                    StringComparison.Ordinal))
+            || validations.Entries.Any(entry => string.Equals(
+                ModelProviders.Normalize(entry.Provider),
+                ModelProviders.Ollama,
+                StringComparison.Ordinal));
 
     private async Task<ReviewerResult> ReviewWithLmStudioAsync(
         ReviewRequest request,
@@ -274,7 +363,9 @@ public sealed class ReviewerService
         Stopwatch stopwatch,
         CancellationToken cancellationToken)
     {
-        if (_lmStudio is null || string.IsNullOrWhiteSpace(plannedRoute.Model))
+        if (_lmStudio is null
+            || _lmStudioCliBinding is null
+            || string.IsNullOrWhiteSpace(plannedRoute.Model))
         {
             throw new LmStudioException("LMSTUDIO_UNAVAILABLE", "LM Studio support is unavailable.");
         }
@@ -285,7 +376,8 @@ public sealed class ReviewerService
             TimeSpan.FromSeconds(request.QueueTimeoutSeconds),
             cancellationToken).ConfigureAwait(false);
         var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-        var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+        var ollamaConfigured = HasConfiguredOllamaProvider(state, validations);
+        var models = await GetCombinedModelsAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
         var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
         if (!route.Allowed || !string.Equals(route.Provider, ModelProviders.LmStudio, StringComparison.Ordinal)
             || !string.Equals(route.Model, routedModel, StringComparison.Ordinal))
@@ -293,22 +385,93 @@ public sealed class ReviewerService
             throw new LmStudioException("MODEL_ROUTE_CHANGED", "The LM Studio route changed while waiting for the GPU lease; retry the bounded review.", true);
         }
 
-        var registration = state.RegisteredLocalModels.SingleOrDefault(item =>
+        var matchingRegistrations = state.RegisteredLocalModels.Where(item =>
             string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(item.Model, route.Model, StringComparison.Ordinal));
+            && string.Equals(item.Model, route.Model, StringComparison.Ordinal)).ToArray();
+        var registration = matchingRegistrations.Length == 1 ? matchingRegistrations[0] : null;
         var catalog = _catalogProvider().Models.FirstOrDefault(model =>
             string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
             && string.Equals(model.Tag, route.Model, StringComparison.Ordinal));
-        if (registration is null || !RegistrationFileIsCurrent(registration, catalog))
+        if (registration is null
+            || catalog is null
+            || string.IsNullOrWhiteSpace(catalog.IndexedModelPath)
+            || !FullDigestsEqual(registration.Digest, catalog.ExpectedDigest)
+            || !FullDigestsEqual(registration.Digest, route.ExpectedDigest)
+            || !LmStudioModelFileBinding.TryOpen(registration.Path, out var auditedFile, out var auditedProof))
         {
             throw new LmStudioException("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed or became unavailable before generation.");
         }
-        var runningOllama = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-        if (runningOllama.Count > 0)
+
+        using (auditedFile)
         {
-            throw new LmStudioException("FOREIGN_MODEL_LOADED", "Ollama already has a model loaded. The helper will not unload or replace an unowned runtime instance.", true);
+            if (!RegistrationMatchesOpenFile(registration, catalog, auditedProof))
+            {
+                throw new LmStudioException("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed or became unavailable before generation.");
+            }
+
+            using var modelPathLease = _lmStudioCliBinding.AcquireModelPathLease(
+                catalog.IndexedModelPath,
+                auditedProof);
+            var currentDigest = await ComputeFullSha256Async(auditedFile, cancellationToken).ConfigureAwait(false);
+            if (!FullDigestsEqual(currentDigest, registration.Digest)
+                || !FullDigestsEqual(currentDigest, catalog.ExpectedDigest)
+                || !FullDigestsEqual(currentDigest, route.ExpectedDigest))
+            {
+                throw new LmStudioException(
+                    "MODEL_DIGEST_MISMATCH",
+                    "The routed LM Studio GGUF no longer matches the full audited SHA-256 digest.");
+            }
+
+            await _lmStudioCliBinding.VerifyDownloadedAsync(
+                routedModel,
+                catalog.IndexedModelPath,
+                auditedProof,
+                cancellationToken).ConfigureAwait(false);
+
+            return await RunLmStudioReviewWithAuditedFileHeldAsync(
+                request,
+                state,
+                route,
+                catalog,
+                auditedProof,
+                boundedAssignment,
+                outputTokens,
+                stopwatch,
+                ollamaConfigured,
+                cancellationToken).ConfigureAwait(false);
         }
-        var lmInventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ReviewerResult> RunLmStudioReviewWithAuditedFileHeldAsync(
+        ReviewRequest request,
+        InstallationState state,
+        ModelRouteDecision route,
+        ModelCatalogEntry catalog,
+        LmStudioModelFileProof auditedProof,
+        string boundedAssignment,
+        int outputTokens,
+        Stopwatch stopwatch,
+        bool ollamaConfigured,
+        CancellationToken cancellationToken)
+    {
+        var routedModel = route.Model!;
+        var lmStudio = _lmStudio!;
+        var cliBinding = _lmStudioCliBinding!;
+        if (!_listenerCheck(_ollama.BaseUri.Port))
+        {
+            throw new LmStudioException(
+                "OLLAMA_NETWORK_EXPOSURE",
+                "Ollama listener state changed and is no longer loopback-only; local review is blocked.");
+        }
+        if (ollamaConfigured)
+        {
+            var runningOllama = await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            if (runningOllama.Count > 0)
+            {
+                throw new LmStudioException("FOREIGN_MODEL_LOADED", "Ollama already has a model loaded. The helper will not unload or replace an unowned runtime instance.", true);
+            }
+        }
+        var lmInventory = await lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
         if (lmInventory.SelectMany(model => model.LoadedInstances).Any())
         {
             throw new LmStudioException("FOREIGN_MODEL_LOADED", "LM Studio already has a model loaded. The helper will not unload or replace a user-owned instance.", true);
@@ -324,9 +487,34 @@ public sealed class ReviewerService
         LmStudioGenerationResult? generation = null;
         try
         {
-            load = await _lmStudio.LoadAsync(routedModel, cancellationToken).ConfigureAwait(false);
-            _activeModelTracker.Set(new ActiveModelReference(ModelProviders.LmStudio, routedModel, load.InstanceId));
-            generation = await _lmStudio.GenerateReasoningOffAsync(
+            load = await lmStudio.LoadOwnedAsync(
+                routedModel,
+                _activeModelTracker,
+                (instanceId, token) => cliBinding.VerifyUnloadedAsync(
+                    instanceId,
+                    catalog.IndexedModelPath!,
+                    token),
+                cancellationToken).ConfigureAwait(false);
+
+            var loadedInventory = await lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            var loadedInstances = loadedInventory
+                .SelectMany(model => model.LoadedInstances.Select(instance => (model.Key, Instance: instance)))
+                .ToArray();
+            if (loadedInstances.Length != 1
+                || !string.Equals(loadedInstances[0].Key, routedModel, StringComparison.Ordinal)
+                || !string.Equals(loadedInstances[0].Instance.Id, load.InstanceId, StringComparison.Ordinal))
+            {
+                throw new LmStudioException(
+                    "MODEL_RESPONSE_IDENTITY_MISMATCH",
+                    "LM Studio did not expose exactly the helper-created instance for the audited model key.");
+            }
+
+            await cliBinding.VerifyLoadedAsync(
+                load.InstanceId,
+                catalog.IndexedModelPath!,
+                auditedProof,
+                cancellationToken).ConfigureAwait(false);
+            generation = await lmStudio.GenerateReasoningOffAsync(
                 routedModel,
                 load.InstanceId,
                 BuildPrompt(request, route.HardwareTier),
@@ -340,8 +528,15 @@ public sealed class ReviewerService
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
                 try
                 {
-                    await _lmStudio.UnloadAndWaitAsync(routedModel, load.InstanceId, TimeSpan.FromSeconds(30), cleanup.Token).ConfigureAwait(false);
-                    _activeModelTracker.Clear(routedModel);
+                    await lmStudio.UnloadAndWaitAsync(routedModel, load.InstanceId, TimeSpan.FromSeconds(30), cleanup.Token).ConfigureAwait(false);
+                    await cliBinding.VerifyUnloadedAsync(
+                        load.InstanceId,
+                        catalog.IndexedModelPath!,
+                        cleanup.Token).ConfigureAwait(false);
+                    LmStudioClient.ClearExactOwnedReference(
+                        _activeModelTracker,
+                        routedModel,
+                        load.InstanceId);
                 }
                 catch (Exception exception) when (exception is LmStudioException or OperationCanceledException)
                 {
@@ -383,8 +578,83 @@ public sealed class ReviewerService
     internal static bool RegistrationFileIsCurrent(
         LocalModelRegistration registration,
         ModelCatalogEntry? catalog)
-        => LmStudioModelFileBinding.ExactLoadedFileBindingSupported
-            && LmStudioModelFileBinding.MatchesRegistration(registration, catalog);
+        => LmStudioModelFileBinding.MatchesRegistration(registration, catalog);
+
+    private static bool RegistrationMatchesOpenFile(
+        LocalModelRegistration registration,
+        ModelCatalogEntry catalog,
+        LmStudioModelFileProof current)
+    {
+        if (string.IsNullOrWhiteSpace(registration.FileIdentity)
+            || string.IsNullOrWhiteSpace(catalog.IndexedModelPath)
+            || registration.Length < 0
+            || (ulong)registration.Length != catalog.ExpectedDownloadBytes
+            || !registration.LastWriteTimeUtc.HasValue
+            || !LmStudioModelFileBinding.IsCanonicalCatalogBinding(catalog, registration.Model, registration.Path))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(current.FullPath, Path.GetFullPath(registration.Path), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(current.FileIdentity, registration.FileIdentity, StringComparison.Ordinal)
+                && current.Length == registration.Length
+                && current.LastWriteTimeUtc == registration.LastWriteTimeUtc.Value.ToUniversalTime();
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static bool FullDigestsEqual(string? left, string? right)
+    {
+        var normalizedLeft = ModelValidationStore.NormalizeFullDigest(left);
+        var normalizedRight = ModelValidationStore.NormalizeFullDigest(right);
+        return normalizedLeft is not null
+            && normalizedRight is not null
+            && string.Equals(normalizedLeft, normalizedRight, StringComparison.Ordinal);
+    }
+
+    private static async Task<string> ComputeFullSha256Async(
+        FileStream stream,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            stream.Position = 0;
+            return Convert.ToHexString(
+                await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false))
+                .ToLowerInvariant();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or NotSupportedException
+            or System.Security.SecurityException)
+        {
+            throw new LmStudioException(
+                "MODEL_FILE_IDENTITY_CHANGED",
+                "The validated LM Studio GGUF could not be hashed safely before generation.");
+        }
+    }
+
+    private static ILmStudioCliModelBinding? TryCreateLmStudioCliBinding()
+    {
+        try
+        {
+            return new LmStudioCliModelBinding();
+        }
+        catch (LmStudioException)
+        {
+            // Ollama-only installations remain usable. Any LM route fails closed.
+            return null;
+        }
+    }
 
     public async Task<ReviewerPlanResult> PlanAsync(ReviewRequest request, CancellationToken cancellationToken = default)
     {
@@ -420,7 +690,8 @@ public sealed class ReviewerService
         try
         {
             var validations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-            var models = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+            var ollamaConfigured = HasConfiguredOllamaProvider(state, validations);
+            var models = await GetCombinedModelsAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
             var route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
             if (!route.Allowed)
             {
@@ -541,7 +812,11 @@ public sealed class ReviewerService
                 state.HardwareTier);
         }
 
-        if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned)
+        if (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
+            && !string.Equals(
+                ModelProviders.Normalize(state.SelectedModelProvider),
+                ModelProviders.LmStudio,
+                StringComparison.Ordinal))
         {
             var pinnedStorage = _modelStorageValidator(state);
             if (!pinnedStorage.Success)
@@ -584,7 +859,8 @@ public sealed class ReviewerService
                 string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)))
             {
                 var initialValidations = await _validationStore.LoadAsync(cancellationToken).ConfigureAwait(false);
-                var initialModels = await GetCombinedModelsAsync(state, cancellationToken).ConfigureAwait(false);
+                var ollamaConfigured = HasConfiguredOllamaProvider(state, initialValidations);
+                var initialModels = await GetCombinedModelsAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
                 route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), initialModels, initialValidations);
                 if (route.Allowed && string.Equals(route.Provider, ModelProviders.LmStudio, StringComparison.Ordinal))
                 {
@@ -597,7 +873,8 @@ public sealed class ReviewerService
                 async token =>
                 {
                     var validations = await _validationStore.LoadAsync(token).ConfigureAwait(false);
-                    var models = await GetCombinedModelsAsync(state, token).ConfigureAwait(false);
+                    var ollamaConfigured = HasConfiguredOllamaProvider(state, validations);
+                    var models = await GetCombinedModelsAsync(state, ollamaConfigured, token).ConfigureAwait(false);
                     route = _router.Plan(request, state, _catalogProvider(), _hardwareProvider(), models, validations);
                     if (!string.Equals(route.Provider, ModelProviders.Ollama, StringComparison.Ordinal))
                     {

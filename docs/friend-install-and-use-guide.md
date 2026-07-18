@@ -1,6 +1,6 @@
 # Friend install and use guide
 
-This bundle is designed for a Windows user who has never configured Codex, Ollama, or a local model integration before.
+This bundle is designed for a Windows user who has never configured Codex, Ollama, LM Studio, or a local model integration before.
 
 ## Install
 
@@ -13,10 +13,12 @@ The simplest option is to open `0 - PASTE THIS INTO CODEX.md`, copy its prompt i
 5. Read the installer choices. Automatic Ollama startup is recommended. If another per-user Ollama startup entry already exists, the helper preserves it and does not add a duplicate, but labels it unverified until you review or replace that launcher. You can instead choose manual startup.
 6. Setup finds the current user's Codex home, creates timestamped backups of existing `config.toml` and `AGENTS.override.md`, and adds only marked managed content. It never replaces either file.
 7. The base install does not download or load a model. When the Control Center opens, choose one path:
-   - use an existing Ollama model folder;
-   - choose a supported model and explicitly approve its download and bounded validation; or
+   - choose where Ollama models should be stored and use an existing model there;
+   - choose a hardware-compatible Ollama model and explicitly approve its download and bounded validation;
+   - register the exact existing Qwythos GGUF already indexed by LM Studio, with no download; or
    - finish model setup later.
-8. Restart every Codex window after helper-owned setup so Codex discovers the MCP tools.
+8. Before an Ollama download, the wizard shows the model size, selected drive, current free space, temporary overhead, and required safety reserve. It lists only conservative GPU fits, plus any CPU path you explicitly enabled. It never silently chooses a different model. Add more eligible models later one confirmed model at a time.
+9. Restart every Codex window after helper-owned setup so Codex discovers the MCP tools.
 
 ## Let Codex help safely
 
@@ -52,17 +54,19 @@ Passive status never runs a model. **Test local review** is the explicit action 
 - **Release GPU** requests cancellation and waits for a tracked zero-keep-alive review to release without blocking future reviews. It reports an unconfirmed release rather than force-unloading a mutable model tag.
 - **Low impact** unloads immediately after each response and is recommended during emulator, Expo, graphics, or device work.
 - **Keep warm** retains the model for a bounded idle period when hardware headroom permits.
-- **Auto model** lets each Codex task passively choose the safest installed audited Q4 model for its task type, size, and current hardware headroom. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.
+- **Auto model** lets each Codex task passively choose the safest installed, catalog-audited, provider-validated model for its task type, size, and current hardware headroom. This can include Ollama models and the currently audited existing LM Studio/Qwythos route. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.
 
 The helper does not control Codex or its cloud model. It offers Codex three optional local tools: passive health, passive task/model planning, and one bounded read-only review. `local_gpu_plan` downloads, loads, and runs nothing; it tells Codex which installed model and context would be used before Codex announces and requests a review. Codex decides whether to request a tool, and the local result remains advisory.
 
 ## Models and automatic startup
 
-Setup never silently downloads a model. A missing model can be downloaded only after a named model choice and confirmation. A user with existing models can point setup to that Ollama model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables review.
+Setup never silently downloads a model. A missing Ollama model can be downloaded only after a named model choice, hardware-fit check, storage selection, free-space/reserve check, and confirmation. A user with existing Ollama models can point setup to that model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables that route.
 
-Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models that passed this installation's exact-identity validation. A missing or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. LM Studio enrollment is disabled in beta.12 because the current inventory API cannot prove the exact GGUF file behind a loaded key.
+LM Studio is an existing-model path, not a download service. This release supports only the catalog-audited Qwythos GGUF already indexed beneath the current user's LM Studio models root. Registration requires the signed current-user LM Studio inventory to match the exact catalog-relative path and size, then checks the file identity and full SHA-256 before bounded validation through the loopback server. It unloads only the exact instance it created and verifies that instance is gone. Older beta.11 registrations must be explicitly revalidated; other GGUF files are not accepted merely because LM Studio can open them.
 
-When automatic startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before local review works.
+Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited models that passed this installation's provider-specific exact-identity validation. A missing, old, or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. Keep both providers loopback-only: Ollama on port 11434 and LM Studio on port 1234.
+
+When automatic Ollama startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before an Ollama review works. LM Studio remains user-controlled; start its loopback local server before an LM Studio review.
 
 ## Help and uninstall
 

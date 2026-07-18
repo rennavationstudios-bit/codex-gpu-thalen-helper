@@ -452,10 +452,12 @@ internal static class CliApplication
         }
         if (!parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "LM Studio registration is fail-closed in beta.12 and --yes only authorizes clearing stale registration evidence before returning the binding-unavailable result.");
+            return Fail(
+                "CONFIRMATION_REQUIRED",
+                "LM Studio registration performs exact-file checks, loads the named model for two bounded validation prompts, and must prove exact unload before enabling it. Review the model key and GGUF path, then pass --yes only with explicit consent.");
         }
 
-        Console.Error.WriteLine($"Integration: {ProductInfo.IntegrationName} | Provider: {ModelProviders.LmStudio} | Model: {parsed.Positionals[2]} | Purpose: fail-closed exact-file binding check; no inference");
+        Console.Error.WriteLine($"Integration: {ProductInfo.IntegrationName} | Provider: {ModelProviders.LmStudio} | Model: {parsed.Positionals[2]} | Purpose: exact-file binding plus two bounded validation prompts; exact unload required");
         using var client = new LmStudioClient();
         var result = await new LmStudioRegistrationService(paths, store, client)
             .ValidateAndEnableAsync(parsed.Positionals[2], parsed.Positionals[3]).ConfigureAwait(false);

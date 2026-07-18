@@ -18,19 +18,48 @@ public sealed record LmStudioRegistrationResult(
 
 public sealed class LmStudioRegistrationService
 {
+    private readonly ProductPaths _paths;
     private readonly StateStore _stateStore;
     private readonly ModelValidationStore _validationStore;
     private readonly LmStudioClient _client;
     private readonly ModelManifest _catalog;
     private readonly ActiveModelTracker _tracker;
-    private readonly ResourcePressureGuard _pressure = new();
+    private readonly ILmStudioCliModelBinding _cliBinding;
+    private readonly CodexConfigManager _configManager;
+    private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
+    private readonly Func<InstallationState, ProtectedFileSnapshot, CancellationToken, Task<ProtectedFileSnapshot>> _stateSaver;
 
     public LmStudioRegistrationService(ProductPaths paths, StateStore stateStore, LmStudioClient client)
+        : this(
+            paths,
+            stateStore,
+            client,
+            new LmStudioCliModelBinding(),
+            new ModelCatalogService().LoadBundled(),
+            CreateDefaultPressureValidator())
     {
+    }
+
+    internal LmStudioRegistrationService(
+        ProductPaths paths,
+        StateStore stateStore,
+        LmStudioClient client,
+        ILmStudioCliModelBinding cliBinding,
+        ModelManifest catalog,
+        Func<InstallationState, bool, ResourcePressureCheck> resourcePressureValidator,
+        CodexConfigManager? configManager = null,
+        Func<InstallationState, ProtectedFileSnapshot, CancellationToken, Task<ProtectedFileSnapshot>>? stateSaver = null)
+    {
+        _paths = paths;
         _stateStore = stateStore;
         _validationStore = new ModelValidationStore(paths.StateDirectory);
         _client = client;
-        _catalog = new ModelCatalogService().LoadBundled();
+        _cliBinding = cliBinding ?? throw new ArgumentNullException(nameof(cliBinding));
+        _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        _configManager = configManager ?? new CodexConfigManager();
+        _resourcePressureValidator = resourcePressureValidator
+            ?? throw new ArgumentNullException(nameof(resourcePressureValidator));
+        _stateSaver = stateSaver ?? stateStore.SaveIfUnchangedAsync;
         _tracker = new ActiveModelTracker(paths.StateDirectory);
     }
 
@@ -65,7 +94,16 @@ public sealed class LmStudioRegistrationService
             return Failure("MODEL_NOT_AUDITED", "The LM Studio model is not present in the audited catalog.", modelKey);
         }
 
-        var fullPath = Path.GetFullPath(modelPath);
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(modelPath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return Failure("MODEL_FILE_CATALOG_BINDING_MISMATCH", "The selected GGUF path is invalid.", modelKey);
+        }
+
         if (!LmStudioModelFileBinding.IsCanonicalCatalogBinding(entry, modelKey, fullPath))
         {
             return Failure("MODEL_FILE_CATALOG_BINDING_MISMATCH", "The selected GGUF path is not the exact indexed path bound to this audited LM Studio model key.", modelKey);
@@ -77,36 +115,66 @@ public sealed class LmStudioRegistrationService
             return Failure("MODEL_FILE_IDENTITY_MISMATCH", "The selected GGUF is missing, redirected, or has an unexpected size.", modelKey);
         }
 
+        await using var heldModelStream = modelStream;
         string digest;
-        await using (modelStream.ConfigureAwait(false))
+        try
         {
-            digest = await ComputeSha256Async(modelStream, cancellationToken).ConfigureAwait(false);
-            if (!LmStudioModelFileBinding.TryReadProof(modelStream.SafeFileHandle, fullPath, out var proofAfterHash)
+            digest = await ComputeSha256Async(heldModelStream, cancellationToken).ConfigureAwait(false);
+            if (!LmStudioModelFileBinding.TryReadProof(heldModelStream.SafeFileHandle, fullPath, out var proofAfterHash)
                 || proofAfterHash != auditedProof)
             {
                 return Failure("MODEL_FILE_IDENTITY_CHANGED", "The selected GGUF changed while its full digest was being validated.", modelKey);
             }
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or CryptographicException)
+        {
+            return Failure("MODEL_FILE_READ_FAILED", "The selected GGUF could not be fully hashed while held read-only.", modelKey);
+        }
+
         if (!string.Equals(digest, ModelValidationStore.NormalizeFullDigest(entry.ExpectedDigest), StringComparison.Ordinal))
         {
             return Failure("MODEL_DIGEST_MISMATCH", "The selected GGUF does not match the audited full SHA-256 digest.", modelKey);
         }
 
-        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var stateLoad = await _stateStore.LoadWithRevisionAsync(cancellationToken).ConfigureAwait(false);
+        var state = stateLoad.State;
         if (state is null)
         {
             return Failure("NOT_CONFIGURED", "Install the helper before registering an LM Studio model.", modelKey);
+        }
+        if (_configManager.InspectOwnership(_paths) != CodexIntegrationOwnership.ManagedValid)
+        {
+            return Failure(
+                "INTEGRATION_OWNERSHIP_DRIFT",
+                "The managed Codex reviewer entry is missing, external, invalid, or changed. LM Studio validation did not modify or enable it.",
+                modelKey,
+                digest);
         }
 
         var exactMs = 0L;
         var reviewMs = 0L;
         var unloaded = false;
         LmStudioLoadResult? load = null;
+        Exception? operationFailure = null;
+        IDisposable? gpuLease = null;
+        IDisposable? modelPathLease = null;
         try
         {
-            using var lease = await GpuCoordination.AcquireAsync(
+            gpuLease = await GpuCoordination.AcquireAsync(
                 ReviewBusyBehavior.Queue,
                 TimeSpan.FromSeconds(120),
+                cancellationToken).ConfigureAwait(false);
+            modelPathLease = _cliBinding.AcquireModelPathLease(
+                entry.IndexedModelPath!,
+                auditedProof);
+            await _cliBinding.VerifyDownloadedAsync(
+                modelKey,
+                entry.IndexedModelPath!,
+                auditedProof,
                 cancellationToken).ConfigureAwait(false);
             var inventory = await _client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
             var model = inventory.SingleOrDefault(candidate => string.Equals(candidate.Key, modelKey, StringComparison.Ordinal));
@@ -120,19 +188,34 @@ public sealed class LmStudioRegistrationService
             }
 
             var routedState = state with { SelectedModel = modelKey, SelectedModelDigest = digest, SelectedModelProvider = ModelProviders.LmStudio };
-            var pressure = _pressure.Check(routedState, selectedModelAlreadyLoaded: false);
+            var pressure = _resourcePressureValidator(routedState, false);
             if (!pressure.Allowed)
             {
                 return Failure(pressure.Code, pressure.Message, modelKey, digest);
             }
 
-            if (!LmStudioModelFileBinding.MatchesCurrentFile(auditedProof))
+            if (!LmStudioModelFileBinding.TryReadProof(
+                    heldModelStream.SafeFileHandle,
+                    fullPath,
+                    out var proofBeforeLoad)
+                || proofBeforeLoad != auditedProof)
             {
                 return Failure("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed before the audited model key could be loaded.", modelKey, digest);
             }
 
-            load = await _client.LoadAsync(modelKey, cancellationToken).ConfigureAwait(false);
-            _tracker.Set(new ActiveModelReference(ModelProviders.LmStudio, modelKey, load.InstanceId));
+            load = await _client.LoadOwnedAsync(
+                modelKey,
+                _tracker,
+                (instanceId, cleanupToken) => _cliBinding.VerifyUnloadedAsync(
+                    instanceId,
+                    entry.IndexedModelPath!,
+                    cleanupToken),
+                cancellationToken).ConfigureAwait(false);
+            await _cliBinding.VerifyLoadedAsync(
+                load.InstanceId,
+                entry.IndexedModelPath!,
+                auditedProof,
+                cancellationToken).ConfigureAwait(false);
             var timer = Stopwatch.StartNew();
             var exact = await _client.GenerateReasoningOffAsync(modelKey, load.InstanceId,
                 "Return exactly this text and nothing else: THALEN_LMSTUDIO_OK", 64, cancellationToken).ConfigureAwait(false);
@@ -140,7 +223,9 @@ public sealed class LmStudioRegistrationService
             exactMs = timer.ElapsedMilliseconds;
             if (!string.Equals(exact.Response, "THALEN_LMSTUDIO_OK", StringComparison.Ordinal))
             {
-                return Failure("MODEL_EXACT_OUTPUT_FAILED", "Qwythos did not pass the reasoning-off exact-output check.", modelKey, digest);
+                throw new LmStudioException(
+                    "MODEL_EXACT_OUTPUT_FAILED",
+                    "Qwythos did not pass the reasoning-off exact-output check.");
             }
 
             timer.Restart();
@@ -151,65 +236,289 @@ public sealed class LmStudioRegistrationService
             reviewMs = timer.ElapsedMilliseconds;
             if (string.IsNullOrWhiteSpace(review.Response) || review.Response.Length > 8_000)
             {
-                return Failure("MODEL_REVIEW_VALIDATION_FAILED", "Qwythos did not return a bounded review response.", modelKey, digest);
+                throw new LmStudioException(
+                    "MODEL_REVIEW_VALIDATION_FAILED",
+                    "Qwythos did not return a bounded review response.");
             }
         }
-        catch (LmStudioException exception)
+        catch (Exception exception)
         {
-            return Failure(exception.Code, exception.Message, modelKey, digest, exactMs, reviewMs, unloaded);
-        }
-        catch (OllamaException exception)
-        {
-            return Failure(exception.Code, exception.Message, modelKey, digest, exactMs, reviewMs, unloaded);
+            operationFailure = exception;
         }
         finally
         {
-            if (load is not null)
+            try
             {
-                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-                try
+                if (load is not null)
                 {
-                    await _client.UnloadAndWaitAsync(modelKey, load.InstanceId, TimeSpan.FromSeconds(30), cleanup.Token).ConfigureAwait(false);
-                    unloaded = true;
-                    _tracker.Clear(modelKey);
+                    using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                    try
+                    {
+                        var inspection = _tracker.Inspect();
+                        var tracked = inspection.Reference;
+                        if (inspection.Status != ActiveModelTrackerStatus.Valid
+                            || tracked is null
+                            || !string.Equals(tracked.Provider, ModelProviders.LmStudio, StringComparison.Ordinal)
+                            || !string.Equals(tracked.Model, modelKey, StringComparison.Ordinal)
+                            || !string.Equals(tracked.InstanceId, load.InstanceId, StringComparison.Ordinal))
+                        {
+                            throw new LmStudioException(
+                                "GPU_RELEASE_FAILED",
+                                "The helper-created LM Studio instance no longer has exact durable ownership evidence.",
+                                retryable: true);
+                        }
+
+                        await _client.UnloadAndWaitAsync(modelKey, load.InstanceId, TimeSpan.FromSeconds(30), cleanup.Token).ConfigureAwait(false);
+                        await _cliBinding.VerifyUnloadedAsync(
+                            load.InstanceId,
+                            entry.IndexedModelPath!,
+                            cleanup.Token).ConfigureAwait(false);
+                        LmStudioClient.ClearExactOwnedReference(
+                            _tracker,
+                            modelKey,
+                            load.InstanceId);
+                        unloaded = true;
+                    }
+                    catch (Exception exception) when (exception is LmStudioException or OperationCanceledException)
+                    {
+                        unloaded = false;
+                    }
                 }
-                catch (Exception exception) when (exception is LmStudioException or OperationCanceledException)
-                {
-                    unloaded = false;
-                }
+            }
+            finally
+            {
+                modelPathLease?.Dispose();
+                gpuLease?.Dispose();
             }
         }
 
         if (!unloaded)
         {
-            return Failure("GPU_RELEASE_FAILED", "Qwythos ran but LM Studio did not prove the helper-created instance was unloaded; registration was refused.", modelKey, digest, exactMs, reviewMs, false);
+            if (load is not null
+                || operationFailure is LmStudioException { Code: "GPU_RELEASE_FAILED" })
+            {
+                return Failure("GPU_RELEASE_FAILED", "LM Studio did not prove the helper-created instance was unloaded; registration was refused and durable recovery evidence was retained.", modelKey, digest, exactMs, reviewMs, false);
+            }
         }
 
-        if (!LmStudioModelFileBinding.MatchesCurrentFile(auditedProof))
+        if (operationFailure is LmStudioException lmStudioFailure)
+        {
+            return Failure(lmStudioFailure.Code, lmStudioFailure.Message, modelKey, digest, exactMs, reviewMs, unloaded);
+        }
+        if (operationFailure is OllamaException ollamaFailure)
+        {
+            return Failure(ollamaFailure.Code, ollamaFailure.Message, modelKey, digest, exactMs, reviewMs, unloaded);
+        }
+        if (operationFailure is OperationCanceledException cancellationFailure)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cancellationFailure).Throw();
+        }
+        if (operationFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationFailure).Throw();
+        }
+
+        if (!LmStudioModelFileBinding.TryReadProof(
+                heldModelStream.SafeFileHandle,
+                fullPath,
+                out var proofBeforeRegistration)
+            || proofBeforeRegistration != auditedProof)
         {
             return Failure("MODEL_FILE_IDENTITY_CHANGED", "The validated LM Studio GGUF changed before its registration could be recorded.", modelKey, digest, exactMs, reviewMs, true);
         }
 
-        await _validationStore.UpsertAsync(new ModelValidationEntry(
-            modelKey, digest, ModelValidationStore.CurrentProtocolVersion, DateTimeOffset.UtcNow,
-            exactMs, reviewMs, "LM Studio GPU", null, 65_536, ModelProviders.LmStudio), cancellationToken).ConfigureAwait(false);
-        state.RegisteredLocalModels.RemoveAll(item =>
-            string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(item.Model, modelKey, StringComparison.Ordinal));
-        state.RegisteredLocalModels.Add(new LocalModelRegistration(
-            ModelProviders.LmStudio, modelKey, digest, fullPath, DateTimeOffset.UtcNow,
-            auditedProof.Length, auditedProof.LastWriteTimeUtc, auditedProof.FileIdentity));
-        state.Preferences = state.Preferences with { PreferLmStudioForStandardAndDeep = true, ModelSelectionMode = ModelSelectionMode.Automatic };
-        state.Availability = HelperAvailability.Enabled;
-        state.ProductVersion = ProductInfo.Version;
-        await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+        IDisposable registrationPathLease;
+        try
+        {
+            registrationPathLease = _cliBinding.AcquireModelPathLease(
+                entry.IndexedModelPath!,
+                auditedProof);
+            await _cliBinding.VerifyDownloadedAsync(
+                modelKey,
+                entry.IndexedModelPath!,
+                auditedProof,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (LmStudioException exception)
+        {
+            return Failure(exception.Code, exception.Message, modelKey, digest, exactMs, reviewMs, true);
+        }
+        using var heldRegistrationPathLease = registrationPathLease;
+
+        var validatedAt = DateTimeOffset.UtcNow;
+        var registration = new LocalModelRegistration(
+            ModelProviders.LmStudio,
+            modelKey,
+            digest,
+            fullPath,
+            validatedAt,
+            auditedProof.Length,
+            auditedProof.LastWriteTimeUtc,
+            auditedProof.FileIdentity);
+        var updatedState = BuildActivatedState(state, entry, registration);
+        var validation = new ModelValidationEntry(
+            modelKey,
+            digest,
+            ModelValidationStore.CurrentProtocolVersion,
+            validatedAt,
+            exactMs,
+            reviewMs,
+            "LM Studio GPU",
+            null,
+            65_536,
+            ModelProviders.LmStudio);
+
+        ManagedFileResult? configChange = null;
+        ProtectedFileSnapshot? savedStateRevision = null;
+        try
+        {
+            // SetEnabled revalidates exact managed ownership and uses a hash-bound
+            // compare-and-swap. No unmanaged or drifted reviewer table is touched.
+            configChange = _configManager.SetEnabled(_paths, true);
+            savedStateRevision = await _stateSaver(
+                updatedState,
+                stateLoad.Revision,
+                cancellationToken).ConfigureAwait(false);
+            await _validationStore.UpsertAsync(validation, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            var rollbackSucceeded = await RollbackActivationAsync(
+                modelKey,
+                state,
+                savedStateRevision,
+                configChange).ConfigureAwait(false);
+            if (!rollbackSucceeded)
+            {
+                throw new InvalidOperationException(
+                    "LM Studio activation was canceled and guarded rollback could not be proven. Review the protected state and config backups before retrying.");
+            }
+
+            throw;
+        }
+        catch (Exception)
+        {
+            var rollbackSucceeded = await RollbackActivationAsync(
+                modelKey,
+                state,
+                savedStateRevision,
+                configChange).ConfigureAwait(false);
+            return rollbackSucceeded
+                ? Failure(
+                    "LMSTUDIO_ACTIVATION_FAILED",
+                    "The model passed validation, but the managed Codex activation could not be committed atomically. Prior state and config were restored.",
+                    modelKey,
+                    digest,
+                    exactMs,
+                    reviewMs,
+                    true)
+                : Failure(
+                    "LMSTUDIO_ACTIVATION_ROLLBACK_FAILED",
+                    "The model passed validation, but activation and guarded rollback could not both be proven. Review the protected state and config backups before retrying.",
+                    modelKey,
+                    digest,
+                    exactMs,
+                    reviewMs,
+                    true);
+        }
+
         return new LmStudioRegistrationResult(true, "LMSTUDIO_MODEL_VALIDATED", "Qwythos is validated, enabled for automatic standard/deep routing, and unloaded.", ModelProviders.LmStudio, modelKey, digest, exactMs, reviewMs, true);
+    }
+
+    internal static InstallationState BuildActivatedState(
+        InstallationState priorState,
+        ModelCatalogEntry catalogEntry,
+        LocalModelRegistration registration)
+    {
+        ArgumentNullException.ThrowIfNull(priorState);
+        ArgumentNullException.ThrowIfNull(catalogEntry);
+        ArgumentNullException.ThrowIfNull(registration);
+        var lmOnlyInstall = string.IsNullOrWhiteSpace(priorState.SelectedModel);
+        var updatedRegistrations = priorState.RegisteredLocalModels
+            .Where(item =>
+                !string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(item.Model, registration.Model, StringComparison.Ordinal))
+            .Append(registration)
+            .ToList();
+        return priorState with
+        {
+            SelectedModel = lmOnlyInstall ? registration.Model : priorState.SelectedModel,
+            SelectedModelDigest = lmOnlyInstall ? registration.Digest : priorState.SelectedModelDigest,
+            SelectedModelProvider = lmOnlyInstall ? ModelProviders.LmStudio : priorState.SelectedModelProvider,
+            HardwareTier = priorState.HardwareTier == HardwareTier.NoModel
+                ? ModelSelector.GetHardwareTier(catalogEntry)
+                : priorState.HardwareTier,
+            RegisteredLocalModels = updatedRegistrations,
+            Preferences = priorState.Preferences with
+            {
+                PreferLmStudioForStandardAndDeep = true,
+                ModelSelectionMode = ModelSelectionMode.Automatic
+            },
+            Availability = HelperAvailability.Enabled,
+            ProductVersion = ProductInfo.Version
+        };
     }
 
     private static async Task<string> ComputeSha256Async(FileStream stream, CancellationToken cancellationToken)
     {
         using var sha = SHA256.Create();
         return Convert.ToHexString(await sha.ComputeHashAsync(stream, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
+    }
+
+    private static Func<InstallationState, bool, ResourcePressureCheck> CreateDefaultPressureValidator()
+    {
+        var guard = new ResourcePressureGuard();
+        return guard.Check;
+    }
+
+    private async Task<bool> RollbackActivationAsync(
+        string modelKey,
+        InstallationState priorState,
+        ProtectedFileSnapshot? savedStateRevision,
+        ManagedFileResult? configChange)
+    {
+        var succeeded = true;
+        if (savedStateRevision is not null)
+        {
+            try
+            {
+                _ = await _stateStore.SaveIfUnchangedAsync(
+                    priorState,
+                    savedStateRevision,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                succeeded = false;
+            }
+        }
+
+        if (configChange is { Changed: true })
+        {
+            try
+            {
+                _configManager.Rollback(configChange);
+            }
+            catch
+            {
+                succeeded = false;
+            }
+        }
+
+        try
+        {
+            await _validationStore.RemoveAsync(
+                ModelProviders.LmStudio,
+                modelKey,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The exact attempted key is removed by the caller before validation and
+            // the atomic upsert either commits or does not. This is best-effort only.
+        }
+
+        return succeeded;
     }
 
     private static LmStudioRegistrationResult Failure(string code, string message, string model, string? digest = null,
@@ -225,10 +534,10 @@ internal sealed record LmStudioModelFileProof(
 
 internal static class LmStudioModelFileBinding
 {
-    // LM Studio's current loopback API reports a model key and metadata, but not the
-    // canonical absolute file loaded for that key. Keep automatic enrollment closed
-    // until the runtime supplies an exact file identity that can be bound to this proof.
-    internal static bool ExactLoadedFileBindingSupported => false;
+    // The signed current-user `lms ls --json` and `lms ps --json` inventories close
+    // the file-identity gap left by the loopback API. Runtime routing must still repeat
+    // the CLI proof; this flag alone never makes a legacy registration eligible.
+    internal static bool ExactLoadedFileBindingSupported => true;
 
     private const uint ReparsePointAttribute = (uint)FileAttributes.ReparsePoint;
     private const uint DirectoryAttribute = (uint)FileAttributes.Directory;

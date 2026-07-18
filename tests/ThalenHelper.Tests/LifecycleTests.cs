@@ -8,6 +8,62 @@ namespace ThalenHelper.Tests;
 public sealed class LifecycleTests
 {
     [Fact]
+    public async Task DeferredProviderSetupPreservesAnExistingValidatedSelectionAndRegistrations()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var models = Path.Combine(temporary.Path, "models");
+        var platform = new FakeStartupPlatform { LoopbackOnly = true, Executable = "ollama.exe" };
+        var runtime = new FakeOllamaRuntime(models);
+        var manager = new InstallationManager(
+            autoStart: new OllamaAutoStartManager(runtime.CreateClient, platform),
+            clientFactory: runtime.CreateClient,
+            hardwareProvider: () => CreateProfile(temporary.Path),
+            startupPlatform: platform,
+            processEnvironmentReader: name => platform.ProcessEnvironment.GetValueOrDefault(name));
+
+        var first = await manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            RequestedModel: "qwen2.5-coder:1.5b",
+            RequestedModelDirectory: models,
+            AutoStartOllama: false,
+            PullAndValidateModel: false,
+            CodexStartupValidator: _ => true));
+        var prior = first.State;
+        prior.Availability = HelperAvailability.Enabled;
+        prior.SelectedModelProvider = ModelProviders.Ollama;
+        prior.RegisteredLocalModels.Add(new LocalModelRegistration(
+            ModelProviders.LmStudio,
+            "fixture:model",
+            new string('a', 64),
+            Path.Combine(temporary.Path, "fixture.gguf"),
+            DateTimeOffset.UtcNow,
+            123,
+            DateTimeOffset.UtcNow,
+            "fixture-identity"));
+        await new StateStore(paths.StateFile).SaveAsync(prior);
+        _ = new CodexConfigManager().SetEnabled(paths, true);
+
+        var deferred = await manager.ConfigureAsync(new InstallationOptions(
+            paths,
+            AutoStartOllama: prior.Preferences.AutoStartOllama,
+            DeferModelSelection: true,
+            CodexStartupValidator: _ => true));
+
+        Assert.True(deferred.Success);
+        Assert.Equal("INSTALLED_MODEL_SETUP_REQUIRED", deferred.Code);
+        Assert.Equal(prior.SelectedModel, deferred.State.SelectedModel);
+        Assert.Equal(prior.SelectedModelDigest, deferred.State.SelectedModelDigest);
+        Assert.Equal(prior.SelectedModelProvider, deferred.State.SelectedModelProvider);
+        Assert.Equal(prior.ModelStorageLocation, deferred.State.ModelStorageLocation);
+        Assert.Equal(prior.HardwareTier, deferred.State.HardwareTier);
+        Assert.Equal(HelperAvailability.Enabled, deferred.State.Availability);
+        Assert.Single(deferred.State.RegisteredLocalModels);
+        Assert.Equal(0, runtime.PullCount);
+        Assert.Equal(0, runtime.ValidationGenerationCount);
+    }
+
+    [Fact]
     public async Task ConfigureRejectsCodexHomeMismatchBeforeAnyTargetStateOrContextMutation()
     {
         using var temporary = new TemporaryDirectory();

@@ -72,6 +72,39 @@ public sealed class ModelAndStorageTests
     }
 
     [Fact]
+    public void CompatibleModelChoicesAreDynamicAndExcludeModelsThatExceedHardware()
+    {
+        var selector = new ModelSelector();
+        var catalog = new ModelCatalogService().LoadBundled();
+        var eightGigabyte = FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "nvidia-8gb"));
+        var rtx3090 = FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "nvidia-rtx3090-24gb"));
+
+        var entryChoices = selector.GetCompatibleModels(eightGigabyte, catalog);
+        var enthusiastChoices = selector.GetCompatibleModels(rtx3090, catalog);
+
+        Assert.Contains(entryChoices, model => model.Tag == "qwen3:8b");
+        Assert.DoesNotContain(entryChoices, model => model.Tag == "qwen3:14b");
+        Assert.DoesNotContain(entryChoices, model => model.Provider == ModelProviders.LmStudio);
+        Assert.Contains(enthusiastChoices, model => model.Tag == "qwen3-coder:30b");
+        Assert.Contains(enthusiastChoices, model => model.Provider == ModelProviders.LmStudio);
+    }
+
+    [Fact]
+    public void CpuOnlyChoicesRemainEmptyUntilExplicitlyEnabled()
+    {
+        var selector = new ModelSelector();
+        var catalog = new ModelCatalogService().LoadBundled();
+        var profile = FixtureFactory.Create(
+            FixtureFactory.LoadHardwareFixtures().Single(item => item.Name == "cpu-only-16gb"));
+
+        Assert.Empty(selector.GetCompatibleModels(profile, catalog));
+        Assert.All(selector.GetCompatibleModels(profile, catalog, allowCpuFallback: true), model =>
+            Assert.True(model.CpuFallbackReasonable));
+    }
+
+    [Fact]
     public void StorageRecommendationPrefersNonSystemNvmeAndRejectsRemovable()
     {
         var catalog = new ModelCatalogService().LoadBundled();
