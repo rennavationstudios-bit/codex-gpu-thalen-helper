@@ -19,6 +19,7 @@ public sealed class UninstallManager
     private readonly AgentsOverrideManager _agentsOverride;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly Func<OllamaClient> _clientFactory;
+    private readonly Func<LmStudioClient> _lmStudioFactory;
 
     public UninstallManager(
         ProductPaths paths,
@@ -26,13 +27,15 @@ public sealed class UninstallManager
         CodexConfigManager? codexConfig = null,
         AgentsOverrideManager? agentsOverride = null,
         OllamaAutoStartManager? autoStart = null,
-        Func<OllamaClient>? clientFactory = null)
+        Func<OllamaClient>? clientFactory = null,
+        Func<LmStudioClient>? lmStudioFactory = null)
     {
         _paths = paths;
         _store = store;
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _agentsOverride = agentsOverride ?? new AgentsOverrideManager();
         _clientFactory = clientFactory ?? (() => new OllamaClient());
+        _lmStudioFactory = lmStudioFactory ?? (() => new LmStudioClient());
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
     }
 
@@ -53,26 +56,20 @@ public sealed class UninstallManager
         {
             if (ownsRuntime)
             {
-                state.Availability = HelperAvailability.Disabled;
-                await _store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-                GpuCoordination.RequestCancellation();
-                if (!string.IsNullOrWhiteSpace(state.SelectedModel))
-                {
-                    try
-                    {
-                        using var client = _clientFactory();
-                        await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                        if (removeOwnedModel && state.SelectedModelOwnedByHelper)
-                        {
-                            await client.DeleteAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                            modelRemoved = true;
-                        }
-                    }
-                    catch (OllamaException)
-                    {
-                        // Optional Ollama failure must not block surgical Codex cleanup.
-                    }
-                }
+                _ = await new ControlService(
+                    managedPaths,
+                    _store,
+                    _clientFactory,
+                    _codexConfig,
+                    _autoStart,
+                    _lmStudioFactory)
+                    .DisableAsync(disableCodexEntry: false, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                // Ollama deletes by mutable model name, not by immutable digest. Even a
+                // just-validated tag can be replaced before /api/delete is processed, so
+                // surgical uninstall always preserves model data. The user can remove a
+                // named model manually after independently checking its current digest.
+                _ = removeOwnedModel;
 
                 _autoStart.RemoveOwnedStartupEntry();
                 _autoStart.RestoreOwnedEnvironment(state);
@@ -113,7 +110,7 @@ public sealed class UninstallManager
                 ? "No positive managed reviewer ownership was present. The existing integration, Ollama, models, startup, environment, Codex authentication, and unrelated configuration were preserved."
                 : state is null
                     ? "No product state was present. Codex files, Ollama, models, startup, environment, and other applications were left untouched."
-                : "Codex authentication, unrelated Codex configuration, pre-existing Ollama, and pre-existing models were preserved."
+                : "Codex authentication, unrelated Codex configuration, Ollama, and all model data were preserved."
         };
         await File.WriteAllTextAsync(
             reportPath,
@@ -150,7 +147,7 @@ public sealed class UninstallManager
                     ? "No product state was present, so protected Codex and runtime files were left untouched. Package files may be removed safely."
                 : preservesUnownedRuntime
                     ? "Only product-managed file sections and state were removed; the unowned local_gpu_reviewer integration and runtime were untouched."
-                    : "Managed Codex integration, instructions, startup entry, and state were removed surgically.",
+                    : "Managed Codex integration, instructions, startup entry, and state were removed surgically; model data was preserved because Ollama deletion is name-based.",
             modelRemoved,
             true,
             managed,

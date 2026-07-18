@@ -47,8 +47,14 @@ public sealed class InstallationManager
     private readonly CodexConfigManager _codexConfig;
     private readonly AgentsOverrideManager _agentsOverride;
     private readonly OllamaAutoStartManager _autoStart;
+    private readonly IOllamaStartupPlatform? _startupPlatform;
+    private readonly Func<string, string?> _processEnvironmentReader;
     private readonly Func<OllamaClient> _clientFactory;
     private readonly Func<InstallationState, bool, ResourcePressureCheck> _resourcePressureValidator;
+    private readonly Func<StateStore, InstallationState, CancellationToken, Task>? _stateSaver;
+    private readonly Action<ProductPaths> _installContextSaver;
+    private readonly Func<ProductPaths?, ModelValidationStore> _validationStoreProvider;
+    private readonly Func<ProductPaths?, ActiveModelTracker> _activeModelTrackerProvider;
 
     public InstallationManager(
         HardwareDetector? hardwareDetector = null,
@@ -60,7 +66,13 @@ public sealed class InstallationManager
         OllamaAutoStartManager? autoStart = null,
         Func<OllamaClient>? clientFactory = null,
         Func<HardwareProfile>? hardwareProvider = null,
-        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null)
+        Func<InstallationState, bool, ResourcePressureCheck>? resourcePressureValidator = null,
+        Func<StateStore, InstallationState, CancellationToken, Task>? stateSaver = null,
+        Func<ProductPaths?, ModelValidationStore>? validationStoreProvider = null,
+        Action<ProductPaths>? installContextSaver = null,
+        Func<ProductPaths?, ActiveModelTracker>? activeModelTrackerProvider = null,
+        IOllamaStartupPlatform? startupPlatform = null,
+        Func<string, string?>? processEnvironmentReader = null)
     {
         _hardwareProvider = hardwareProvider ?? (hardwareDetector ?? new HardwareDetector()).Detect;
         _catalogService = catalogService ?? new ModelCatalogService();
@@ -69,9 +81,137 @@ public sealed class InstallationManager
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _agentsOverride = agentsOverride ?? new AgentsOverrideManager();
         _clientFactory = clientFactory ?? (() => new OllamaClient());
-        _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
+        if (autoStart is null)
+        {
+            _startupPlatform = startupPlatform ?? new WindowsOllamaStartupPlatform();
+            _autoStart = new OllamaAutoStartManager(_clientFactory, _startupPlatform);
+        }
+        else
+        {
+            _autoStart = autoStart;
+            _startupPlatform = startupPlatform ?? autoStart.Platform;
+        }
+
+        _processEnvironmentReader = processEnvironmentReader
+            ?? (name => Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Process));
         var pressureGuard = new ResourcePressureGuard();
         _resourcePressureValidator = resourcePressureValidator ?? pressureGuard.Check;
+        _stateSaver = stateSaver;
+        _installContextSaver = installContextSaver ?? InstallContextStore.Save;
+        var isolatedTestDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "CodexGpuThalenHelper",
+            "validation-tests",
+            Guid.NewGuid().ToString("N"));
+        _validationStoreProvider = validationStoreProvider
+            ?? (paths => new ModelValidationStore(paths?.StateDirectory ?? isolatedTestDirectory));
+        _activeModelTrackerProvider = activeModelTrackerProvider
+            ?? (paths => new ActiveModelTracker(paths?.StateDirectory ?? isolatedTestDirectory));
+    }
+
+    public async Task<RepairDryRunResult> PreviewRepairAsync(
+        ProductPaths paths,
+        string diffOutputPath,
+        bool migrateExisting = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (string.IsNullOrWhiteSpace(diffOutputPath))
+        {
+            throw new ArgumentException("An explicit --diff-out local file is required for repair dry-run.", nameof(diffOutputPath));
+        }
+
+        var diffPath = Path.GetFullPath(diffOutputPath);
+        if (new Uri(diffPath).IsUnc || !IsFixedLocalPath(diffPath))
+        {
+            throw new InvalidOperationException(
+                "Repair dry-run diff output must be on a fixed local drive, not a network or removable path.");
+        }
+
+        ValidateDiffOutputPath(diffPath);
+
+        if (new[] { paths.CodexConfigFile, paths.AgentsOverrideFile, paths.StateFile }
+            .Any(path => string.Equals(Path.GetFullPath(path), diffPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException("Repair dry-run diff output cannot overwrite a protected file or installation state.");
+        }
+
+        var store = new StateStore(paths.StateFile);
+        var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("No installation state was found.");
+        ValidateCodexHomeRoute(paths, state, "Repair dry-run");
+        ValidateRepairOwnership(paths, state, allowManagedDrift: true);
+
+        var config = _codexConfig.PreviewInstall(
+            paths,
+            state.Availability == HelperAvailability.Enabled,
+            migrateExisting);
+        var installLocalGpuGuidance = !config.ExistingIntegrationPreserved;
+        var agents = _agentsOverride.PreviewInstall(
+            paths,
+            state.HardwareTier,
+            state.ReliabilityBaselineInstalled,
+            installLocalGpuGuidance,
+            forceManagedLocalGpuGuidance: config.ExistingIntegrationMigrated || migrateExisting);
+
+        var directory = Path.GetDirectoryName(diffPath)
+            ?? throw new InvalidOperationException("Repair dry-run diff output has no local directory.");
+        Directory.CreateDirectory(directory);
+        var combinedDiff = new System.Text.StringBuilder()
+            .AppendLine("# Codex GPU Thalen Helper protected repair preview")
+            .AppendLine("# Apply only with all four source/planned SHA-256 values shown in the JSON summary.")
+            .AppendLine()
+            .Append(config.Diff)
+            .AppendLine()
+            .Append(agents.Diff)
+            .ToString();
+        var diffCreated = false;
+        try
+        {
+            await using var diffStream = new FileStream(
+                diffPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.Asynchronous | FileOptions.WriteThrough);
+            diffCreated = true;
+            await using var writer = new StreamWriter(
+                diffStream,
+                new System.Text.UTF8Encoding(false),
+                bufferSize: 4096,
+                leaveOpen: true);
+            await writer.WriteAsync(combinedDiff.AsMemory(), cancellationToken).ConfigureAwait(false);
+            await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+            diffStream.Flush(flushToDisk: true);
+        }
+        catch
+        {
+            if (diffCreated)
+            {
+                File.Delete(diffPath);
+            }
+
+            throw;
+        }
+
+        return new RepairDryRunResult(
+            true,
+            "REPAIR_DRY_RUN_READY",
+            "Protected files and state were not modified. Review the explicit diff, then apply with all four hashes.",
+            new ProtectedFilePlanSummary(
+                paths.CodexConfigFile,
+                config.Changed,
+                config.Action,
+                config.SourceSha256,
+                config.PlannedSha256),
+            new ProtectedFilePlanSummary(
+                paths.AgentsOverrideFile,
+                agents.Changed,
+                agents.Action,
+                agents.SourceSha256,
+                agents.PlannedSha256),
+            diffPath);
     }
 
     public async Task<InstallationOutcome> ConfigureAsync(
@@ -104,7 +244,7 @@ public sealed class InstallationManager
 
         var existingIntegration = _codexConfig.InspectExistingUnmanagedIntegration(options.Paths);
         var preserveExistingIntegration = existingIntegration.ShouldPreserve;
-        var currentUserModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
+        var currentUserModelDirectory = _startupPlatform!.GetUserEnvironmentVariable("OLLAMA_MODELS");
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
         var recommendation = _modelSelector.Recommend(hardware, catalog, options.AllowCpuFallback);
@@ -489,121 +629,181 @@ public sealed class InstallationManager
     public async Task<InstallationOutcome> RepairAsync(
         ProductPaths paths,
         Func<string, bool>? codexStartupValidator = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        RepairHashBinding? binding = null,
+        bool migrateExisting = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
         var store = new StateStore(paths.StateFile);
-        var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
+        var loadedState = await store.LoadWithRevisionAsync(cancellationToken).ConfigureAwait(false);
+        var state = loadedState.State
             ?? throw new InvalidOperationException("No installation state was found.");
+        var originalState = loadedState.Revision;
         ValidateCodexHomeRoute(paths, state, "Repair");
 
-        var ownership = IntegrationOwnership.Inspect(paths, state);
-        if (IntegrationOwnership.IsManagedByHelper(state)
-            && ownership.Status != IntegrationOwnershipStatus.ManagedValid)
+        if (state.ModelStorageTransition is not null)
         {
             throw new InvalidOperationException(
-                "Repair refused because the helper ownership record no longer matches the current Codex reviewer entry. Review a fresh protected-file diff before changing it.");
+                "A model storage transition is pending. Run models recover --yes before ordinary repair.");
         }
 
-        InstallContextStore.Save(paths);
+        if (migrateExisting && binding is null)
+        {
+            throw new InvalidOperationException(
+                "--migrate-existing requires a reviewed dry-run and all four source/planned hashes.");
+        }
+
+
+        ValidateRepairOwnership(paths, state, allowManagedDrift: binding is not null);
+        var configPreview = _codexConfig.PreviewInstall(
+            paths,
+            state.Availability == HelperAvailability.Enabled,
+            migrateExisting);
+        var installLocalGpuGuidance = !configPreview.ExistingIntegrationPreserved;
+        var agentsPreview = _agentsOverride.PreviewInstall(
+            paths,
+            state.HardwareTier,
+            state.ReliabilityBaselineInstalled,
+            installLocalGpuGuidance,
+            forceManagedLocalGpuGuidance: configPreview.ExistingIntegrationMigrated || migrateExisting);
+        ValidateRepairBinding(binding, configPreview, agentsPreview);
+        if (binding is null && (configPreview.Changed || agentsPreview.Changed))
+        {
+            throw new InvalidOperationException(
+                "Repair would change a protected file. Run repair --dry-run, review the diff, and supply all four source/planned hashes.");
+        }
+
+        if (state.ModelStorageLocation is not null && _startupPlatform is null)
+        {
+            throw new InvalidOperationException(
+                "Repair cannot safely update Ollama startup because the injected startup manager did not expose its platform for guarded rollback.");
+        }
+
         var hardware = _hardwareProvider();
         var catalog = _catalogService.LoadBundled();
         var recommendation = _modelSelector.Recommend(hardware, catalog, state.Acceleration?.Processor == "CPU");
-        var config = _codexConfig.InstallOrRepair(
-            paths,
-            state.Availability == HelperAvailability.Enabled,
-            codexStartupValidator);
-        state.ExistingIntegrationPreserved = IsExistingIntegrationPreserved(config);
-        if (state.ExistingIntegrationPreserved)
-        {
-            state.SelectedModel = null;
-            state.SelectedModelDigest = null;
-            state.SelectedModelOwnedByHelper = false;
-            state.ModelStorageLocation = null;
-            state.Acceleration = null;
-        }
-
-        ManagedFileResult agents;
+        ProtectedFileSnapshot? stateWrittenByRepair = null;
+        ManagedFileResult? config = null;
+        ManagedFileResult? agents = null;
+        StartupExternalState? startupBeforeRepair = null;
+        StartupExternalState? startupWrittenByRepair = null;
+        var startupMutationAttempted = false;
         try
         {
+            config = _codexConfig.InstallOrRepair(
+                paths,
+                state.Availability == HelperAvailability.Enabled,
+                codexStartupValidator,
+                binding?.ConfigSourceSha256,
+                binding?.ConfigPlannedSha256,
+                migrateExisting);
+            state.ExistingIntegrationPreserved = IsExistingIntegrationPreserved(config);
+            if (state.ExistingIntegrationPreserved)
+            {
+                state.SelectedModel = null;
+                state.SelectedModelDigest = null;
+                state.SelectedModelOwnedByHelper = false;
+                state.ModelStorageLocation = null;
+                state.Acceleration = null;
+            }
+
             agents = _agentsOverride.InstallOrRepair(
                 paths,
                 state.HardwareTier,
                 state.ReliabilityBaselineInstalled,
-                installLocalGpuGuidance: !state.ExistingIntegrationPreserved);
-        }
-        catch
-        {
-            _codexConfig.Rollback(config);
-            throw;
-        }
-        TrackManagedFile(state, config);
-        TrackManagedFile(state, agents);
-        SetManagedSection(state, "mcp_servers.local_gpu_reviewer", !state.ExistingIntegrationPreserved);
-        var agentsContent = File.Exists(paths.AgentsOverrideFile)
-            ? File.ReadAllText(paths.AgentsOverrideFile)
-            : string.Empty;
-        SetManagedSection(
-            state,
-            "AGENTS.override.md local GPU section",
-            AgentsOverrideManager.HasManagedLocalGpuSection(agentsContent));
-        state.ReliabilityBaselineInstalled = AgentsOverrideManager.HasManagedReliabilitySection(agentsContent);
-        SetManagedSection(
-            state,
-            "AGENTS.override.md reliability baseline",
-            state.ReliabilityBaselineInstalled);
-        var repairWarnings = hardware.Warnings.ToList();
-        AddWarning(repairWarnings, config.Warning);
-        AddWarning(repairWarnings, agents.Warning);
-        if (state.ExistingIntegrationPreserved)
-        {
-            state.Availability = HelperAvailability.Disabled;
-            state.LastHealthCheckAt = DateTimeOffset.UtcNow;
-            state.LastHealthCheckCode = "EXISTING_INTEGRATION_PRESERVED";
-            state.SelectedModelOwnedByHelper = false;
-            state.StartupEntryOwnedByHelper = false;
-            await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
+                binding?.AgentsSourceSha256,
+                binding?.AgentsPlannedSha256,
+                installLocalGpuGuidance: !state.ExistingIntegrationPreserved,
+                forceManagedLocalGpuGuidance: configPreview.ExistingIntegrationMigrated || migrateExisting);
+            TrackManagedFile(state, config);
+            TrackManagedFile(state, agents);
+            SetManagedSection(state, "mcp_servers.local_gpu_reviewer", !state.ExistingIntegrationPreserved);
+            var agentsContent = File.Exists(paths.AgentsOverrideFile)
+                ? File.ReadAllText(paths.AgentsOverrideFile)
+                : string.Empty;
+            SetManagedSection(
+                state,
+                "AGENTS.override.md local GPU section",
+                AgentsOverrideManager.HasManagedLocalGpuSection(agentsContent));
+            state.ReliabilityBaselineInstalled = AgentsOverrideManager.HasManagedReliabilitySection(agentsContent);
+            SetManagedSection(
+                state,
+                "AGENTS.override.md reliability baseline",
+                state.ReliabilityBaselineInstalled);
+            var repairWarnings = hardware.Warnings.ToList();
+            AddWarning(repairWarnings, config.Warning);
+            AddWarning(repairWarnings, agents.Warning);
+            if (state.ExistingIntegrationPreserved)
+            {
+                state.Availability = HelperAvailability.Disabled;
+                state.LastHealthCheckAt = DateTimeOffset.UtcNow;
+                state.LastHealthCheckCode = "EXISTING_INTEGRATION_PRESERVED";
+                state.SelectedModelOwnedByHelper = false;
+                state.StartupEntryOwnedByHelper = false;
+                state.ProductVersion = ProductInfo.Version;
+                stateWrittenByRepair = await SaveRepairStateAsync(
+                    store,
+                    state,
+                    originalState,
+                    cancellationToken).ConfigureAwait(false);
+                _installContextSaver(paths);
+                return new InstallationOutcome(
+                    true,
+                    "EXISTING_INTEGRATION_PRESERVED",
+                    "Repair preserved the existing unmarked local_gpu_reviewer integration and did not change Ollama, models, startup, or activation.",
+                    hardware,
+                    recommendation,
+                    null,
+                    state,
+                    config,
+                    agents,
+                    null,
+                    repairWarnings);
+            }
+
+            OllamaStartupVerification? startup = null;
+            if (state.ModelStorageLocation is not null)
+            {
+                ThrowIfOwnershipInvalid(paths, state);
+                startupBeforeRepair = CaptureStartupExternalState();
+                var startupPlan = _autoStart.PreviewConfiguration(
+                    paths,
+                    state,
+                    state.Preferences.AutoStartOllama);
+                startupWrittenByRepair = new StartupExternalState(
+                    startupPlan.ModelDirectory,
+                    startupPlan.Host,
+                    startupPlan.ModelDirectory,
+                    startupPlan.Host,
+                    startupPlan.RunEntry);
+                startupMutationAttempted = true;
+                _autoStart.ApplyConfiguration(startupPlan, state);
+                startup = await _autoStart.VerifyAsync(
+                    paths,
+                    state,
+                    startedNewProcess: false,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!string.IsNullOrWhiteSpace(state.SelectedModel)
+                && (startup is null || !ModelIntegrity.IsOperationallySafe(startup, state)))
+            {
+                GpuCoordination.RequestCancellation();
+                throw new InvalidOperationException(
+                    "Repair verification failed; the protected files and installation state are being restored.");
+            }
+
+            state.ProductVersion = ProductInfo.Version;
+            stateWrittenByRepair = await SaveRepairStateAsync(
+                store,
+                state,
+                originalState,
+                cancellationToken).ConfigureAwait(false);
+            _installContextSaver(paths);
             return new InstallationOutcome(
                 true,
-                "EXISTING_INTEGRATION_PRESERVED",
-                "Repair preserved the existing unmarked local_gpu_reviewer integration and did not change Ollama, models, startup, or activation.",
-                hardware,
-                recommendation,
-                null,
-                state,
-                config,
-                agents,
-                null,
-                repairWarnings);
-        }
-
-        OllamaStartupVerification? startup = null;
-        if (state.ModelStorageLocation is not null)
-        {
-            ThrowIfOwnershipInvalid(paths, state);
-            var currentModelDirectory = Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
-            startup = await _autoStart.ApplyConfigurationAsync(
-                paths,
-                state,
-                currentModelDirectory,
-                state.Preferences.AutoStartOllama,
-                allowSafeRestart: true,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        if (!string.IsNullOrWhiteSpace(state.SelectedModel)
-            && (startup is null || !ModelIntegrity.IsOperationallySafe(startup, state)))
-        {
-            state.Availability = HelperAvailability.Disabled;
-            state.LastHealthCheckAt = DateTimeOffset.UtcNow;
-            state.LastHealthCheckCode = startup?.Code ?? "OLLAMA_STARTUP_UNVERIFIED";
-            TrackManagedFile(state, _codexConfig.SetEnabled(paths, false));
-            await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-            GpuCoordination.RequestCancellation();
-            return new InstallationOutcome(
-                false,
-                "REPAIR_VERIFICATION_FAILED",
-                "Managed files were repaired, but the selected model, configured model path, digest, endpoint, or loopback listener failed passive verification. The helper remains disabled.",
+                "REPAIRED",
+                "Managed files and per-user startup settings were repaired without replacing unrelated content.",
                 hardware,
                 recommendation,
                 null,
@@ -613,20 +813,63 @@ public sealed class InstallationManager
                 startup,
                 repairWarnings);
         }
+        catch (Exception exception)
+        {
+            var rollbackErrors = new List<Exception>();
+            if (startupMutationAttempted && startupBeforeRepair is not null)
+            {
+                try
+                {
+                    RestoreStartupExternalState(startupBeforeRepair, startupWrittenByRepair!);
+                }
+                catch (Exception rollback)
+                {
+                    rollbackErrors.Add(rollback);
+                }
+            }
 
-        await store.SaveAsync(state, cancellationToken).ConfigureAwait(false);
-        return new InstallationOutcome(
-            true,
-            "REPAIRED",
-            "Managed files and per-user startup settings were repaired without replacing unrelated content.",
-            hardware,
-            recommendation,
-            null,
-            state,
-            config,
-            agents,
-            startup,
-            repairWarnings);
+            if (agents is not null)
+            {
+                try
+                {
+                    _agentsOverride.Rollback(agents);
+                }
+                catch (Exception rollback)
+                {
+                    rollbackErrors.Add(rollback);
+                }
+            }
+
+            if (config is not null)
+            {
+                try
+                {
+                    _codexConfig.Rollback(config);
+                }
+                catch (Exception rollback)
+                {
+                    rollbackErrors.Add(rollback);
+                }
+            }
+
+            try
+            {
+                RestoreProtectedSnapshot(paths.StateFile, originalState, stateWrittenByRepair);
+            }
+            catch (Exception rollback)
+            {
+                rollbackErrors.Add(rollback);
+            }
+
+            if (rollbackErrors.Count > 0)
+            {
+                throw new AggregateException(
+                    "Repair failed and one or more guarded rollback steps also failed.",
+                    [exception, .. rollbackErrors]);
+            }
+
+            throw;
+        }
     }
 
     public async Task<ManagedFileResult> ConfigureReliabilityBaselineAsync(
@@ -713,15 +956,19 @@ public sealed class InstallationManager
         InstallationState state,
         CancellationToken cancellationToken)
     {
-
         if (string.IsNullOrWhiteSpace(state.SelectedModel))
         {
             return new ModelValidationResult(false, "NO_MODEL", "No selected model is configured.", null, 0, 0);
         }
 
-        var exactStart = System.Diagnostics.Stopwatch.StartNew();
+        var exactMilliseconds = 0L;
+        var reviewMilliseconds = 0L;
+        var validationStore = _validationStoreProvider(paths);
+        var activeModelTracker = _activeModelTrackerProvider(paths);
         try
         {
+            // A prior pass must never survive a new validation attempt for the same tag.
+            await validationStore.RemoveAsync(state.SelectedModel, CancellationToken.None).ConfigureAwait(false);
             ThrowIfOwnershipInvalid(paths, state);
             using var client = _clientFactory();
             ThrowIfOwnershipInvalid(paths, state);
@@ -738,86 +985,222 @@ public sealed class InstallationManager
                 return new ModelValidationResult(false, "MODEL_DIGEST_MISMATCH", "The selected model digest does not match the audited catalog digest.", null, 0, 0);
             }
 
-            async Task CheckResourcePressureAsync(CancellationToken token)
+            var normalizedDigest = ModelValidationStore.NormalizeFullDigest(selected.Digest);
+            if (normalizedDigest is null)
+            {
+                return new ModelValidationResult(false, "MODEL_DIGEST_INVALID", "Ollama did not provide a full normalized SHA-256 model digest.", null, 0, 0);
+            }
+
+            // Promote the catalog prefix to the exact installed identity for all
+            // subsequent ownership, cleanup, and uninstall decisions.
+            state.SelectedModelDigest = normalizedDigest;
+
+            async Task CheckRuntimeOwnershipAndPressureAsync(CancellationToken token)
             {
                 ThrowIfOwnershipInvalid(paths, state);
                 var runningModels = await client.GetRunningModelsAsync(token).ConfigureAwait(false);
                 ThrowIfOwnershipInvalid(paths, state);
-                var selectedAlreadyLoaded = runningModels.Any(model =>
-                    ModelIntegrity.NamesMatch(model.Name, state.SelectedModel));
-                var pressure = _resourcePressureValidator(state, selectedAlreadyLoaded);
+                var runtimeOwnership = OllamaRuntimeOwnership.Inspect(
+                    runningModels,
+                    activeModelTracker.Inspect(),
+                    state.SelectedModel);
+                if (!runtimeOwnership.Allowed)
+                {
+                    throw new OllamaException(runtimeOwnership.Code, runtimeOwnership.Message, retryable: true);
+                }
+
+                var pressure = _resourcePressureValidator(
+                    state,
+                    runtimeOwnership.SelectedModelAlreadyLoaded);
                 if (!pressure.Allowed)
                 {
                     throw new OllamaException(pressure.Code, pressure.Message, retryable: true);
                 }
+
+                if (!runtimeOwnership.SelectedModelAlreadyLoaded)
+                {
+                    activeModelTracker.Set(state.SelectedModel, normalizedDigest);
+                }
             }
 
-            ThrowIfOwnershipInvalid(paths, state);
-            var exact = await client.GenerateAsync(
-                state.SelectedModel,
-                "Reply with exactly this text and nothing else: THALEN_HELPER_OK",
-                state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
-                64,
+            using var lease = await GpuCoordination.AcquireAsync(
+                ReviewBusyBehavior.Queue,
                 TimeSpan.FromSeconds(30),
-                cancellationToken,
-                preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
-            ThrowIfOwnershipInvalid(paths, state);
-            exactStart.Stop();
-            if (!string.Equals(exact.Response.Trim(), "THALEN_HELPER_OK", StringComparison.Ordinal))
+                cancellationToken).ConfigureAwait(false);
+            AccelerationResult? acceleration = null;
+            void ObserveAcceleration(OllamaRunningModel loaded)
             {
-                ThrowIfOwnershipInvalid(paths, state);
-                await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                ThrowIfOwnershipInvalid(paths, state);
-                return new ModelValidationResult(false, "EXACT_RESPONSE_FAILED", "The exact-response smoke test failed.", null, exactStart.ElapsedMilliseconds, 0);
-            }
-
-            var reviewStart = System.Diagnostics.Stopwatch.StartNew();
-            ThrowIfOwnershipInvalid(paths, state);
-            var review = await client.GenerateAsync(
-                state.SelectedModel,
-                "Inspect only this loop: for (int i = 0; i <= items.Length; i++) { Use(items[i]); }. Reply with exactly: OFF_BY_ONE",
-                state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
-                64,
-                TimeSpan.FromSeconds(30),
-                cancellationToken,
-                preGenerationCheck: CheckResourcePressureAsync).ConfigureAwait(false);
-            ThrowIfOwnershipInvalid(paths, state);
-            reviewStart.Stop();
-            if (!string.Equals(review.Response.Trim(), "OFF_BY_ONE", StringComparison.Ordinal))
-            {
-                ThrowIfOwnershipInvalid(paths, state);
-                await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-                ThrowIfOwnershipInvalid(paths, state);
-                return new ModelValidationResult(false, "CODE_REVIEW_SMOKE_FAILED", "The bounded code-review smoke test failed.", null, exactStart.ElapsedMilliseconds, reviewStart.ElapsedMilliseconds);
-            }
-
-            ThrowIfOwnershipInvalid(paths, state);
-            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            ThrowIfOwnershipInvalid(paths, state);
-            var loaded = running.FirstOrDefault(item => string.Equals(item.Name, state.SelectedModel, StringComparison.OrdinalIgnoreCase));
-            var acceleration = loaded is null
-                ? null
-                : new AccelerationResult(
+                acceleration = new AccelerationResult(
                     loaded.SizeVramBytes > 0 ? "GPU or partial GPU (verify processor split with ollama ps)" : "CPU",
                     loaded.SizeVramBytes,
                     loaded.ContextLength,
                     loaded.ExpiresAt);
-            ThrowIfOwnershipInvalid(paths, state);
-            await client.UnloadAsync(state.SelectedModel, cancellationToken).ConfigureAwait(false);
-            ThrowIfOwnershipInvalid(paths, state);
-            var after = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            ThrowIfOwnershipInvalid(paths, state);
-            if (after.Any(item => string.Equals(item.Name, state.SelectedModel, StringComparison.OrdinalIgnoreCase)))
+            }
+            var unloadVerified = false;
+            var generationAttempted = false;
+            try
             {
-                return new ModelValidationResult(false, "GPU_RELEASE_FAILED", "The selected model did not unload after validation.", acceleration, exactStart.ElapsedMilliseconds, reviewStart.ElapsedMilliseconds);
+                await CheckRuntimeOwnershipAndPressureAsync(cancellationToken).ConfigureAwait(false);
+                var exactStart = System.Diagnostics.Stopwatch.StartNew();
+                generationAttempted = true;
+                var exact = await client.GenerateUnderLeaseAsync(
+                    new OllamaGenerationSpec(
+                        state.SelectedModel,
+                        "Reply with exactly this text and nothing else: THALEN_HELPER_OK",
+                        state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
+                        64,
+                        TimeSpan.Zero),
+                    cancellationToken).ConfigureAwait(false);
+                exactStart.Stop();
+                exactMilliseconds = exactStart.ElapsedMilliseconds;
+                if (!await WaitForTrackedOllamaReleaseAsync(
+                        client,
+                        activeModelTracker,
+                        state.SelectedModel,
+                        ObserveAcceleration,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    throw new OllamaException(
+                        "GPU_RELEASE_FAILED",
+                        "Ollama did not confirm that the zero-keep-alive exact-response model was released.");
+                }
+                ThrowIfOwnershipInvalid(paths, state);
+                if (!string.Equals(exact.Response.Trim(), "THALEN_HELPER_OK", StringComparison.Ordinal))
+                {
+                    throw new OllamaException("EXACT_RESPONSE_FAILED", "The exact-response smoke test failed.");
+                }
+
+                await CheckRuntimeOwnershipAndPressureAsync(cancellationToken).ConfigureAwait(false);
+                var reviewStart = System.Diagnostics.Stopwatch.StartNew();
+                generationAttempted = true;
+                var review = await client.GenerateUnderLeaseAsync(
+                    new OllamaGenerationSpec(
+                        state.SelectedModel,
+                        "Inspect only this loop: for (int i = 0; i <= items.Length; i++) { Use(items[i]); }. Reply with exactly: OFF_BY_ONE",
+                        state.HardwareTier == HardwareTier.Entry ? 2_048 : 4_096,
+                        64,
+                        TimeSpan.Zero),
+                    cancellationToken).ConfigureAwait(false);
+                reviewStart.Stop();
+                reviewMilliseconds = reviewStart.ElapsedMilliseconds;
+                if (!await WaitForTrackedOllamaReleaseAsync(
+                        client,
+                        activeModelTracker,
+                        state.SelectedModel,
+                        ObserveAcceleration,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    throw new OllamaException(
+                        "GPU_RELEASE_FAILED",
+                        "Ollama did not confirm that the zero-keep-alive code-review model was released.");
+                }
+                ThrowIfOwnershipInvalid(paths, state);
+                if (!string.Equals(review.Response.Trim(), "OFF_BY_ONE", StringComparison.Ordinal))
+                {
+                    throw new OllamaException("CODE_REVIEW_SMOKE_FAILED", "The bounded code-review smoke test failed.");
+                }
+
+                ThrowIfOwnershipInvalid(paths, state);
+            }
+            finally
+            {
+                using var unloadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                try
+                {
+                    unloadVerified = generationAttempted
+                        && await WaitForTrackedOllamaReleaseAsync(
+                            client,
+                            activeModelTracker,
+                            state.SelectedModel,
+                            ObserveAcceleration,
+                            unloadTimeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is OllamaException or OperationCanceledException)
+                {
+                    unloadVerified = false;
+                }
             }
 
-            return new ModelValidationResult(true, "OK", "Exact response, bounded review, runtime inspection, and unload passed.", acceleration, exactStart.ElapsedMilliseconds, reviewStart.ElapsedMilliseconds);
+            if (!unloadVerified)
+            {
+                return new ModelValidationResult(
+                    false,
+                    "GPU_RELEASE_FAILED",
+                    "Ollama did not confirm that the zero-keep-alive validation model was released.",
+                    acceleration,
+                    exactMilliseconds,
+                    reviewMilliseconds);
+            }
+
+            await validationStore.UpsertAsync(new ModelValidationEntry(
+                state.SelectedModel,
+                normalizedDigest,
+                ModelValidationStore.CurrentProtocolVersion,
+                DateTimeOffset.UtcNow,
+                exactMilliseconds,
+                reviewMilliseconds,
+                acceleration?.Processor ?? "Unknown",
+                acceleration?.SizeVramBytes,
+                acceleration?.ContextLength), CancellationToken.None).ConfigureAwait(false);
+            return new ModelValidationResult(true, "OK", "Exact response, bounded review, runtime inspection, and zero-keep-alive release passed.", acceleration, exactMilliseconds, reviewMilliseconds);
         }
         catch (OllamaException exception)
         {
-            return new ModelValidationResult(false, exception.Code, exception.Message, null, exactStart.ElapsedMilliseconds, 0);
+            return new ModelValidationResult(false, exception.Code, exception.Message, null, exactMilliseconds, reviewMilliseconds);
         }
+        catch (ModelValidationStateException exception)
+        {
+            return new ModelValidationResult(false, exception.Code, exception.Message, null, exactMilliseconds, reviewMilliseconds);
+        }
+    }
+
+    private static async Task<bool> WaitForTrackedOllamaReleaseAsync(
+        OllamaClient client,
+        ActiveModelTracker tracker,
+        string model,
+        Action<OllamaRunningModel>? observe,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (!timeout.IsCancellationRequested)
+            {
+                var running = await client.GetRunningModelsAsync(timeout.Token).ConfigureAwait(false);
+                var inspection = tracker.Inspect();
+                if (running.Count == 0)
+                {
+                    if (inspection.Status == ActiveModelTrackerStatus.Absent)
+                    {
+                        return true;
+                    }
+
+                    if (!OllamaRuntimeOwnership.MatchesTrackedOllamaModel(inspection, model))
+                    {
+                        return false;
+                    }
+
+                    tracker.Clear(model);
+                    return true;
+                }
+
+                var ownership = OllamaRuntimeOwnership.Inspect(running, inspection, model);
+                if (!ownership.Allowed || !ownership.SelectedModelAlreadyLoaded)
+                {
+                    return false;
+                }
+                observe?.Invoke(running[0]);
+
+                await Task.Delay(TimeSpan.FromMilliseconds(250), timeout.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        return false;
     }
 
     private async Task<ModelValidationResult> PullAndValidateAsync(
@@ -897,7 +1280,7 @@ public sealed class InstallationManager
         return requested;
     }
 
-    private static StorageRecommendation ValidateCustomStorage(
+    internal static StorageRecommendation ValidateCustomStorage(
         HardwareProfile hardware,
         ModelCatalogEntry model,
         string directory)
@@ -906,8 +1289,7 @@ public sealed class InstallationManager
         var root = Path.GetPathRoot(full)
             ?? throw new InvalidOperationException("The custom model directory has no local drive root.");
         var volume = hardware.Volumes.FirstOrDefault(item => string.Equals(item.RootPath, root, StringComparison.OrdinalIgnoreCase));
-        if (volume is null || !volume.IsSuitable || !volume.IsFixed
-            || volume.MediaType is StorageMediaType.Network or StorageMediaType.Removable)
+        if (volume is null || !volume.IsFixed || volume.MediaType == StorageMediaType.Network)
         {
             throw new InvalidOperationException("The custom model directory must be on suitable fixed local storage.");
         }
@@ -921,13 +1303,32 @@ public sealed class InstallationManager
             throw new InvalidOperationException("The custom model directory does not leave enough free-space reserve.");
         }
 
+        var warnings = new List<string>();
+        if (volume.MediaType == StorageMediaType.Removable)
+        {
+            warnings.Add(
+                "The explicitly selected model directory is on removable or externally attached storage. " +
+                "Keep it connected, mounted at the same drive letter, and unlocked before Ollama or Codex starts.");
+        }
+        else if (volume.MediaType == StorageMediaType.Hdd)
+        {
+            warnings.Add("The selected directory is on an HDD.");
+        }
+
+        if (volume.IsEncrypted)
+        {
+            warnings.Add("The selected volume is encrypted. It must be unlocked before Ollama starts.");
+        }
+
         return new StorageRecommendation(
             volume,
             full,
             required,
             volume.FreeBytes - required,
-            "The user selected a suitable fixed local model directory.",
-            volume.MediaType == StorageMediaType.Hdd ? ["The selected directory is on an HDD."] : []);
+            volume.MediaType == StorageMediaType.Removable
+                ? "The user explicitly selected an attached fixed-volume model directory; it will never be selected automatically."
+                : "The user selected a suitable fixed local model directory.",
+            warnings);
     }
 
     private static string NormalizeDirectory(string path)
@@ -973,6 +1374,314 @@ public sealed class InstallationManager
                     : "INTEGRATION_OWNERSHIP_DRIFT",
                 ownership.Message + " No further Ollama request was made.");
         }
+    }
+
+    private void ValidateRepairOwnership(
+        ProductPaths paths,
+        InstallationState state,
+        bool allowManagedDrift)
+    {
+        var raw = _codexConfig.InspectOwnership(paths);
+        var stateClaimsManaged = IntegrationOwnership.IsManagedByHelper(state);
+        if (raw == CodexIntegrationOwnership.Invalid)
+        {
+            throw new InvalidOperationException(
+                "Repair refused because the current Codex reviewer table is malformed or ambiguous. No files were changed.");
+        }
+
+        if (stateClaimsManaged)
+        {
+            if (raw == CodexIntegrationOwnership.ManagedValid
+                || (allowManagedDrift && raw == CodexIntegrationOwnership.ManagedDrift))
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                "Repair refused because the helper ownership record no longer matches the current Codex reviewer entry. Review a fresh protected-file diff before changing it.");
+        }
+
+        if (raw is CodexIntegrationOwnership.ManagedValid or CodexIntegrationOwnership.ManagedDrift)
+        {
+            throw new InvalidOperationException(
+                "Repair refused because managed Codex markers exist without a matching helper ownership record. No files were changed.");
+        }
+    }
+
+    private static void ValidateRepairBinding(
+        RepairHashBinding? binding,
+        CodexConfigPreview config,
+        AgentsOverridePreview agents)
+    {
+        if (binding is null)
+        {
+            return;
+        }
+
+        ValidateHash(binding.ConfigSourceSha256, allowMissing: true, "config.toml source");
+        ValidateHash(binding.ConfigPlannedSha256, allowMissing: false, "config.toml plan");
+        ValidateHash(binding.AgentsSourceSha256, allowMissing: true, "AGENTS.override.md source");
+        ValidateHash(binding.AgentsPlannedSha256, allowMissing: false, "AGENTS.override.md plan");
+        if (!string.Equals(binding.ConfigSourceSha256, config.SourceSha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(binding.ConfigPlannedSha256, config.PlannedSha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(binding.AgentsSourceSha256, agents.SourceSha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(binding.AgentsPlannedSha256, agents.PlannedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Protected repair hashes do not match the current source files and computed plans. Neither protected file was changed; run a fresh dry-run.");
+        }
+    }
+
+    private static void ValidateHash(string value, bool allowMissing, string label)
+    {
+        if (allowMissing && string.Equals(value, "MISSING", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (value.Length != 64 || !value.All(Uri.IsHexDigit))
+        {
+            throw new InvalidOperationException($"The expected {label} SHA-256 is invalid.");
+        }
+    }
+
+    private static void ValidateDiffOutputPath(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            throw new InvalidOperationException("Repair dry-run diff output must name a file, not a directory.");
+        }
+
+        var targetInfo = new FileInfo(path);
+        if (targetInfo.LinkTarget is not null
+            || (File.Exists(path) && File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)))
+        {
+            throw new InvalidOperationException("Repair dry-run diff output cannot be a symbolic link or reparse point.");
+        }
+
+        for (var directory = Path.GetDirectoryName(path);
+             !string.IsNullOrWhiteSpace(directory);
+             directory = Path.GetDirectoryName(directory))
+        {
+            var directoryInfo = new DirectoryInfo(directory);
+            if (directoryInfo.LinkTarget is not null
+                || (Directory.Exists(directory)
+                    && File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)))
+            {
+                throw new InvalidOperationException("Repair dry-run diff output cannot be beneath a symbolic link, junction, or reparse point.");
+            }
+
+            var root = Path.GetPathRoot(directory);
+            if (string.Equals(
+                    Path.TrimEndingDirectorySeparator(directory),
+                    Path.TrimEndingDirectorySeparator(root ?? string.Empty),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+        }
+    }
+
+    internal static bool IsFixedLocalPath(
+        string path,
+        Func<string, DriveType>? driveTypeResolver = null)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (new Uri(fullPath).IsUnc)
+        {
+            return false;
+        }
+
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return false;
+        }
+
+        try
+        {
+            var driveType = (driveTypeResolver ?? (value => new DriveInfo(value).DriveType))(root);
+            return driveType == DriveType.Fixed;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void RestoreProtectedSnapshot(
+        string path,
+        ProtectedFileSnapshot original,
+        ProtectedFileSnapshot? stateWrittenByRepair)
+    {
+        var current = ProtectedFileTransaction.Capture(path);
+        if (current.Exists == original.Exists && current.Bytes.AsSpan().SequenceEqual(original.Bytes))
+        {
+            return;
+        }
+
+        if (stateWrittenByRepair is null
+            || current.Exists != stateWrittenByRepair.Exists
+            || !current.Bytes.AsSpan().SequenceEqual(stateWrittenByRepair.Bytes))
+        {
+            // The failed save did not complete, or another helper process wrote newer state.
+            // Preserve that state rather than replacing it with this repair's older snapshot.
+            return;
+        }
+
+        if (original.Exists)
+        {
+            ProtectedFileTransaction.ReplaceIfUnchanged(path, current, original.Bytes);
+        }
+        else if (current.Exists)
+        {
+            ProtectedFileTransaction.DeleteIfUnchanged(path, current);
+        }
+    }
+
+    private StartupExternalState CaptureStartupExternalState()
+    {
+        var platform = _startupPlatform
+            ?? throw new InvalidOperationException("The Ollama startup platform is unavailable for guarded repair rollback.");
+        return new StartupExternalState(
+            platform.GetUserEnvironmentVariable("OLLAMA_MODELS"),
+            platform.GetUserEnvironmentVariable("OLLAMA_HOST"),
+            _processEnvironmentReader("OLLAMA_MODELS"),
+            _processEnvironmentReader("OLLAMA_HOST"),
+            platform.GetRunEntry());
+    }
+
+    private void RestoreStartupExternalState(
+        StartupExternalState original,
+        StartupExternalState writtenByRepair)
+    {
+        var platform = _startupPlatform
+            ?? throw new InvalidOperationException("The Ollama startup platform is unavailable for guarded repair rollback.");
+        var current = CaptureStartupExternalState();
+
+        ValidateStartupRollbackValue(
+            "OLLAMA_MODELS",
+            current.UserModels,
+            writtenByRepair.UserModels,
+            original.UserModels);
+        ValidateStartupRollbackValue(
+            "OLLAMA_HOST",
+            current.UserHost,
+            writtenByRepair.UserHost,
+            original.UserHost);
+        ValidateStartupRollbackValue(
+            "OLLAMA_MODELS",
+            current.ProcessModels,
+            writtenByRepair.ProcessModels,
+            original.ProcessModels);
+        ValidateStartupRollbackValue(
+            "OLLAMA_HOST",
+            current.ProcessHost,
+            writtenByRepair.ProcessHost,
+            original.ProcessHost);
+        ValidateStartupRollbackValue(
+            "Ollama Run entry",
+            current.RunEntry,
+            writtenByRepair.RunEntry,
+            original.RunEntry);
+
+        var environmentChanged = false;
+        environmentChanged |= RestoreStartupValue(
+            "OLLAMA_MODELS",
+            current.UserModels,
+            writtenByRepair.UserModels,
+            original.UserModels,
+            platform.SetUserEnvironmentVariable);
+        environmentChanged |= RestoreStartupValue(
+            "OLLAMA_HOST",
+            current.UserHost,
+            writtenByRepair.UserHost,
+            original.UserHost,
+            platform.SetUserEnvironmentVariable);
+        environmentChanged |= RestoreStartupValue(
+            "OLLAMA_MODELS",
+            current.ProcessModels,
+            writtenByRepair.ProcessModels,
+            original.ProcessModels,
+            platform.SetProcessEnvironmentVariable);
+        environmentChanged |= RestoreStartupValue(
+            "OLLAMA_HOST",
+            current.ProcessHost,
+            writtenByRepair.ProcessHost,
+            original.ProcessHost,
+            platform.SetProcessEnvironmentVariable);
+
+        if (!string.Equals(current.RunEntry, original.RunEntry, StringComparison.Ordinal))
+        {
+            if (!string.Equals(current.RunEntry, writtenByRepair.RunEntry, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "The Ollama Run entry changed after repair wrote it. Guarded rollback preserved the newer value.");
+            }
+
+            platform.SetRunEntry(original.RunEntry);
+        }
+
+        if (environmentChanged)
+        {
+            platform.BroadcastEnvironmentChange();
+        }
+
+    }
+
+    private static bool RestoreStartupValue(
+        string name,
+        string? current,
+        string? writtenByRepair,
+        string? original,
+        Action<string, string?> restore)
+    {
+        if (string.Equals(current, original, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.Equals(current, writtenByRepair, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{name} changed after repair wrote it. Guarded rollback preserved the newer value.");
+        }
+
+        restore(name, original);
+        return true;
+    }
+
+    private static void ValidateStartupRollbackValue(
+        string name,
+        string? current,
+        string? writtenByRepair,
+        string? original)
+    {
+        if (!string.Equals(current, original, StringComparison.Ordinal)
+            && !string.Equals(current, writtenByRepair, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{name} changed after repair wrote it. Guarded rollback preserved the newer value.");
+        }
+    }
+
+    private async Task<ProtectedFileSnapshot> SaveRepairStateAsync(
+        StateStore store,
+        InstallationState state,
+        ProtectedFileSnapshot expected,
+        CancellationToken cancellationToken)
+    {
+        if (_stateSaver is null)
+        {
+            return await store.SaveIfUnchangedAsync(state, expected, cancellationToken).ConfigureAwait(false);
+        }
+
+        await _stateSaver(store, state, cancellationToken).ConfigureAwait(false);
+        return ProtectedFileTransaction.Capture(store.Path);
     }
 
     private static void TrackManagedFile(InstallationState state, ManagedFileResult result)
@@ -1035,4 +1744,11 @@ public sealed class InstallationManager
 
         return processes.Length > 0;
     }
+
+    private sealed record StartupExternalState(
+        string? UserModels,
+        string? UserHost,
+        string? ProcessModels,
+        string? ProcessHost,
+        string? RunEntry);
 }

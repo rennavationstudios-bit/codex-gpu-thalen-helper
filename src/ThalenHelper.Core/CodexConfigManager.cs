@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Tomlyn;
@@ -19,8 +20,34 @@ public enum CodexIntegrationOwnership
     Invalid
 }
 
+public sealed record CodexConfigPreview(
+    string Diff,
+    bool Changed,
+    bool ExistingIntegrationPreserved,
+    bool ExistingIntegrationMigrated,
+    string SourceSha256,
+    string PlannedSha256,
+    string Action);
+
 public sealed partial class CodexConfigManager
 {
+    public CodexConfigPreview PreviewInstall(
+        ProductPaths paths,
+        bool enabled,
+        bool migrateExisting = false)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var plan = BuildInstallPlan(paths, enabled, migrateExisting);
+        return new CodexConfigPreview(
+            BuildDiff(plan.Inspection.Content, plan.Merged),
+            !string.Equals(plan.Inspection.Content, plan.Merged, StringComparison.Ordinal),
+            plan.PreserveExisting,
+            plan.MigrateExisting,
+            plan.Inspection.Snapshot.SourceSha256,
+            HashPlannedContent(plan.Inspection, plan.Merged),
+            plan.Action);
+    }
+
     public CodexIntegrationOwnership InspectOwnership(ProductPaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -113,21 +140,27 @@ public sealed partial class CodexConfigManager
     public ManagedFileResult InstallOrRepair(
         ProductPaths paths,
         bool enabled,
-        Func<string, bool>? startupValidator = null)
+        Func<string, bool>? startupValidator = null,
+        string? expectedSourceSha256 = null,
+        string? expectedPlannedSha256 = null,
+        bool migrateExisting = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        var inspection = InspectExistingUnmanagedIntegration(paths);
+        var plan = BuildInstallPlan(paths, enabled, migrateExisting);
+        var inspection = plan.Inspection;
         var originalExists = inspection.Snapshot.Exists;
         var original = inspection.Content;
-
-        var withoutManaged = RemoveManagedBlock(original, out var hadManagedBlock);
-        if (inspection.ShouldPreserve)
+        ValidatePreviewBinding(
+            inspection,
+            plan.Merged,
+            expectedSourceSha256,
+            expectedPlannedSha256);
+        if (plan.PreserveExisting)
         {
             return PreservedExistingResult(paths);
         }
 
-        var managed = BuildManagedBlock(paths, enabled);
-        var merged = AppendBlock(withoutManaged, managed);
+        var merged = plan.Merged;
         ValidateToml(merged, allowEmpty: false);
         if (string.Equals(original, merged, StringComparison.Ordinal))
         {
@@ -138,7 +171,7 @@ public sealed partial class CodexConfigManager
         var backup = originalExists
             ? ProtectedFileTransaction.CreateBackup(paths.CodexConfigFile, inspection.Snapshot)
             : null;
-        var appliedBytes = new UTF8Encoding(false).GetBytes(merged);
+        var appliedBytes = EncodeUtf8PreservingPreamble(merged, inspection.Snapshot.Bytes);
         var replaced = false;
         try
         {
@@ -171,7 +204,7 @@ public sealed partial class CodexConfigManager
                 !originalExists,
                 true,
                 backup,
-                hadManagedBlock ? "updated" : "installed")
+                plan.Action)
             {
                 AppliedBytes = appliedBytes
             };
@@ -191,6 +224,159 @@ public sealed partial class CodexConfigManager
 
             throw;
         }
+    }
+
+    private CodexInstallPlan BuildInstallPlan(
+        ProductPaths paths,
+        bool enabled,
+        bool migrateExisting)
+    {
+        var inspection = InspectExistingUnmanagedIntegration(paths);
+        var withoutManaged = RemoveManagedBlock(inspection.Content, out var hadManagedBlock);
+        if (inspection.ShouldPreserve && !migrateExisting)
+        {
+            return new CodexInstallPlan(
+                inspection,
+                inspection.Content,
+                PreserveExisting: true,
+                MigrateExisting: false,
+                Action: "preserved-existing-unmanaged");
+        }
+
+        var managed = BuildManagedBlock(paths, enabled);
+        if (inspection.ShouldPreserve)
+        {
+            var migrated = ReplaceExistingReviewerTable(inspection.Content, managed);
+            ValidateToml(migrated, allowEmpty: false);
+            return new CodexInstallPlan(
+                inspection,
+                migrated,
+                PreserveExisting: false,
+                MigrateExisting: true,
+                Action: "migrated-existing");
+        }
+
+        var managedAlreadyMatches = hadManagedBlock
+            && TryGetManagedBlock(inspection.Content, out var currentManagedBlock, out _)
+            && ManagedReviewerMatches(currentManagedBlock, paths)
+            && TryGetManagedEnabled(currentManagedBlock, out var currentEnabled)
+            && currentEnabled == enabled;
+        var merged = hadManagedBlock
+            ? managedAlreadyMatches
+                ? inspection.Content
+                : ReplaceManagedBlockInPlace(inspection.Content, managed)
+            : AppendBlock(withoutManaged, managed);
+        return new CodexInstallPlan(
+            inspection,
+            merged,
+            PreserveExisting: false,
+            MigrateExisting: false,
+            Action: hadManagedBlock ? "updated" : "installed");
+    }
+
+    private static void ValidatePreviewBinding(
+        ExistingIntegrationInspection inspection,
+        string planned,
+        string? expectedSourceSha256,
+        string? expectedPlannedSha256)
+    {
+        if ((expectedSourceSha256 is null) != (expectedPlannedSha256 is null))
+        {
+            throw new InvalidOperationException("Both config.toml preview hashes are required together.");
+        }
+
+        if (expectedSourceSha256 is not null
+            && !string.Equals(
+                expectedSourceSha256,
+                inspection.Snapshot.SourceSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "config.toml changed after the before/after preview. Review a fresh diff before applying repair.");
+        }
+
+        var plannedSha256 = HashPlannedContent(inspection, planned);
+        if (expectedPlannedSha256 is not null
+            && !string.Equals(expectedPlannedSha256, plannedSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "The managed config.toml plan no longer matches the reviewed diff. Review a fresh diff before applying repair.");
+        }
+    }
+
+    private static string HashPlannedContent(
+        ExistingIntegrationInspection inspection,
+        string planned)
+    {
+        if (string.Equals(inspection.Content, planned, StringComparison.Ordinal))
+        {
+            return inspection.Snapshot.SourceSha256;
+        }
+
+        return Convert.ToHexString(SHA256.HashData(
+            EncodeUtf8PreservingPreamble(planned, inspection.Snapshot.Bytes)));
+    }
+
+    private static string BuildDiff(string before, string after)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("--- config.toml (before)");
+        builder.AppendLine("+++ config.toml (after)");
+        builder.AppendLine("@@ changed hunk preview; contents are written only to the explicit diff file @@");
+        var beforeLines = before.ReplaceLineEndings("\n").Split('\n');
+        var afterLines = after.ReplaceLineEndings("\n").Split('\n');
+        var prefix = 0;
+        while (prefix < beforeLines.Length
+            && prefix < afterLines.Length
+            && string.Equals(beforeLines[prefix], afterLines[prefix], StringComparison.Ordinal))
+        {
+            prefix++;
+        }
+
+        var suffix = 0;
+        while (suffix < beforeLines.Length - prefix
+            && suffix < afterLines.Length - prefix
+            && string.Equals(
+                beforeLines[^(suffix + 1)],
+                afterLines[^(suffix + 1)],
+                StringComparison.Ordinal))
+        {
+            suffix++;
+        }
+
+        if (prefix == beforeLines.Length && prefix == afterLines.Length)
+        {
+            return builder.AppendLine("@@ no changes @@").ToString();
+        }
+
+        var contextStart = Math.Max(0, prefix - 3);
+        var beforeChangeEnd = beforeLines.Length - suffix;
+        var afterChangeEnd = afterLines.Length - suffix;
+        var contextCount = Math.Min(3, suffix);
+        builder.Append("@@ -").Append(contextStart + 1).Append(',').Append(beforeChangeEnd - contextStart + contextCount)
+            .Append(" +").Append(contextStart + 1).Append(',').Append(afterChangeEnd - contextStart + contextCount)
+            .AppendLine(" @@");
+        for (var index = contextStart; index < prefix; index++)
+        {
+            builder.Append(' ').AppendLine(beforeLines[index]);
+        }
+
+        for (var index = prefix; index < beforeLines.Length - suffix; index++)
+        {
+            builder.Append('-').AppendLine(beforeLines[index]);
+        }
+
+        for (var index = prefix; index < afterLines.Length - suffix; index++)
+        {
+            builder.Append('+').AppendLine(afterLines[index]);
+        }
+
+        for (var index = beforeLines.Length - suffix; index < beforeLines.Length - suffix + contextCount; index++)
+        {
+            builder.Append(' ').AppendLine(beforeLines[index]);
+        }
+
+        return builder.ToString();
     }
 
     public ManagedFileResult SetEnabled(ProductPaths paths, bool enabled)
@@ -425,6 +611,7 @@ public sealed partial class CodexConfigManager
             enabled = {{enabled.ToString().ToLowerInvariant()}}
             required = false
             enabled_tools = ["local_gpu_health", "local_gpu_plan", "local_gpu_review"]
+            env_vars = ["OLLAMA_MODELS"]
             default_tools_approval_mode = "prompt"
             supports_parallel_tool_calls = false
             startup_timeout_sec = 20
@@ -518,7 +705,7 @@ public sealed partial class CodexConfigManager
     private static bool ManagedReviewerMatches(string content, ProductPaths paths)
     {
         var reviewer = GetExclusiveManagedReviewer(content);
-        if (reviewer is null)
+        if (reviewer is null || HasUnapprovedManagedEnvironment(reviewer))
         {
             return false;
         }
@@ -530,13 +717,14 @@ public sealed partial class CodexConfigManager
             "enabled",
             "enabled_tools",
             "env",
+            "env_vars",
             "required",
             "startup_timeout_sec",
             "supports_parallel_tool_calls",
             "tool_timeout_sec",
             "tools"
         };
-        if (!reviewer.Keys.Order(StringComparer.Ordinal).SequenceEqual(expectedReviewerKeys, StringComparer.Ordinal))
+        if (expectedReviewerKeys.Any(key => !reviewer.ContainsKey(key)))
         {
             return false;
         }
@@ -555,16 +743,17 @@ public sealed partial class CodexConfigManager
             || !reviewer.TryGetValue("enabled_tools", out var enabledToolsValue)
             || enabledToolsValue is not TomlArray enabledTools
             || !enabledTools.OfType<string>().SequenceEqual(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], StringComparer.Ordinal)
+            || !reviewer.TryGetValue("env_vars", out var environmentVariablesValue)
+            || environmentVariablesValue is not TomlArray environmentVariables
+            || !environmentVariables.OfType<string>().SequenceEqual(["OLLAMA_MODELS"], StringComparer.Ordinal)
             || !reviewer.TryGetValue("env", out var envValue)
             || envValue is not TomlTable env
-            || !env.Keys.Order(StringComparer.Ordinal).SequenceEqual(["OLLAMA_HOST", "THALEN_HELPER_STATE_DIR"], StringComparer.Ordinal)
             || !TryString(env, "OLLAMA_HOST", out var host)
             || !string.Equals(host, "http://127.0.0.1:11434", StringComparison.Ordinal)
             || !TryString(env, "THALEN_HELPER_STATE_DIR", out var stateDirectory)
             || !PathsEqual(stateDirectory, paths.StateDirectory)
             || !reviewer.TryGetValue("tools", out var toolsValue)
             || toolsValue is not TomlTable tools
-            || !tools.Keys.Order(StringComparer.Ordinal).SequenceEqual(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], StringComparer.Ordinal)
             || !HasExactApprovalMode(tools, "local_gpu_health", "auto")
             || !HasExactApprovalMode(tools, "local_gpu_plan", "auto")
             || !HasExactApprovalMode(tools, "local_gpu_review", "prompt"))
@@ -573,6 +762,55 @@ public sealed partial class CodexConfigManager
         }
 
         return true;
+    }
+
+    private static void ThrowIfUnapprovedManagedEnvironment(string content)
+    {
+        var document = TomlSerializer.Deserialize<TomlTable>(content);
+        if (document is null
+            || !document.TryGetValue("mcp_servers", out var serversValue)
+            || serversValue is not TomlTable servers
+            || !servers.TryGetValue(ProductInfo.IntegrationName, out var reviewerValue)
+            || reviewerValue is not TomlTable reviewer
+            || !HasUnapprovedManagedEnvironment(reviewer))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "The existing local_gpu_reviewer block contains an unapproved environment entry. No automatic migration or repair was applied; review and remove the extra env or env_vars entry explicitly, then preview repair again.");
+    }
+
+    private static bool HasUnapprovedManagedEnvironment(TomlTable reviewer)
+    {
+        if (reviewer.TryGetValue("env_vars", out var environmentVariablesValue)
+            && (environmentVariablesValue is not TomlArray environmentVariables
+                || environmentVariables.Count != 1
+                || environmentVariables[0] is not string imported
+                || !string.Equals(imported, "OLLAMA_MODELS", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        if (!reviewer.TryGetValue("env", out var envValue))
+        {
+            return false;
+        }
+
+        if (envValue is not TomlTable environment)
+        {
+            return true;
+        }
+
+        return environment.Keys.Any(key => !string.Equals(key, "OLLAMA_HOST", StringComparison.Ordinal)
+            && !string.Equals(key, "THALEN_HELPER_STATE_DIR", StringComparison.Ordinal));
+    }
+
+    private static bool TryGetManagedEnabled(string content, out bool enabled)
+    {
+        enabled = false;
+        var reviewer = GetExclusiveManagedReviewer(content);
+        return reviewer is not null && TryBoolean(reviewer, "enabled", out enabled);
     }
 
     private static bool IsStructurallyBoundManagedReviewer(string managedBlock, string withoutManaged)
@@ -679,6 +917,11 @@ public sealed partial class CodexConfigManager
 
         var original = ProtectedFileTransaction.DecodeUtf8(backupSnapshot);
         ValidateToml(original, allowEmpty: true);
+        if (currentBytes.AsSpan().StartsWith(Encoding.UTF8.Preamble)
+            != backupSnapshot.Bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble))
+        {
+            return false;
+        }
         if (original.Contains(ProductInfo.ManagedConfigStart, StringComparison.Ordinal)
             || original.Contains(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal))
         {
@@ -707,8 +950,28 @@ public sealed partial class CodexConfigManager
         }
 
         var managed = current[start..(end + ProductInfo.ManagedConfigEnd.Length)];
-        var expected = new UTF8Encoding(false).GetBytes(AppendBlock(baseContent, managed));
-        return currentBytes.AsSpan().SequenceEqual(expected);
+        var expected = EncodeUtf8PreservingPreamble(AppendBlock(baseContent, managed), currentBytes);
+        if (currentBytes.AsSpan().SequenceEqual(expected))
+        {
+            return true;
+        }
+
+        if (!ContainsExistingIntegration(baseContent))
+        {
+            return false;
+        }
+
+        try
+        {
+            var expectedMigration = EncodeUtf8PreservingPreamble(
+                ReplaceExistingReviewerTable(baseContent, managed),
+                currentBytes);
+            return currentBytes.AsSpan().SequenceEqual(expectedMigration);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or InvalidDataException or ArgumentException)
+        {
+            return false;
+        }
     }
 
     private static int ConsumeSingleLineEnding(string content, int index)
@@ -765,6 +1028,477 @@ public sealed partial class CodexConfigManager
                 StringComparison.OrdinalIgnoreCase)
             && backupFull.EndsWith(".bak", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string ReplaceExistingReviewerTable(string content, string managedBlock)
+    {
+        ThrowIfUnapprovedManagedEnvironment(content);
+        var headers = ReadTableHeaders(content);
+        var targets = headers
+            .Select((header, index) => (header, index))
+            .Where(item => IsReviewerPath(item.header.Path))
+            .ToArray();
+        var roots = targets.Where(item => item.header.Path.Count == 2).ToArray();
+        if (roots.Length != 1
+            || targets.Length == 0
+            || targets[0].index != roots[0].index
+            || targets.Any(item => item.header.IsArray))
+        {
+            throw new InvalidOperationException(
+                "The existing local_gpu_reviewer table layout is ambiguous or displaced. No migration was applied.");
+        }
+
+        var first = targets[0].index;
+        var last = targets[^1].index;
+        if (Enumerable.Range(first, last - first + 1).Any(index => !IsReviewerPath(headers[index].Path)))
+        {
+            throw new InvalidOperationException(
+                "The existing local_gpu_reviewer subtables are interleaved with unrelated tables. No migration was applied.");
+        }
+
+        var start = headers[first].Start;
+        var end = last + 1 < headers.Count ? headers[last + 1].Start : content.Length;
+        var expectedFamilyEnd = managedBlock.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
+        var expectedRoot = ReadTableHeaders(expectedFamilyEnd < 0 ? managedBlock : managedBlock[..expectedFamilyEnd])
+            .FirstOrDefault(header => header.Path.Count == 2 && IsReviewerPath(header.Path));
+        var expectedFamilyStart = expectedRoot?.Start ?? -1;
+        if (expectedFamilyStart < 0 || expectedFamilyEnd < expectedFamilyStart)
+        {
+            throw new InvalidDataException("The packaged managed reviewer template is malformed.");
+        }
+
+        var expectedFamily = managedBlock[expectedFamilyStart..expectedFamilyEnd].TrimEnd('\r', '\n');
+        var expectedHeaders = ReadTableHeaders(expectedFamily);
+        var expectedSections = expectedHeaders
+            .Select((header, index) => new TableSection(
+                header.Path,
+                expectedFamily[header.Start..(index + 1 < expectedHeaders.Count
+                    ? expectedHeaders[index + 1].Start
+                    : expectedFamily.Length)]))
+            .ToList();
+        var existingHasEnvTable = targets.Any(item => item.header.Path.Count == 3
+            && string.Equals(item.header.Path[2], "env", StringComparison.Ordinal));
+        if (existingHasEnvTable)
+        {
+            var rootIndex = expectedSections.FindIndex(section => section.Path.Count == 2);
+            expectedSections[rootIndex] = expectedSections[rootIndex] with
+            {
+                Content = RemoveAssignmentLine(expectedSections[rootIndex].Content, "env")
+            };
+            if (!expectedSections.Any(section => section.Path.Count == 3
+                && IsReviewerPath(section.Path)
+                && string.Equals(section.Path[2], "env", StringComparison.Ordinal)))
+            {
+                var managedDocument = TomlSerializer.Deserialize<TomlTable>(managedBlock)!;
+                var managedReviewer = (TomlTable)((TomlTable)managedDocument["mcp_servers"]!)[ProductInfo.IntegrationName]!;
+                var managedEnv = (TomlTable)managedReviewer["env"]!;
+                var envContent = new StringBuilder("[mcp_servers.local_gpu_reviewer.env]").AppendLine();
+                foreach (var key in new[] { "THALEN_HELPER_STATE_DIR", "OLLAMA_HOST" })
+                {
+                    envContent.Append(key)
+                        .Append(" = \"")
+                        .Append(EscapeTomlBasicString((string)managedEnv[key]!))
+                        .AppendLine("\"");
+                }
+
+                expectedSections.Add(new TableSection(
+                    ["mcp_servers", ProductInfo.IntegrationName, "env"],
+                    envContent.ToString()));
+            }
+        }
+        var expectedByPath = expectedSections.ToDictionary(
+            section => PathKey(section.Path),
+            StringComparer.Ordinal);
+        var foundManagedPaths = new HashSet<string>(StringComparer.Ordinal);
+        var family = new StringBuilder();
+        for (var index = first; index <= last; index++)
+        {
+            var header = headers[index];
+            var sectionEnd = index + 1 < headers.Count ? headers[index + 1].Start : content.Length;
+            var section = content[header.Start..sectionEnd];
+            var key = PathKey(header.Path);
+            if (expectedByPath.TryGetValue(key, out var expected))
+            {
+                family.Append(MergeManagedSection(section, expected.Content));
+                foundManagedPaths.Add(key);
+            }
+            else
+            {
+                family.Append(section);
+            }
+        }
+
+        foreach (var expected in expectedSections.Where(section => !foundManagedPaths.Contains(PathKey(section.Path))))
+        {
+            if (family.Length > 0 && family[^1] is not '\r' and not '\n')
+            {
+                family.AppendLine();
+            }
+
+            family.AppendLine().Append(expected.Content.TrimEnd('\r', '\n')).AppendLine();
+        }
+
+        var replacement = ProductInfo.ManagedConfigStart
+            + Environment.NewLine
+            + family.ToString().TrimEnd('\r', '\n')
+            + Environment.NewLine
+            + ProductInfo.ManagedConfigEnd
+            + Environment.NewLine
+            + (end < content.Length ? Environment.NewLine : string.Empty);
+        var migrated = content[..start] + replacement + content[end..];
+        ValidateToml(migrated, allowEmpty: false);
+        if (ContainsExistingIntegration(RemoveManagedBlock(migrated, out _)))
+        {
+            throw new InvalidOperationException(
+                "The existing local_gpu_reviewer definition was not isolated to one replaceable table family. No migration was applied.");
+        }
+
+        return migrated;
+    }
+
+    private static string MergeManagedSection(string existing, string expected)
+    {
+        var expectedAssignments = ReadAssignments(expected);
+        if (expectedAssignments.Count == 0)
+        {
+            return existing;
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var builder = new StringBuilder();
+        foreach (var line in ReadLines(existing))
+        {
+            if (!TryReadAssignment(line.Content, out var key, out var comment)
+                || !expectedAssignments.TryGetValue(key, out var replacement))
+            {
+                builder.Append(line.Content).Append(line.Ending);
+                continue;
+            }
+
+            if (!seen.Add(key))
+            {
+                throw new InvalidOperationException($"The existing reviewer table contains duplicate {key} assignments.");
+            }
+
+            var value = line.Content[(line.Content.IndexOf('=') + 1)..].Trim();
+            if (value.StartsWith("\"\"\"", StringComparison.Ordinal)
+                || value.StartsWith("'''", StringComparison.Ordinal)
+                || (value.StartsWith("[", StringComparison.Ordinal) && !value.Contains(']')))
+            {
+                throw new InvalidOperationException($"The existing reviewer {key} assignment is multiline or ambiguous. No migration was applied.");
+            }
+
+            var indentLength = line.Content.Length - line.Content.TrimStart(' ', '\t').Length;
+            builder.Append(line.Content[..indentLength])
+                .Append(replacement)
+                .Append(comment)
+                .Append(line.Ending);
+        }
+
+        foreach (var assignment in expectedAssignments.Where(item => !seen.Contains(item.Key)))
+        {
+            if (builder.Length > 0 && builder[^1] is not '\r' and not '\n')
+            {
+                builder.AppendLine();
+            }
+
+            builder.Append(assignment.Value).AppendLine();
+        }
+
+        return builder.ToString();
+    }
+
+    private static Dictionary<string, string> ReadAssignments(string section)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var line in ReadLines(section))
+        {
+            if (TryReadAssignment(line.Content, out var key, out var comment))
+            {
+                var assignment = line.Content.Trim();
+                if (comment.Length > 0)
+                {
+                    assignment = assignment[..^comment.TrimStart().Length].TrimEnd();
+                }
+                result.Add(key, assignment);
+            }
+        }
+
+        return result;
+    }
+
+    private static string RemoveAssignmentLine(string section, string assignmentKey)
+    {
+        var builder = new StringBuilder();
+        foreach (var line in ReadLines(section))
+        {
+            if (TryReadAssignment(line.Content, out var key, out _)
+                && string.Equals(key, assignmentKey, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            builder.Append(line.Content).Append(line.Ending);
+        }
+
+        return builder.ToString();
+    }
+
+    private static bool TryReadAssignment(string line, out string key, out string comment)
+    {
+        key = string.Empty;
+        comment = string.Empty;
+        var trimmed = line.TrimStart(' ', '\t');
+        if (trimmed.Length == 0 || trimmed[0] == '#')
+        {
+            return false;
+        }
+
+        var equals = trimmed.IndexOf('=');
+        if (equals <= 0 || !TryParseDottedKey(trimmed[..equals].Trim(), out var keyPath) || keyPath.Count != 1)
+        {
+            return false;
+        }
+
+        key = keyPath[0];
+        var commentIndex = FindUnquotedComment(trimmed, equals + 1);
+        comment = commentIndex >= 0 ? " " + trimmed[commentIndex..].TrimStart() : string.Empty;
+        return true;
+    }
+
+    private static int FindUnquotedComment(string value, int start)
+    {
+        var quote = '\0';
+        var escaped = false;
+        for (var index = start; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (quote == '"' && character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (character is '"' or '\'')
+            {
+                quote = quote == '\0' ? character : quote == character ? '\0' : quote;
+                continue;
+            }
+
+            if (character == '#' && quote == '\0')
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static IReadOnlyList<TextLine> ReadLines(string content)
+    {
+        var result = new List<TextLine>();
+        var start = 0;
+        while (start < content.Length)
+        {
+            var end = content.IndexOfAny(['\r', '\n'], start);
+            if (end < 0)
+            {
+                result.Add(new TextLine(content[start..], string.Empty));
+                break;
+            }
+
+            var endingLength = content[end] == '\r' && end + 1 < content.Length && content[end + 1] == '\n' ? 2 : 1;
+            result.Add(new TextLine(content[start..end], content.Substring(end, endingLength)));
+            start = end + endingLength;
+        }
+
+        return result;
+    }
+
+    private static string PathKey(IReadOnlyList<string> path)
+        => string.Join("\u001f", path);
+
+    private static string ReplaceManagedBlockInPlace(string content, string managedBlock)
+    {
+        var start = content.IndexOf(ProductInfo.ManagedConfigStart, StringComparison.Ordinal);
+        var end = content.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
+        if (start < 0 || end < start)
+        {
+            throw new InvalidDataException("The managed Codex configuration markers are malformed.");
+        }
+
+        var blockEnd = end + ProductInfo.ManagedConfigEnd.Length;
+        var existingBlock = content[start..blockEnd];
+        ThrowIfUnapprovedManagedEnvironment(existingBlock);
+        var familyStart = existingBlock.IndexOf('[', StringComparison.Ordinal);
+        var familyEnd = existingBlock.IndexOf(ProductInfo.ManagedConfigEnd, StringComparison.Ordinal);
+        if (familyStart < 0 || familyEnd < familyStart)
+        {
+            throw new InvalidDataException("The managed Codex reviewer family is malformed.");
+        }
+
+        var merged = ReplaceExistingReviewerTable(
+            existingBlock[familyStart..familyEnd].TrimEnd('\r', '\n'),
+            managedBlock).TrimEnd('\r', '\n');
+        return content[..start] + merged + content[blockEnd..];
+    }
+
+    private static List<TableHeader> ReadTableHeaders(string content)
+    {
+        var result = new List<TableHeader>();
+        var position = 0;
+        while (position < content.Length)
+        {
+            var lineEnd = content.IndexOfAny(['\r', '\n'], position);
+            if (lineEnd < 0)
+            {
+                lineEnd = content.Length;
+            }
+
+            var line = content[position..lineEnd];
+            var trimmed = line.TrimStart(' ', '\t');
+            if (trimmed.StartsWith("[", StringComparison.Ordinal))
+            {
+                var isArray = trimmed.StartsWith("[[", StringComparison.Ordinal);
+                var close = isArray
+                    ? trimmed.IndexOf("]]", StringComparison.Ordinal)
+                    : trimmed.IndexOf(']');
+                if (close > (isArray ? 2 : 1))
+                {
+                    var keyText = trimmed[(isArray ? 2 : 1)..close];
+                    if (!TryParseDottedKey(keyText, out var path))
+                    {
+                        if (keyText.Contains(ProductInfo.IntegrationName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(
+                                "The existing local_gpu_reviewer table header uses an unsupported or ambiguous key form. No migration was applied.");
+                        }
+
+                        path = [];
+                    }
+
+                    result.Add(new TableHeader(position, path, isArray));
+                }
+            }
+
+            if (lineEnd == content.Length)
+            {
+                break;
+            }
+
+            position = lineEnd + 1;
+            if (content[lineEnd] == '\r'
+                && position < content.Length
+                && content[position] == '\n')
+            {
+                position++;
+            }
+        }
+
+        return result;
+    }
+
+    private static bool TryParseDottedKey(string text, out IReadOnlyList<string> path)
+    {
+        var parts = new List<string>();
+        var index = 0;
+        while (index < text.Length)
+        {
+            while (index < text.Length && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            if (index >= text.Length)
+            {
+                path = [];
+                return false;
+            }
+
+            string part;
+            if (text[index] is '"' or '\'')
+            {
+                var quote = text[index++];
+                var start = index;
+                while (index < text.Length && text[index] != quote)
+                {
+                    if (quote == '"' && text[index] == '\\')
+                    {
+                        path = [];
+                        return false;
+                    }
+
+                    index++;
+                }
+
+                if (index >= text.Length)
+                {
+                    path = [];
+                    return false;
+                }
+
+                part = text[start..index++];
+            }
+            else
+            {
+                var start = index;
+                while (index < text.Length && (char.IsLetterOrDigit(text[index]) || text[index] is '_' or '-'))
+                {
+                    index++;
+                }
+
+                if (start == index)
+                {
+                    path = [];
+                    return false;
+                }
+
+                part = text[start..index];
+            }
+
+            parts.Add(part);
+            while (index < text.Length && char.IsWhiteSpace(text[index]))
+            {
+                index++;
+            }
+
+            if (index == text.Length)
+            {
+                path = parts;
+                return true;
+            }
+
+            if (text[index++] != '.')
+            {
+                path = [];
+                return false;
+            }
+        }
+
+        path = [];
+        return false;
+    }
+
+    private static bool IsReviewerPath(IReadOnlyList<string> path)
+        => path.Count >= 2
+            && string.Equals(path[0], "mcp_servers", StringComparison.Ordinal)
+            && string.Equals(path[1], ProductInfo.IntegrationName, StringComparison.Ordinal);
+
+    private sealed record CodexInstallPlan(
+        ExistingIntegrationInspection Inspection,
+        string Merged,
+        bool PreserveExisting,
+        bool MigrateExisting,
+        string Action);
+
+    private sealed record TableHeader(int Start, IReadOnlyList<string> Path, bool IsArray);
+    private sealed record TableSection(IReadOnlyList<string> Path, string Content);
+    private sealed record TextLine(string Content, string Ending);
 
     [GeneratedRegex("(?m)^enabled\\s*=\\s*(true|false)\\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex EnabledLineRegex();

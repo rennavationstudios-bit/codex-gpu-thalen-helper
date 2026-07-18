@@ -21,6 +21,10 @@ public sealed class McpProtocolTests
         Directory.CreateDirectory(paths.StateDirectory);
         Directory.CreateDirectory(paths.CodexHome);
         new CodexConfigManager().InstallOrRepair(paths, enabled: true);
+        Assert.Contains(
+            "env_vars = [\"OLLAMA_MODELS\"]",
+            await File.ReadAllTextAsync(paths.CodexConfigFile),
+            StringComparison.Ordinal);
         var store = new StateStore(paths.StateFile);
         var modelDirectory = Path.Combine(temporary.Path, "Isolated models");
         var manifest = Path.Combine(

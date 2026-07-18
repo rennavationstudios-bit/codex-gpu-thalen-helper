@@ -40,19 +40,19 @@ public sealed partial class ModelCatalogService
         }
 
         var duplicateTags = manifest.Models
-            .GroupBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(model => ModelProviders.Normalize(model.Provider) + "\0" + model.Tag, StringComparer.OrdinalIgnoreCase)
             .Where(group => group.Count() > 1)
             .Select(group => group.Key);
         errors.AddRange(duplicateTags.Select(tag => $"duplicate model tag: {tag}"));
 
         foreach (var model in manifest.Models)
         {
-            if (!ModelIdentifierRegex().IsMatch(model.Tag))
+            if (!IsValidModelKey(model.Provider, model.Tag))
             {
                 errors.Add($"invalid model identifier: {model.Tag}");
             }
 
-            if (!string.Equals(model.Provider, "Ollama", StringComparison.Ordinal))
+            if (!ModelProviders.IsSupported(model.Provider))
             {
                 errors.Add($"unsupported provider for {model.Tag}");
             }
@@ -80,8 +80,8 @@ public sealed partial class ModelCatalogService
                 errors.Add($"resource metadata is outside safe bounds for {model.Tag}");
             }
 
-            if (model.SafeDefaultContextTokens is < 512 or > 32_768
-                || model.MaximumContextTokens is < 512 or > 32_768
+            if (model.SafeDefaultContextTokens is < 512 or > 131_072
+                || model.MaximumContextTokens is < 512 or > 131_072
                 || model.SafeDefaultContextTokens > model.MaximumContextTokens)
             {
                 errors.Add($"default context exceeds maximum for {model.Tag}");
@@ -105,8 +105,16 @@ public sealed partial class ModelCatalogService
         }
     }
 
+    private static bool IsValidModelKey(string provider, string tag)
+        => string.Equals(ModelProviders.Normalize(provider), ModelProviders.Ollama, StringComparison.Ordinal)
+            ? ModelIdentifierRegex().IsMatch(tag)
+            : LmStudioModelIdentifierRegex().IsMatch(tag);
+
     [GeneratedRegex("^[a-z0-9][a-z0-9._/-]*:[a-z0-9][a-z0-9._-]*$", RegexOptions.CultureInvariant)]
     private static partial Regex ModelIdentifierRegex();
+
+    [GeneratedRegex("^[a-z0-9][a-z0-9._/-]*$", RegexOptions.CultureInvariant)]
+    private static partial Regex LmStudioModelIdentifierRegex();
 
     [GeneratedRegex("^(?:sha256:)?[a-fA-F0-9]{12,64}$", RegexOptions.CultureInvariant)]
     private static partial Regex ExpectedDigestRegex();

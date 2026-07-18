@@ -7,6 +7,7 @@ public sealed class ControlService
     private readonly ProductPaths _paths;
     private readonly StateStore _stateStore;
     private readonly Func<OllamaClient> _clientFactory;
+    private readonly Func<LmStudioClient> _lmStudioFactory;
     private readonly CodexConfigManager _codexConfig;
     private readonly OllamaAutoStartManager _autoStart;
     private readonly ActiveModelTracker _activeModelTracker;
@@ -16,11 +17,13 @@ public sealed class ControlService
         StateStore stateStore,
         Func<OllamaClient>? clientFactory = null,
         CodexConfigManager? codexConfig = null,
-        OllamaAutoStartManager? autoStart = null)
+        OllamaAutoStartManager? autoStart = null,
+        Func<LmStudioClient>? lmStudioFactory = null)
     {
         _paths = paths;
         _stateStore = stateStore;
         _clientFactory = clientFactory ?? (() => new OllamaClient());
+        _lmStudioFactory = lmStudioFactory ?? (() => new LmStudioClient());
         _codexConfig = codexConfig ?? new CodexConfigManager();
         _autoStart = autoStart ?? new OllamaAutoStartManager(_clientFactory);
         _activeModelTracker = new ActiveModelTracker(paths.StateDirectory);
@@ -40,13 +43,13 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Paused;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        var unload = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        var unload = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         return new ControlResult(
             true,
             unload ? "PAUSED" : "PAUSED_UNLOAD_UNCONFIRMED",
             unload
-                ? "New local reviews are paused and the selected model was released."
-                : "New local reviews are paused; Ollama was unavailable, so model unload could not be confirmed.",
+                ? "New local reviews are paused and any tracked helper-owned model was released."
+                : "New local reviews are paused; runtime ownership could not be proven, so the loaded state was left untouched.",
             state);
     }
 
@@ -56,6 +59,15 @@ public sealed class ControlService
         if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
+        }
+
+        if (state.ModelStorageTransition is not null)
+        {
+            return new ControlResult(
+                false,
+                "MODEL_STORAGE_TRANSITION_PENDING",
+                "Model storage activation did not reach a final checkpoint. Local reviews remain paused until models recover --yes completes the transition.",
+                state);
         }
 
         var verification = await _autoStart.VerifyAsync(_paths, state, false, cancellationToken).ConfigureAwait(false);
@@ -84,7 +96,7 @@ public sealed class ControlService
         }
 
         GpuCoordination.RequestCancellation();
-        var unloaded = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        var unloaded = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         if (state.Availability == HelperAvailability.Enabled)
         {
             GpuCoordination.ClearCancellation();
@@ -93,7 +105,7 @@ public sealed class ControlService
         return new ControlResult(
             unloaded,
             unloaded ? "GPU_RELEASED" : "GPU_RELEASE_UNCONFIRMED",
-            unloaded ? "The selected model is no longer loaded." : "Ollama was unavailable, so release could not be confirmed.",
+            unloaded ? "No tracked helper-owned model remains loaded." : "The tracked runtime could not be proven helper-owned, so it was left untouched.",
             state);
     }
 
@@ -108,7 +120,7 @@ public sealed class ControlService
         state.Availability = HelperAvailability.Disabled;
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         GpuCoordination.RequestCancellation();
-        _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+        var unloaded = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         if (disableCodexEntry)
         {
             _codexConfig.SetEnabled(_paths, false);
@@ -116,10 +128,12 @@ public sealed class ControlService
 
         return new ControlResult(
             true,
-            "DISABLED",
-            disableCodexEntry
-                ? "Local review is disabled persistently. Restart Codex to remove the MCP tools from a running session."
-                : "Local review calls are disabled persistently.",
+            unloaded ? "DISABLED" : "DISABLED_UNLOAD_UNCONFIRMED",
+            unloaded
+                ? disableCodexEntry
+                    ? "Local review is disabled persistently. Restart Codex to remove the MCP tools from a running session."
+                    : "Local review calls are disabled persistently."
+                : "Local review calls are disabled persistently; runtime ownership could not be proven, so the loaded state was left untouched.",
             state);
     }
 
@@ -129,6 +143,15 @@ public sealed class ControlService
         if (OwnershipGuard(state) is { } preserved)
         {
             return preserved;
+        }
+
+        if (state.ModelStorageTransition is not null)
+        {
+            return new ControlResult(
+                false,
+                "MODEL_STORAGE_TRANSITION_PENDING",
+                "Model storage activation did not reach a final checkpoint. Local reviews remain disabled until models recover --yes completes the transition.",
+                state);
         }
 
         if (string.IsNullOrWhiteSpace(state.SelectedModel))
@@ -171,7 +194,7 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (enabled)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "LOW_IMPACT_ON" : "LOW_IMPACT_OFF", "Preferences updated.", state);
@@ -208,7 +231,7 @@ public sealed class ControlService
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         if (!enabled)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return new ControlResult(true, enabled ? "KEEP_WARM_ON" : "KEEP_WARM_OFF", "Preferences updated.", state);
@@ -238,7 +261,7 @@ public sealed class ControlService
         };
         if (mode == ModelSelectionMode.Automatic && wasKeepWarm)
         {
-            _ = await TryUnloadManagedModelAsync(state, cancellationToken).ConfigureAwait(false);
+            _ = await TryUnloadManagedModelAsync(cancellationToken).ConfigureAwait(false);
         }
         await _stateStore.SaveAsync(state, cancellationToken).ConfigureAwait(false);
         return new ControlResult(
@@ -273,46 +296,89 @@ public sealed class ControlService
             state);
     }
 
-    private async Task<bool> TryUnloadAsync(string? model, CancellationToken cancellationToken)
+    private async Task<bool> TryUnloadManagedModelAsync(
+        CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(model))
+        var inspection = _activeModelTracker.Inspect();
+        if (inspection.Status == ActiveModelTrackerStatus.Absent)
         {
             return true;
         }
 
-        try
-        {
-            using var client = _clientFactory();
-            await client.UnloadAsync(model, cancellationToken).ConfigureAwait(false);
-            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            return !running.Any(item => string.Equals(item.Name, model, StringComparison.OrdinalIgnoreCase));
-        }
-        catch (OllamaException)
+        if (inspection.Status != ActiveModelTrackerStatus.Valid || inspection.Reference is null)
         {
             return false;
         }
+
+        var tracked = inspection.Reference;
+        var success = await TryUnloadReferenceAsync(tracked, cancellationToken).ConfigureAwait(false);
+        if (success)
+        {
+            _activeModelTracker.Clear(tracked.Model);
+        }
+        return success;
     }
 
-    private async Task<bool> TryUnloadManagedModelAsync(
-        InstallationState state,
+    private async Task<bool> TryUnloadReferenceAsync(
+        ActiveModelReference reference,
         CancellationToken cancellationToken)
     {
-        var trackedModel = _activeModelTracker.Read();
-        var models = new[] { trackedModel, state.SelectedModel }
-            .Where(model => !string.IsNullOrWhiteSpace(model))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var success = true;
-        foreach (var model in models)
+        if (string.Equals(ModelProviders.Normalize(reference.Provider), ModelProviders.Ollama, StringComparison.Ordinal))
         {
-            success &= await TryUnloadAsync(model, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var lease = await GpuCoordination.AcquireAsync(
+                    ReviewBusyBehavior.Queue,
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken).ConfigureAwait(false);
+                using var client = _clientFactory();
+                using var releaseTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                releaseTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+                var first = true;
+                while (!releaseTimeout.IsCancellationRequested)
+                {
+                    var running = await client.GetRunningModelsAsync(releaseTimeout.Token).ConfigureAwait(false);
+                    if (running.Count == 0)
+                    {
+                        // A tracker that was already stale on entry is deliberately not
+                        // treated as proof of a completed release.
+                        return !first;
+                    }
+
+                    var ownership = OllamaRuntimeOwnership.Inspect(
+                        running,
+                        _activeModelTracker.Inspect(),
+                        reference.Model);
+                    if (!ownership.Allowed || !ownership.SelectedModelAlreadyLoaded)
+                    {
+                        return false;
+                    }
+
+                    first = false;
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), releaseTimeout.Token).ConfigureAwait(false);
+                }
+
+                return false;
+            }
+            catch (Exception exception) when (exception is OllamaException or OperationCanceledException)
+            {
+                return false;
+            }
         }
 
-        if (success && trackedModel is not null)
+        if (string.IsNullOrWhiteSpace(reference.InstanceId))
         {
-            _activeModelTracker.Clear(trackedModel);
+            return false;
         }
-
-        return success;
+        try
+        {
+            using var client = _lmStudioFactory();
+            await client.UnloadAndWaitAsync(reference.Model, reference.InstanceId, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (LmStudioException)
+        {
+            return false;
+        }
     }
 }

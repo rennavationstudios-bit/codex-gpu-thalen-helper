@@ -24,8 +24,8 @@
           "commercialUseAllowed", "sourceUrl", "verifiedOn"
         ],
         "properties": {
-          "provider": { "const": "Ollama" },
-          "tag": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*:[a-z0-9][a-z0-9._-]*$" },
+          "provider": { "enum": ["Ollama", "LM Studio"] },
+          "tag": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/:-]*$" },
           "expectedDigest": { "type": ["string", "null"], "pattern": "^[a-f0-9]{12,64}$" },
           "expectedDownloadBytes": { "type": "integer", "minimum": 1 },
           "family": { "type": "string", "minLength": 1 },
@@ -46,6 +46,9 @@
           "commercialUseAllowed": { "type": "boolean" },
           "sourceUrl": { "type": "string", "format": "uri" },
           "verifiedOn": { "type": "string", "format": "date" }
+          ,"nonQ4AutomaticAllowed": { "type": "boolean" }
+          ,"automaticPriority": { "type": "integer", "minimum": 0, "maximum": 1000 }
+          ,"indexedModelPath": { "type": ["string", "null"], "minLength": 1 }
         }
       }
     }

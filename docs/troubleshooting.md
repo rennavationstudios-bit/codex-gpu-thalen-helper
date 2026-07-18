@@ -13,7 +13,7 @@ These checks call inventory/runtime endpoints only and do not run model inferenc
 
 The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads and loads no model, so the dashboard reports that model setup is still required. Choose **Choose model** to point to an existing Ollama model folder or explicitly approve a download and bounded validation.
 
-Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** only unloads the model.
+Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** requests cancellation and waits for zero-keep-alive release. It never force-unloads a mutable model tag and reports `GPU_RELEASE_UNCONFIRMED` when release cannot be proven.
 
 ## The Control Center says no model is loaded
 
@@ -21,7 +21,7 @@ This is normally the safe idle state. Low-impact mode uses `keep_alive=0`, so Ol
 
 ## The reviewer is labeled external
 
-Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Review a protected-file diff and perform a separate explicit migration before expecting packaged locking, pressure refusal, startup, or unload controls to apply.
+Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Run `thalen-helper repair --dry-run --diff-out <private-local-file> --migrate-existing`, review the private diff, then apply only with the four returned source/planned hashes and the same `--migrate-existing` flag. Ambiguous table layouts are intentionally refused. Packaged locking, pressure refusal, startup, routing, and unload controls apply only after that explicit migration succeeds.
 
 ## MCP tools are missing after install
 
@@ -35,7 +35,11 @@ Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROC
 
 ## Model path is not verified
 
-`MODEL_PATH_NOT_CONFIGURED` means the current user's `OLLAMA_MODELS` differs from product state. `MODEL_NOT_IN_CONFIGURED_PATH` means the selected manifest was not found there. Run repair to safely restart Ollama with the persisted path, then verify. Do not manually copy only blobs; use `models move` for a verified full move.
+`MODEL_PATH_NOT_CONFIGURED` means either the current user's `OLLAMA_MODELS` differs from product state or the managed MCP entry is missing the `env_vars = ["OLLAMA_MODELS"]` forwarding whitelist. Run `repair --dry-run` and inspect the protected-file diff. Apply a changed repair only with all four returned hashes, then fully restart Codex so the stdio child receives the forwarded value. `MODEL_NOT_IN_CONFIGURED_PATH` means the selected manifest was not found there. Do not manually copy only blobs; use `models move` for a verified full move, or `models activate` to verify and select a complete pre-copied store while preserving the original.
+
+`MODEL_STORAGE_TRANSITION_PENDING` means activation stopped after writing its crash-recovery marker. Keep both model directories unchanged and run `thalen-helper models recover --yes`; ordinary repair, enable, and resume remain blocked until recovery verifies and clears the marker.
+
+`OLLAMA_RESTART_REQUIRED` during setup, repair, move, activation, or recovery means `OLLAMA_MODELS` must change while a shared Ollama process is still running. The helper deliberately does not stop it or unload its models. Close Ollama normally, confirm no Ollama process remains, and retry the same command; do not kill an active generation.
 
 ## Network exposure warning
 
@@ -43,7 +47,7 @@ Stop Ollama immediately if `OLLAMA_NETWORK_EXPOSURE` or **EXTERNAL RISK** appear
 
 ## GPU is needed by another application
 
-Use `thalen-helper pause` for immediate call blocking/cancellation plus unload, or `thalen-helper release-gpu` to unload without persistent disable. Leave keep-warm off and low-impact on.
+Use `thalen-helper pause` for immediate call blocking/cancellation, or `thalen-helper release-gpu` to request and observe release without persistent disable. Leave keep-warm off and low-impact on.
 
 ## Model validation fails
 

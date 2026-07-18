@@ -4,6 +4,8 @@ This bundle is designed for a Windows user who has never configured Codex, Ollam
 
 ## Install
 
+The simplest option is to open `0 - PASTE THIS INTO CODEX.md`, copy its prompt into a new Codex task, and let Codex select the highest valid semantic prerelease from the exact official repository, verify it, install it, and validate setup. Codex must still ask immediately before running the unsigned installer and must ask separately before each model download, load, validation, move, or delete action.
+
 1. Extract the entire ZIP to a normal local folder. Do not run the installer from inside the ZIP preview.
 2. Open `1 - START HERE.txt` and verify the installer SHA-256 as shown there.
 3. Double-click `2 - INSTALL Codex GPU Thalen Helper.exe`.
@@ -18,7 +20,7 @@ This bundle is designed for a Windows user who has never configured Codex, Ollam
 
 ## Let Codex help safely
 
-Drag `3 - CODEX HANDOFF.md` from the extracted friend bundle into a new Codex task. Or, after installation, open **Start > Codex GPU Thalen Helper > Codex setup handoff**, press **Ctrl+A**, then **Ctrl+C**, and paste the whole document into Codex. The handoff tells Codex which packaged files to read, which passive checks to run first, which protected-file and privacy rules to preserve, when consent is required, and exactly what must be verified before setup can be called complete.
+For a complete install, open `0 - PASTE THIS INTO CODEX.md` and paste its copy-ready prompt into a new Codex task. For post-install setup or repair, drag `3 - CODEX HANDOFF.md` into a new task. You can also open **Start > Codex GPU Thalen Helper > Codex setup handoff**, press **Ctrl+A**, then **Ctrl+C**, and paste the whole document into Codex. These handoffs tell Codex which public source and packaged files to trust, which passive checks to run first, which protected-file and privacy rules to preserve, when consent is required, and exactly what must be verified before setup can be called complete.
 
 The handoff is generic and contains no sender-specific paths, settings, model choices, credentials, or private instructions. It directs Codex to discover the current computer's state instead of assuming that another person's configuration applies.
 
@@ -37,16 +39,17 @@ If setup finds an existing unmarked `local_gpu_reviewer`, it preserves that inte
 - **OLLAMA PEER NOT VERIFIED**: something owns the local Ollama port but is not the expected current-user, validly signed official Ollama process. The helper sends it no review prompt. Close the unknown listener and repair or install official Ollama for Windows.
 - **EXTERNAL AUTOSTART UNVERIFIED**: another Run/Startup artifact was preserved to avoid duplication, but its target and next-login environment were not certified. Review/remove it or use manual startup before enabling managed review.
 - **No model loaded**: normally the safe idle state. Installed models stay on disk while GPU memory is released.
+- **Existing reviewer preserved**: setup found a reviewer it does not own, so it did not replace or control it. Ask Codex to use the included handoff. Codex can create a private dry-run diff, explain it simply, and migrate only after you approve the exact reviewed change.
 
 Passive status never runs a model. **Test local review** is the explicit action that runs a small validation inference and unloads afterward.
 
 ## Controls
 
-- **Pause reviews** temporarily blocks helper reviews and unloads the selected model.
+- **Pause reviews** temporarily blocks helper reviews, requests cancellation, and waits for a tracked zero-keep-alive review to release. It never force-unloads a model tag.
 - **Resume reviews** repeats safety verification and allows reviews without preloading the model.
 - **Enable integration** persistently enables the helper-owned Codex MCP entry after safety checks.
 - **Disable integration** persistently disables that entry; restart Codex if its tools remain visible in the current session.
-- **Release GPU** unloads the model without blocking a future review.
+- **Release GPU** requests cancellation and waits for a tracked zero-keep-alive review to release without blocking future reviews. It reports an unconfirmed release rather than force-unloading a mutable model tag.
 - **Low impact** unloads immediately after each response and is recommended during emulator, Expo, graphics, or device work.
 - **Keep warm** retains the model for a bounded idle period when hardware headroom permits.
 - **Auto model** lets each Codex task passively choose the safest installed audited Q4 model for its task type, size, and current hardware headroom. Turning it off pins the validated selected model. Automatic mode unloads after every response and therefore disables **Keep warm**.
@@ -57,7 +60,7 @@ The helper does not control Codex or its cloud model. It offers Codex three opti
 
 Setup never silently downloads a model. A missing model can be downloaded only after a named model choice and confirmation. A user with existing models can point setup to that Ollama model store. The selected tag, digest, model folder, endpoint, and loopback listener must verify before the helper enables review.
 
-Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models. Hardware examples in the test suite are boundaries, not preferred devices. Models that exist only in LM Studio, including Qwythos or Qwen3.6 files, are not silently used by the current Ollama reviewer; a future provider adapter must first meet the same loopback, process-trust, locking, pressure, and unload rules.
+Automatic routing is dynamic for this computer's measured dedicated/available VRAM, system RAM, acceleration route, current pressure, and installed audited Ollama models that passed this installation's exact-identity validation. A missing or failed pass keeps that model out of the automatic pool. Hardware examples in the test suite are boundaries, not preferred devices. LM Studio enrollment is disabled in beta.12 because the current inventory API cannot prove the exact GGUF file behind a loaded key.
 
 When automatic startup is selected, the helper avoids duplicate startup entries and duplicate Ollama processes. When it is declined, the app remains installed but Ollama must be started manually after each sign-in before local review works.
 

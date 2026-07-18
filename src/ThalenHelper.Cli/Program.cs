@@ -35,7 +35,7 @@ internal static class CliApplication
                 "status" => await StatusAsync(paths, store).ConfigureAwait(false),
                 "doctor" => await DoctorAsync(paths, store).ConfigureAwait(false),
                 "install" => await InstallAsync(parsed, paths).ConfigureAwait(false),
-                "repair" => await RepairAsync(paths).ConfigureAwait(false),
+                "repair" => await RepairAsync(parsed, paths).ConfigureAwait(false),
                 "enable" => Write(await control.EnableAsync().ConfigureAwait(false)),
                 "disable" => Write(await control.DisableAsync(!parsed.Has("keep-codex-entry")).ConfigureAwait(false)),
                 "pause" => Write(await control.PauseAsync().ConfigureAwait(false)),
@@ -47,6 +47,7 @@ internal static class CliApplication
                 "models" => await ModelsAsync(parsed, paths, store, control).ConfigureAwait(false),
                 "test" => await TestAsync(paths, store).ConfigureAwait(false),
                 "ollama" => await OllamaAsync(parsed, paths, store).ConfigureAwait(false),
+                "lmstudio" => await LmStudioAsync(parsed, paths, store).ConfigureAwait(false),
                 "diagnostics" => await DiagnosticsAsync(parsed, paths, store).ConfigureAwait(false),
                 "update" => await UpdateAsync(parsed).ConfigureAwait(false),
                 "uninstall" => await UninstallAsync(parsed, paths, store).ConfigureAwait(false),
@@ -91,7 +92,31 @@ internal static class CliApplication
 
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
         var health = await new ReviewerService(paths, store, client).GetHealthAsync().ConfigureAwait(false);
-        return Write(new { state, health });
+        object validation;
+        try
+        {
+            var registry = await new ModelValidationStore(paths.StateDirectory).LoadAsync().ConfigureAwait(false);
+            validation = new
+            {
+                registry.SchemaVersion,
+                ProtocolVersion = ModelValidationStore.CurrentProtocolVersion,
+                ValidatedModels = registry.Entries.Select(entry => new
+                {
+                    entry.Provider,
+                    entry.Tag,
+                    entry.Digest,
+                    entry.PassedAtUtc,
+                    entry.Processor,
+                    entry.SizeVramBytes,
+                    entry.ContextLength
+                })
+            };
+        }
+        catch (ModelValidationStateException exception)
+        {
+            validation = new { ErrorCode = exception.Code, ErrorMessage = exception.Message };
+        }
+        return Write(new { state, health, validation });
     }
 
     private static async Task<int> DoctorAsync(ProductPaths paths, StateStore store)
@@ -152,9 +177,54 @@ internal static class CliApplication
         return outcome.Success ? 0 : 1;
     }
 
-    private static async Task<int> RepairAsync(ProductPaths paths)
+    private static async Task<int> RepairAsync(ParsedArguments parsed, ProductPaths paths)
     {
-        var outcome = await new InstallationManager().RepairAsync(paths).ConfigureAwait(false);
+        var manager = new InstallationManager();
+        if (parsed.Has("dry-run"))
+        {
+            var diffOutput = parsed.Get("diff-out");
+            if (string.IsNullOrWhiteSpace(diffOutput))
+            {
+                return Fail("DIFF_OUTPUT_REQUIRED", "repair --dry-run requires --diff-out <explicit-local-file>.");
+            }
+
+            return Write(await manager.PreviewRepairAsync(
+                paths,
+                diffOutput,
+                parsed.Has("migrate-existing")).ConfigureAwait(false));
+        }
+
+        if (parsed.Get("diff-out") is not null)
+        {
+            return Fail("DRY_RUN_REQUIRED", "--diff-out is valid only with repair --dry-run.");
+        }
+
+        var hashValues = new[]
+        {
+            parsed.Get("expected-config-source-sha256"),
+            parsed.Get("expected-config-planned-sha256"),
+            parsed.Get("expected-agents-source-sha256"),
+            parsed.Get("expected-agents-planned-sha256")
+        };
+        RepairHashBinding? binding = null;
+        if (hashValues.Any(value => value is not null))
+        {
+            if (hashValues.Any(string.IsNullOrWhiteSpace))
+            {
+                return Fail("REPAIR_HASHES_INCOMPLETE", "Hash-bound repair requires all four config/AGENTS source and planned SHA-256 values.");
+            }
+
+            binding = new RepairHashBinding(
+                hashValues[0]!,
+                hashValues[1]!,
+                hashValues[2]!,
+                hashValues[3]!);
+        }
+
+        var outcome = await manager.RepairAsync(
+            paths,
+            binding: binding,
+            migrateExisting: parsed.Has("migrate-existing")).ConfigureAwait(false);
         return Write(outcome);
     }
 
@@ -257,16 +327,25 @@ internal static class CliApplication
         StateStore store,
         ControlService control)
     {
-        if (parsed.Positionals.Count < 3
-            || !string.Equals(parsed.Positionals[1], "move", StringComparison.OrdinalIgnoreCase)
-            || !parsed.Has("yes"))
+        if (parsed.Positionals.Count < 2 || !parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "Use models move <fixed-local-directory> --yes.");
+            return Fail(
+                "CONFIRMATION_REQUIRED",
+                "Use models move <empty-fixed-local-directory> --yes, models activate <existing-fixed-local-directory> --yes, or models recover --yes.");
         }
 
-        var result = await new ModelsMoveService(paths, store, control)
-            .MoveAsync(parsed.Positionals[2]).ConfigureAwait(false);
-        return Write(result);
+        return parsed.Positionals[1].ToLowerInvariant() switch
+        {
+            "move" when parsed.Positionals.Count >= 3 => Write(await new ModelsMoveService(paths, store, control)
+                .MoveAsync(parsed.Positionals[2]).ConfigureAwait(false)),
+            "activate" when parsed.Positionals.Count >= 3 => Write(await new ModelsActivationService(paths, store, control)
+                .ActivateExistingAsync(parsed.Positionals[2]).ConfigureAwait(false)),
+            "recover" when parsed.Positionals.Count == 2 => Write(await new ModelsActivationService(paths, store, control)
+                .RecoverAsync().ConfigureAwait(false)),
+            _ => Fail(
+                "UNKNOWN_SUBCOMMAND",
+                "Use models move <empty-fixed-local-directory> --yes, models activate <existing-fixed-local-directory> --yes, or models recover --yes.")
+        };
     }
 
     private static async Task<int> TestAsync(ProductPaths paths, StateStore store)
@@ -364,6 +443,25 @@ internal static class CliApplication
         return Write(new { success = true, code = "DIAGNOSTICS_EXPORTED", path = Path.GetFullPath(parsed.Positionals[2]) });
     }
 
+    private static async Task<int> LmStudioAsync(ParsedArguments parsed, ProductPaths paths, StateStore store)
+    {
+        if (parsed.Positionals.Count < 4
+            || !string.Equals(parsed.Positionals[1], "register", StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail("UNKNOWN_SUBCOMMAND", "Use lmstudio register <model-key> <gguf-path> --yes.");
+        }
+        if (!parsed.Has("yes"))
+        {
+            return Fail("CONFIRMATION_REQUIRED", "LM Studio registration is fail-closed in beta.12 and --yes only authorizes clearing stale registration evidence before returning the binding-unavailable result.");
+        }
+
+        Console.Error.WriteLine($"Integration: {ProductInfo.IntegrationName} | Provider: {ModelProviders.LmStudio} | Model: {parsed.Positionals[2]} | Purpose: fail-closed exact-file binding check; no inference");
+        using var client = new LmStudioClient();
+        var result = await new LmStudioRegistrationService(paths, store, client)
+            .ValidateAndEnableAsync(parsed.Positionals[2], parsed.Positionals[3]).ConfigureAwait(false);
+        return Write(result);
+    }
+
     private static async Task<int> UpdateAsync(ParsedArguments parsed)
     {
         using var updater = new ProjectUpdateService();
@@ -380,7 +478,7 @@ internal static class CliApplication
     {
         if (!parsed.Has("yes"))
         {
-            return Fail("CONFIRMATION_REQUIRED", "Use uninstall --yes. Add --remove-owned-model only to remove a model downloaded by this helper.");
+            return Fail("CONFIRMATION_REQUIRED", "Use uninstall --yes. Model data is always preserved; --remove-owned-model is accepted only for backward compatibility.");
         }
 
         var result = await new UninstallManager(paths, store)
@@ -411,17 +509,24 @@ internal static class CliApplication
     private static int Write(object? value)
     {
         Console.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
-        return value is ControlResult { Success: false }
+        return ResultExitCode(value);
+    }
+
+    internal static int ResultExitCode(object? value)
+        => value is ControlResult { Success: false }
             or InstallationOutcome { Success: false }
             or ModelValidationResult { Success: false }
+            or LmStudioRegistrationResult { Success: false }
             or ModelChangeResult { Success: false }
             or ModelsMoveResult { Success: false }
+            or ModelsActivationResult { Success: false }
             or UninstallResult { Success: false }
             or OllamaInstallResult { Success: false }
+            or ProjectUpdateResult { Success: false }
+            or ProjectUpdateInfo { Code: "UPDATE_CHECK_FAILED" or "UPDATE_RESPONSE_INVALID" }
             or OllamaStartupVerification { EndpointReachable: false }
             ? 1
             : 0;
-    }
 
     private static int Fail(string code, string message)
     {
@@ -445,9 +550,13 @@ internal static class CliApplication
             thalen-helper model recommend [--allow-cpu]
             thalen-helper model routing status|automatic|pinned
             thalen-helper model change <tag> --yes [--accept-restricted-license]
+            thalen-helper lmstudio register <model-key> <gguf-path> --yes
             thalen-helper models move <fixed-local-directory> --yes
+            thalen-helper models activate <existing-fixed-local-directory> --yes
+            thalen-helper models recover --yes
             thalen-helper install --yes --defer-model --codex-home <directory> [--auto-start true|false]
-            thalen-helper repair
+            thalen-helper repair --dry-run --diff-out <local-file> [--migrate-existing]
+            thalen-helper repair [--migrate-existing] --expected-config-source-sha256 <hash> --expected-config-planned-sha256 <hash> --expected-agents-source-sha256 <hash> --expected-agents-planned-sha256 <hash>
             thalen-helper test
             thalen-helper diagnostics export <output.json>
             thalen-helper update [--yes]

@@ -1,9 +1,9 @@
 <!-- BEGIN CODEX GPU THALEN HELPER (managed) -->
 ## Optional local GPU reviewer
 
-`local_gpu_reviewer` is an optional read-only local stdio MCP reviewer backed by Ollama. It is not a native Codex subagent, does not replace Codex's primary model, and does not bypass Codex limits.
+`local_gpu_reviewer` is an optional read-only local stdio MCP reviewer backed by a verified loopback provider (Ollama, or an explicitly registered LM Studio model). It is not a native Codex subagent, does not replace Codex's primary model, and does not bypass Codex limits.
 
-For a non-trivial bounded review, call passive `local_gpu_plan` first with the task kind, expected input size, requested effort, and whether a GPU-heavy workload is active. It selects only from installed, audited, digest-matching models that satisfy the hardware and safety reserve; it never downloads, loads, or runs a model. If planning succeeds, announce the integration name (`local_gpu_reviewer`), provider (Ollama), planned model, integration type (read-only local MCP reviewer), and bounded purpose before calling `local_gpu_review` with the same routing fields. Do not guess or hard-code a model when automatic routing is enabled.
+For a non-trivial bounded review, call passive `local_gpu_plan` first with the task kind, expected input size, requested effort, and whether a GPU-heavy workload is active. It selects only from installed, audited, digest-matching models that satisfy the hardware and safety reserve; it never downloads, loads, or runs a model. If planning succeeds, announce the integration name (`local_gpu_reviewer`), provider returned by the plan, planned model, integration type (read-only local MCP reviewer), and bounded purpose before calling `local_gpu_review` with the same routing fields. Do not guess or hard-code a model when automatic routing is enabled.
 
 {{TIER_GUIDANCE}}
 

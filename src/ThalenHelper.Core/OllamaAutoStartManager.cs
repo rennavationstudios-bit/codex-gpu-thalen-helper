@@ -23,6 +23,20 @@ public sealed record OllamaListenerStatus(
     bool LoopbackOnly,
     int ListenerCount);
 
+public sealed record OllamaIdleVerification(bool Idle, string Code, string Message);
+
+internal sealed record OllamaStartupConfigurationPlan(
+    string ModelDirectory,
+    string Host,
+    string? RunEntry,
+    bool Enabled,
+    bool HelperOwnsAutoStart);
+
+public enum OllamaRestartModelPolicy
+{
+    RequireIdle
+}
+
 public interface IOllamaStartupPlatform
 {
     string? GetUserEnvironmentVariable(string name);
@@ -54,7 +68,15 @@ public sealed class OllamaAutoStartManager
         _platform = platform ?? new WindowsOllamaStartupPlatform();
     }
 
+    internal IOllamaStartupPlatform Platform => _platform;
+
     public void Configure(ProductPaths paths, InstallationState state, bool enabled)
+        => ApplyConfiguration(PreviewConfiguration(paths, state, enabled), state);
+
+    internal OllamaStartupConfigurationPlan PreviewConfiguration(
+        ProductPaths paths,
+        InstallationState state,
+        bool enabled)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(state);
@@ -64,16 +86,28 @@ public sealed class OllamaAutoStartManager
         }
 
         var modelDirectory = Path.GetFullPath(state.ModelStorageLocation);
-        _platform.SetUserEnvironmentVariable("OLLAMA_MODELS", modelDirectory);
-        _platform.SetUserEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434");
-        _platform.SetProcessEnvironmentVariable("OLLAMA_MODELS", modelDirectory);
-        _platform.SetProcessEnvironmentVariable("OLLAMA_HOST", "127.0.0.1:11434");
-        _platform.BroadcastEnvironmentChange();
         var externalAutoStart = _platform.HasExternalAutoStart();
         var helperOwnsAutoStart = enabled && !externalAutoStart;
-        _platform.SetRunEntry(helperOwnsAutoStart ? GetCanonicalRunCommand(paths) : null);
-        state.Preferences = state.Preferences with { AutoStartOllama = enabled };
-        state.StartupEntryOwnedByHelper = helperOwnsAutoStart;
+        return new OllamaStartupConfigurationPlan(
+            modelDirectory,
+            "127.0.0.1:11434",
+            helperOwnsAutoStart ? GetCanonicalRunCommand(paths) : null,
+            enabled,
+            helperOwnsAutoStart);
+    }
+
+    internal void ApplyConfiguration(OllamaStartupConfigurationPlan plan, InstallationState state)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(state);
+        _platform.SetUserEnvironmentVariable("OLLAMA_MODELS", plan.ModelDirectory);
+        _platform.SetUserEnvironmentVariable("OLLAMA_HOST", plan.Host);
+        _platform.SetProcessEnvironmentVariable("OLLAMA_MODELS", plan.ModelDirectory);
+        _platform.SetProcessEnvironmentVariable("OLLAMA_HOST", plan.Host);
+        _platform.BroadcastEnvironmentChange();
+        _platform.SetRunEntry(plan.RunEntry);
+        state.Preferences = state.Preferences with { AutoStartOllama = plan.Enabled };
+        state.StartupEntryOwnedByHelper = plan.HelperOwnsAutoStart;
     }
 
     public bool IsConfigured(ProductPaths paths)
@@ -85,15 +119,61 @@ public sealed class OllamaAutoStartManager
     private static string GetCanonicalRunCommand(ProductPaths paths)
         => $"\"{paths.CliExecutable}\" ollama autostart --quiet";
 
-    public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
+    public string? GetConfiguredUserModelDirectory()
+        => _platform.GetUserEnvironmentVariable("OLLAMA_MODELS");
+
+    public async Task<OllamaIdleVerification> VerifyIdleForStorageChangeAsync(
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var client = _clientFactory();
+            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+            return running.Count == 0
+                ? new OllamaIdleVerification(true, "OLLAMA_IDLE", "Ollama has no loaded models.")
+                : new OllamaIdleVerification(
+                    false,
+                    "OLLAMA_RESTART_NOT_IDLE",
+                    "Ollama has a loaded model. Storage activation refused without unloading or stopping it.");
+        }
+        catch (OllamaException) when (!_platform.IsAnyOllamaProcessRunning())
+        {
+            return new OllamaIdleVerification(true, "OLLAMA_STOPPED", "Ollama is stopped and has no resident model.");
+        }
+        catch (OllamaException exception)
+        {
+            return new OllamaIdleVerification(
+                false,
+                "OLLAMA_RESTART_IDLE_UNCONFIRMED",
+                $"Ollama is running but idle state could not be confirmed: {exception.Message}");
+        }
+    }
+
+    public Task<OllamaStartupVerification> ApplyConfigurationAsync(
         ProductPaths paths,
         InstallationState state,
         string? previousModelDirectory,
         bool enabled,
         bool allowSafeRestart,
         CancellationToken cancellationToken = default)
+        => ApplyConfigurationAsync(
+            paths,
+            state,
+            previousModelDirectory,
+            enabled,
+            allowSafeRestart,
+            OllamaRestartModelPolicy.RequireIdle,
+            cancellationToken);
+
+    public async Task<OllamaStartupVerification> ApplyConfigurationAsync(
+        ProductPaths paths,
+        InstallationState state,
+        string? previousModelDirectory,
+        bool enabled,
+        bool allowSafeRestart,
+        OllamaRestartModelPolicy restartModelPolicy,
+        CancellationToken cancellationToken = default)
     {
-        Configure(paths, state, enabled);
         var desired = Path.GetFullPath(state.ModelStorageLocation!);
         var defaultDirectory = Path.GetFullPath(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -103,6 +183,40 @@ public sealed class OllamaAutoStartManager
             ? defaultDirectory
             : Path.GetFullPath(previousModelDirectory);
         var pathChanged = !string.Equals(previous, desired, StringComparison.OrdinalIgnoreCase);
+
+        if (pathChanged && allowSafeRestart && restartModelPolicy == OllamaRestartModelPolicy.RequireIdle)
+        {
+            try
+            {
+                using var client = _clientFactory();
+                var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
+                if (running.Count > 0)
+                {
+                    var current = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
+                    return current with
+                    {
+                        Code = "OLLAMA_RESTART_NOT_IDLE",
+                        Message = "Ollama has a loaded model. Activation refused without unloading or stopping any user-owned model."
+                    };
+                }
+            }
+            catch (OllamaException exception) when (!_platform.IsAnyOllamaProcessRunning())
+            {
+                _ = exception;
+                // A stopped Ollama process is idle. Configuration may start it once with the new path.
+            }
+            catch (OllamaException exception)
+            {
+                var current = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
+                return current with
+                {
+                    Code = "OLLAMA_RESTART_IDLE_UNCONFIRMED",
+                    Message = $"Ollama is running but idle state could not be confirmed: {exception.Message}"
+                };
+            }
+        }
+
+        Configure(paths, state, enabled);
         var initial = await VerifyAsync(paths, state, false, cancellationToken).ConfigureAwait(false);
         if (!initial.EndpointReachable || !pathChanged)
         {
@@ -120,35 +234,16 @@ public sealed class OllamaAutoStartManager
             };
         }
 
-        try
+        if (restartModelPolicy != OllamaRestartModelPolicy.RequireIdle)
         {
-            using var client = _clientFactory();
-            var running = await client.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var model in running)
-            {
-                await client.UnloadAsync(model.Name, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch (OllamaException exception)
-        {
-            return initial with
-            {
-                Code = "OLLAMA_RESTART_UNLOAD_FAILED",
-                Message = $"Ollama could not be safely restarted because loaded models could not be released: {exception.Message}"
-            };
+            throw new InvalidOperationException("Unsupported Ollama restart policy.");
         }
 
-        var executable = _platform.FindOllamaExecutable();
-        if (executable is null || !_platform.StopOllamaProcesses(executable))
+        return initial with
         {
-            return initial with
-            {
-                Code = "OLLAMA_RESTART_FAILED",
-                Message = "The existing Ollama process could not be stopped safely. Close Ollama manually, then run repair."
-            };
-        }
-
-        return await EnsureRunningAsync(paths, state, cancellationToken).ConfigureAwait(false);
+            Code = "OLLAMA_RESTART_REQUIRED",
+            Message = "OLLAMA_MODELS changed while Ollama was running. The helper will not stop a shared provider because runtime ownership cannot be proven atomically; close Ollama manually, then retry."
+        };
     }
 
     public async Task<OllamaStartupVerification> EnsureRunningAsync(
@@ -345,7 +440,14 @@ public sealed class OllamaAutoStartManager
         _platform.BroadcastEnvironmentChange();
     }
 
-    public static bool IsPortLoopbackOnly(int port) => GetListenerStatus(port).LoopbackOnly;
+    // An unused port is safe for the helper to start on loopback. It is not an
+    // exposure and must not be confused with a wildcard/non-loopback listener.
+    // Endpoint reachability is verified separately by the caller.
+    public static bool IsPortLoopbackOnly(int port)
+        => HasNoNonLoopbackListener(GetListenerStatus(port));
+
+    internal static bool HasNoNonLoopbackListener(OllamaListenerStatus status)
+        => !status.HasListeners || status.LoopbackOnly;
 
     public static OllamaListenerStatus GetListenerStatus(int port)
     {
@@ -648,7 +750,7 @@ internal sealed class WindowsOllamaStartupPlatform : IOllamaStartupPlatform
     }
 
     public bool IsPortLoopbackOnly(int port)
-        => OllamaAutoStartManager.GetListenerStatus(port).LoopbackOnly;
+        => OllamaAutoStartManager.IsPortLoopbackOnly(port);
 
     public void BroadcastEnvironmentChange()
     {

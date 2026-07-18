@@ -56,8 +56,22 @@ public sealed class ModelsMoveService
 
     public async Task<ModelsMoveResult> MoveAsync(string destination, CancellationToken cancellationToken = default)
     {
+        using var operationLease = await ModelStorageOperationLease.AcquireAsync(cancellationToken).ConfigureAwait(false);
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
+        if (state.ModelStorageTransition is not null)
+        {
+            return new ModelsMoveResult(
+                false,
+                "MODEL_STORAGE_TRANSITION_PENDING",
+                "A pending non-destructive activation must be recovered before models can be moved.",
+                state.ModelStorageLocation ?? string.Empty,
+                destination,
+                0,
+                0,
+                false);
+        }
+
         var ownership = IntegrationOwnership.Inspect(_paths, state);
         if (ownership.Status != IntegrationOwnershipStatus.ManagedValid)
         {

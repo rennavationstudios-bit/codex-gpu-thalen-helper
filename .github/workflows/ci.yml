@@ -73,7 +73,7 @@ jobs:
         shell: pwsh
         run: ./eng/package.ps1
 
-      - name: Exercise installer only on the disposable runner
+      - name: Exercise fresh install and beta.5-to-current upgrade on the disposable runner
         shell: pwsh
         env:
           THALEN_HELPER_ALLOW_INSTALLER_LIFECYCLE: '1'

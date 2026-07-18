@@ -52,6 +52,67 @@ public sealed class UpdateTests
         Assert.Null(result.InstallerPath);
     }
 
+    [Theory]
+    [InlineData("0.1.0-beta.6", "0.1.0-beta.5", true)]
+    [InlineData("0.1.0", "0.1.0-beta.5", true)]
+    [InlineData("0.1.0-beta.4", "0.1.0-beta.5", false)]
+    [InlineData("0.0.9", "0.1.0-beta.5", false)]
+    [InlineData("0.1.0-beta.5", "0.1.0-beta.5", false)]
+    public void UpdateAvailabilityUsesSemanticNewerThanComparison(
+        string candidate,
+        string current,
+        bool expected)
+        => Assert.Equal(expected, ProjectUpdateService.IsNewerVersion(candidate, current));
+
+    [Fact]
+    public void FailedProjectUpdateResultProducesNonzeroCliExitCode()
+    {
+        var result = new ProjectUpdateResult(
+            false,
+            "UPDATE_CHECKSUM_MISMATCH",
+            "The installer did not verify.",
+            null,
+            null,
+            false);
+
+        Assert.Equal(1, CliApplication.ResultExitCode(result));
+        Assert.Equal(1, CliApplication.ResultExitCode(new ProjectUpdateInfo(
+            false,
+            ProductInfo.Version,
+            null,
+            null,
+            null,
+            null,
+            false,
+            "UPDATE_CHECK_FAILED",
+            "offline")));
+    }
+
+    [Fact]
+    public async Task UpdateSelectsHighestCompleteSemanticReleaseInsteadOfFirstResponseItem()
+    {
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath == "/repos/rennavationstudios-bit/codex-gpu-thalen-helper/releases"
+                ? FakeHttpMessageHandler.Json("[" + ReleaseObject("v0.1.0-beta.4") + "," + ReleaseObject("v9.9.9") + "," + ReleaseObject("v2.0.0") + "]")
+                : FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)));
+        using var service = new ProjectUpdateService(new HttpClient(handler));
+
+        var update = await service.CheckAsync();
+
+        Assert.True(update.UpdateAvailable);
+        Assert.Equal("9.9.9", update.LatestVersion);
+    }
+
+    [Theory]
+    [InlineData("vv1.0.0")]
+    [InlineData("1.01.0")]
+    [InlineData("1.0.0-beta.01")]
+    [InlineData("1.0.0-")]
+    [InlineData("1.0.0+")]
+    [InlineData("1.0.0+bad_identifier")]
+    public void InvalidSemanticVersionsAreNeverOffered(string candidate)
+        => Assert.False(ProjectUpdateService.IsNewerVersion(candidate, "0.1.0-beta.5"));
+
     [Fact]
     public async Task OllamaInstallerRejectsOversizedResponseBeforeVerificationOrLaunch()
     {
@@ -99,5 +160,18 @@ public sealed class UpdateTests
             { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/checksums.txt" }
           ]
         }]
+        """;
+
+    private static string ReleaseObject(string tag) => $$"""
+        {
+          "tag_name": "{{tag}}",
+          "html_url": "https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper/releases/tag/{{tag}}",
+          "draft": false,
+          "prerelease": true,
+          "assets": [
+            { "name": "Codex-GPU-Thalen-Helper-Setup.exe", "browser_download_url": "https://github.com/installer.exe" },
+            { "name": "SHA256SUMS.txt", "browser_download_url": "https://github.com/checksums.txt" }
+          ]
+        }
         """;
 }
