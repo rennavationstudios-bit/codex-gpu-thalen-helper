@@ -56,6 +56,7 @@ internal static class UiTheme
             AutoSize = true,
             ForeColor = color ?? Text,
             Font = BodyFont(size, style),
+            UseMnemonic = false,
             BackColor = Color.Transparent
         };
 
@@ -66,6 +67,7 @@ internal static class UiTheme
             AutoSize = true,
             ForeColor = Muted,
             Font = BodyFont(8.25F, FontStyle.Bold),
+            UseMnemonic = false,
             Margin = new Padding(0, 0, 0, 8),
             BackColor = Color.Transparent
         };
@@ -84,6 +86,7 @@ internal static class UiTheme
             Font = BodyFont(9.25F, FontStyle.Bold),
             Cursor = Cursors.Hand,
             UseVisualStyleBackColor = false,
+            UseMnemonic = false,
             AccessibleRole = AccessibleRole.PushButton
         };
         button.FlatAppearance.BorderSize = 0;
@@ -291,7 +294,7 @@ internal class RoundedPanel : Panel
     {
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        eventArgs.Graphics.Clear(Parent?.BackColor ?? UiTheme.Canvas);
+        PaintParentSurface(eventArgs);
         using var path = RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
         using var fill = new SolidBrush(BackColor);
         eventArgs.Graphics.FillPath(fill, path);
@@ -308,6 +311,30 @@ internal class RoundedPanel : Panel
 
     protected int ScaledCornerRadius()
         => Math.Max(8, CornerRadius * DeviceDpi / 96);
+
+    protected void PaintParentSurface(PaintEventArgs eventArgs)
+    {
+        if (Parent is null)
+        {
+            eventArgs.Graphics.Clear(UiTheme.Canvas);
+            return;
+        }
+
+        var state = eventArgs.Graphics.Save();
+        try
+        {
+            eventArgs.Graphics.TranslateTransform(-Left, -Top);
+            using var parentArgs = new PaintEventArgs(
+                eventArgs.Graphics,
+                new Rectangle(Left, Top, Width, Height));
+            InvokePaintBackground(Parent, parentArgs);
+            InvokePaint(Parent, parentArgs);
+        }
+        finally
+        {
+            eventArgs.Graphics.Restore(state);
+        }
+    }
 
     internal static GraphicsPath RoundedRectangle(Rectangle rectangle, int radius, float inset = 0F)
     {
@@ -346,7 +373,7 @@ internal sealed class GradientPanel : RoundedPanel
     {
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        eventArgs.Graphics.Clear(Parent?.BackColor ?? UiTheme.Canvas);
+        PaintParentSurface(eventArgs);
         using var path = RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
         using var brush = new LinearGradientBrush(ClientRectangle, GradientStart, GradientEnd, 18F);
         eventArgs.Graphics.FillPath(brush, path);
@@ -360,27 +387,77 @@ internal sealed class GradientPanel : RoundedPanel
     }
 }
 
-internal sealed class ToggleSwitch : CheckBox
+internal class ToggleSwitch : Control
 {
     private const int LogicalWidth = 52;
     private const int LogicalHeight = 28;
+    private bool _checked;
+
+    [DefaultValue(false)]
+    public bool Checked
+    {
+        get => _checked;
+        set
+        {
+            if (_checked == value)
+            {
+                return;
+            }
+
+            _checked = value;
+            Invalidate();
+            CheckedChanged?.Invoke(this, EventArgs.Empty);
+            AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+        }
+    }
+
+    public event EventHandler? CheckedChanged;
 
     public ToggleSwitch()
     {
-        Appearance = Appearance.Button;
         AutoSize = false;
-        FlatStyle = FlatStyle.Flat;
-        FlatAppearance.BorderSize = 0;
         Cursor = Cursors.Hand;
         TabStop = true;
         Text = string.Empty;
+        AccessibleRole = AccessibleRole.CheckButton;
         SetStyle(
             ControlStyles.UserPaint
             | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer
-            | ControlStyles.ResizeRedraw,
+            | ControlStyles.ResizeRedraw
+            | ControlStyles.SupportsTransparentBackColor
+            | ControlStyles.StandardClick
+            | ControlStyles.Selectable,
             true);
+        BackColor = Color.Transparent;
+        DoubleBuffered = true;
         UpdateLogicalSize();
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance()
+        => new ToggleAccessibleObject(this);
+
+    protected override void OnClick(EventArgs eventArgs)
+    {
+        if (Enabled)
+        {
+            Checked = !Checked;
+        }
+
+        base.OnClick(eventArgs);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs eventArgs)
+    {
+        if (eventArgs.KeyCode is Keys.Space or Keys.Enter)
+        {
+            OnClick(EventArgs.Empty);
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+            return;
+        }
+
+        base.OnKeyDown(eventArgs);
     }
 
     protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
@@ -389,29 +466,74 @@ internal sealed class ToggleSwitch : CheckBox
         UpdateLogicalSize();
     }
 
-    protected override void OnPaint(PaintEventArgs eventArgs)
+    protected override void OnPaintBackground(PaintEventArgs eventArgs)
     {
-        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        var bounds = RectangleF.Inflate(ClientRectangle, -1F, -1F);
+        if (Parent is null)
+        {
+            eventArgs.Graphics.Clear(UiTheme.Canvas);
+            return;
+        }
+
+        var state = eventArgs.Graphics.Save();
+        try
+        {
+            eventArgs.Graphics.TranslateTransform(-Left, -Top);
+            using var parentArgs = new PaintEventArgs(
+                eventArgs.Graphics,
+                new Rectangle(Left, Top, Width, Height));
+            InvokePaintBackground(Parent, parentArgs);
+            InvokePaint(Parent, parentArgs);
+        }
+        finally
+        {
+            eventArgs.Graphics.Restore(state);
+        }
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+        => Render(
+            eventArgs.Graphics,
+            ClientRectangle,
+            Enabled,
+            Checked,
+            Focused && ShowFocusCues,
+            DeviceDpi);
+
+    internal static void Render(
+        Graphics graphics,
+        Rectangle clientRectangle,
+        bool enabled,
+        bool isChecked,
+        bool focused,
+        int dpi)
+    {
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        var bounds = RectangleF.Inflate(clientRectangle, -1F, -1F);
         var radius = bounds.Height / 2F;
         using var track = RoundedPanel.RoundedRectangle(Rectangle.Round(bounds), (int)radius, 0.5F);
-        using var trackBrush = new SolidBrush(Enabled
-            ? Checked ? UiTheme.Accent : UiTheme.SurfaceHover
+        using var trackBrush = new SolidBrush(enabled
+            ? isChecked ? UiTheme.Accent : UiTheme.SurfaceHover
             : UiTheme.Surface);
-        using var trackPen = new Pen(Enabled && Checked ? UiTheme.AccentHover : UiTheme.Border, 1F);
-        eventArgs.Graphics.FillPath(trackBrush, track);
-        eventArgs.Graphics.DrawPath(trackPen, track);
+        using var trackPen = new Pen(enabled && isChecked ? UiTheme.AccentHover : UiTheme.Border, 1F);
+        graphics.FillPath(trackBrush, track);
+        graphics.DrawPath(trackPen, track);
 
-        var thumbSize = bounds.Height - Scale(6);
-        var thumbX = Checked ? bounds.Right - thumbSize - Scale(3) : bounds.Left + Scale(3);
+        var scale = Math.Max(1F, dpi / 96F);
+        var thumbSize = bounds.Height - 6F * scale;
+        var thumbX = isChecked ? bounds.Right - thumbSize - 3F * scale : bounds.Left + 3F * scale;
         var thumbY = bounds.Top + (bounds.Height - thumbSize) / 2F;
-        using var thumbBrush = new SolidBrush(Enabled ? Color.White : UiTheme.Muted);
-        eventArgs.Graphics.FillEllipse(thumbBrush, thumbX, thumbY, thumbSize, thumbSize);
+        using var thumbBrush = new SolidBrush(enabled ? Color.White : UiTheme.Muted);
+        graphics.FillEllipse(thumbBrush, thumbX, thumbY, thumbSize, thumbSize);
 
-        if (Focused && ShowFocusCues)
+        if (focused)
         {
-            ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -1, -1));
+            using var focusPen = new Pen(Color.FromArgb(210, UiTheme.Text), Math.Max(1F, scale))
+            {
+                DashStyle = DashStyle.Dot,
+                DashCap = DashCap.Round
+            };
+            graphics.DrawPath(focusPen, track);
         }
     }
 
@@ -422,5 +544,16 @@ internal sealed class ToggleSwitch : CheckBox
         Size = new Size(Scale(LogicalWidth), Scale(LogicalHeight));
         MinimumSize = Size;
         MaximumSize = Size;
+    }
+
+    private sealed class ToggleAccessibleObject(ToggleSwitch owner) : ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State
+            => base.State | (owner.Checked ? AccessibleStates.Checked : AccessibleStates.None);
+
+        public override string? DefaultAction => "Toggle";
+
+        public override void DoDefaultAction()
+            => owner.OnClick(EventArgs.Empty);
     }
 }
