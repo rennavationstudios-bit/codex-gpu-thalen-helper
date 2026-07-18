@@ -581,22 +581,12 @@ internal sealed class LmStudioCliProcessInventorySource : ILmStudioCliInventoryS
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
         using var process = new Process
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = executablePath,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                WorkingDirectory = Path.GetDirectoryName(executablePath)!
-            }
+            StartInfo = CreateInventoryProcessStartInfo(executablePath, inventoryCommand)
         };
-        process.StartInfo.ArgumentList.Add(inventoryCommand);
-        process.StartInfo.ArgumentList.Add("--json");
 
         try
         {
-            if (!process.Start())
+            if (!StartWithClosedInput(process))
             {
                 throw new LmStudioException(
                     "LMSTUDIO_CLI_FAILED",
@@ -649,6 +639,40 @@ internal sealed class LmStudioCliProcessInventorySource : ILmStudioCliInventoryS
                 "LMSTUDIO_CLI_FAILED",
                 "The signed LM Studio CLI could not be used safely.");
         }
+    }
+
+    internal static ProcessStartInfo CreateInventoryProcessStartInfo(
+        string executablePath,
+        string inventoryCommand)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executablePath,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(executablePath)!
+        };
+        startInfo.ArgumentList.Add(inventoryCommand);
+        startInfo.ArgumentList.Add("--json");
+        return startInfo;
+    }
+
+    internal static bool StartWithClosedInput(Process process)
+    {
+        ArgumentNullException.ThrowIfNull(process);
+        if (!process.Start())
+        {
+            return false;
+        }
+
+        // Never let a child inventory process inherit or consume the MCP JSON-RPC
+        // input stream. A private redirected stream closed immediately after start
+        // gives the fixed read-only CLI command EOF without exposing protocol bytes.
+        process.StandardInput.Close();
+        return true;
     }
 
     private static async Task<string> ReadBoundedAsync(

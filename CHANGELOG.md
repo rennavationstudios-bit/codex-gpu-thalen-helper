@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.15 - 2026-07-18
+
+- Prevented the signed LM Studio inventory CLI from inheriting the MCP server's JSON-RPC standard-input stream.
+- Gave each fixed read-only `lms ls --json` or `lms ps --json` process a private input stream and closed it immediately, so Qwythos planning does not time out and silently fall back to Ollama.
+- Added a regression test proving the inventory child receives EOF instead of waiting on or consuming parent protocol input.
+
 ## 0.1.0-beta.14 - 2026-07-18
 
 - Added an explicit recovery path for the narrow case where helper state records a prior managed reviewer but the current Codex file contains one structurally valid unmarked reviewer after an external rewrite.

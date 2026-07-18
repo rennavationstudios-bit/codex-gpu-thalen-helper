@@ -234,6 +234,65 @@ public sealed class LmStudioCliModelBindingTests
     }
 
     [Fact]
+    public async Task InventoryProcessGetsPrivateClosedInputInsteadOfTheMcpProtocolStream()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var executable = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("/d");
+        startInfo.ArgumentList.Add("/c");
+        startInfo.ArgumentList.Add("set /p inherited= & exit /b 0");
+        using var process = new Process { StartInfo = startInfo };
+
+        Assert.True(LmStudioCliProcessInventorySource.StartWithClosedInput(process));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await process.WaitForExitAsync(timeout.Token);
+
+        Assert.Equal(0, process.ExitCode);
+        var inventoryStartInfo = LmStudioCliProcessInventorySource.CreateInventoryProcessStartInfo(
+            executable,
+            "ls");
+        Assert.True(inventoryStartInfo.RedirectStandardInput);
+        Assert.Equal(["ls", "--json"], inventoryStartInfo.ArgumentList);
+    }
+
+    [Fact]
+    public async Task ExplicitOptInRealCliInventoryCompletesWithRedirectedInput()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("THALEN_HELPER_REAL_GPU_TEST"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var inventory = new LmStudioCliProcessInventorySource();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var downloaded = await inventory.GetDownloadedModelsJsonAsync(timeout.Token);
+        var loaded = await inventory.GetLoadedModelsJsonAsync(timeout.Token);
+        using var downloadedDocument = JsonDocument.Parse(downloaded);
+        using var loadedDocument = JsonDocument.Parse(loaded);
+
+        Assert.Equal(JsonValueKind.Array, downloadedDocument.RootElement.ValueKind);
+        Assert.Equal(JsonValueKind.Array, loadedDocument.RootElement.ValueKind);
+    }
+
+    [Fact]
     public void ExecutableNamespaceLeaseBlocksDirectoryRenameAndExecutableReplacement()
     {
         if (!OperatingSystem.IsWindows())
