@@ -4,6 +4,15 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.16 - 2026-07-18
+
+- Rebuilt the Control Center around one local-review switch, a prominent automatic route, one bounded reviewer test, guided model setup, and a collapsed advanced area.
+- Added a branded application, installer, shortcut, and uninstall icon plus antialiased DPI-aware rounded controls that do not use jagged binary regions.
+- Display the actual passive Quick, Standard, and Deep routes across Ollama and registered LM Studio models; Qwythos is no longer hidden behind a stale pinned fallback or an expected-download label.
+- Made readiness require both helper state and the real managed Codex MCP `enabled` value, with a safe one-click recovery when those states disagree.
+- Kept first-run model setup reachable after cancellation, restored passive status retry after transient failures, and added layout/recovery regression coverage.
+- Strengthened the Control Center test so it verifies the exact readiness token, reports the actual provider and model, and releases only a proven helper-owned model before passing.
+
 ## 0.1.0-beta.15 - 2026-07-18
 
 - Prevented the signed LM Studio inventory CLI from inheriting the MCP server's JSON-RPC standard-input stream.

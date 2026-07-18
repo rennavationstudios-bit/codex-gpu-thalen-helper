@@ -5,8 +5,12 @@
     <AssemblyName>ThalenHelper.ControlCenter</AssemblyName>
     <RootNamespace>ThalenHelper.ControlCenter</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>Assets\thalen-icon.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../ThalenHelper.Core/ThalenHelper.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ThalenHelper.Tests" />
   </ItemGroup>
 </Project>

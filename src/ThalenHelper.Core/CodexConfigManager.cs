@@ -91,6 +91,34 @@ public sealed partial class CodexConfigManager
         }
     }
 
+    public bool TryReadManagedEnabled(ProductPaths paths, out bool enabled)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        enabled = false;
+        var snapshot = ProtectedFileTransaction.Capture(paths.CodexConfigFile);
+        if (!snapshot.Exists)
+        {
+            return false;
+        }
+
+        try
+        {
+            var content = ProtectedFileTransaction.DecodeUtf8(snapshot);
+            if (!TryGetManagedBlock(content, out var managedBlock, out var withoutManaged)
+                || !IsStructurallyBoundManagedReviewer(managedBlock, withoutManaged)
+                || !ManagedReviewerMatches(managedBlock, paths))
+            {
+                return false;
+            }
+
+            return TryGetManagedEnabled(managedBlock, out enabled);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or TomlException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
     internal ExistingIntegrationInspection InspectExistingUnmanagedIntegration(ProductPaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);

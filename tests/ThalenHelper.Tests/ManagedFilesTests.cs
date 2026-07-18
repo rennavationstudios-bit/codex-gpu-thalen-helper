@@ -22,12 +22,19 @@ public sealed class ManagedFilesTests
         File.Delete(paths.CodexConfigFile);
         manager.InstallOrRepair(paths, enabled: false);
         Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
+        Assert.True(manager.TryReadManagedEnabled(paths, out var disabled));
+        Assert.False(disabled);
+
+        manager.SetEnabled(paths, true);
+        Assert.True(manager.TryReadManagedEnabled(paths, out var enabled));
+        Assert.True(enabled);
 
         var managed = File.ReadAllText(paths.CodexConfigFile);
         File.WriteAllText(
             paths.CodexConfigFile,
             managed.Replace("tool_timeout_sec = 360", "tool_timeout_sec = 361", StringComparison.Ordinal));
         Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        Assert.False(manager.TryReadManagedEnabled(paths, out _));
         Assert.Throws<InvalidOperationException>(() => manager.SetEnabled(paths, true));
 
         File.WriteAllText(paths.CodexConfigFile, ProductInfo.ManagedConfigStart + "\r\n[[broken");

@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-beta.15"
+  #define MyAppVersion "0.1.0-beta.16"
 #endif
 
 #ifndef MyAppPeVersion
-  #define MyAppPeVersion "0.1.0.15"
+  #define MyAppPeVersion "0.1.0.16"
 #endif
 
 #define MyAppName "Codex GPU Thalen Helper"
@@ -37,6 +37,7 @@ WizardImageFile=
 WizardSmallImageFile=
 WizardSizePercent=125,125
 WizardKeepAspectRatio=yes
+SetupIconFile=..\src\ThalenHelper.ControlCenter\Assets\thalen-icon.ico
 DisableWelcomePage=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\ThalenHelper.ControlCenter.exe
