@@ -114,15 +114,38 @@ public sealed class ManagedFilesTests
     }
 
     [Fact]
-    public void CodexConfigRepairRestoresTheOllamaModelsEnvironmentWhitelist()
+    public void CodexConfigRepairUpgradesTheBeta5ManagedEnvironmentWhitelistIdempotently()
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
         var manager = new CodexConfigManager();
-        manager.InstallOrRepair(paths, enabled: true);
-        var current = File.ReadAllText(paths.CodexConfigFile);
-        var legacy = current.Replace("env_vars = [\"OLLAMA_MODELS\"]", string.Empty, StringComparison.Ordinal);
-        Assert.NotEqual(current, legacy);
+        var command = paths.McpExecutable.Replace("\\", "\\\\", StringComparison.Ordinal);
+        var state = paths.StateDirectory.Replace("\\", "\\\\", StringComparison.Ordinal);
+        var legacy = $$"""
+            {{ProductInfo.ManagedConfigStart}}
+            # This optional stdio MCP server is a community integration, not a native Codex subagent.
+            [mcp_servers.local_gpu_reviewer]
+            command = "{{command}}"
+            enabled = true
+            required = false
+            enabled_tools = ["local_gpu_health", "local_gpu_plan", "local_gpu_review"]
+            default_tools_approval_mode = "prompt"
+            supports_parallel_tool_calls = false
+            startup_timeout_sec = 20
+            tool_timeout_sec = 360
+            env = { THALEN_HELPER_STATE_DIR = "{{state}}", OLLAMA_HOST = "http://127.0.0.1:11434" }
+
+            [mcp_servers.local_gpu_reviewer.tools.local_gpu_health]
+            approval_mode = "auto"
+
+            [mcp_servers.local_gpu_reviewer.tools.local_gpu_plan]
+            approval_mode = "auto"
+
+            [mcp_servers.local_gpu_reviewer.tools.local_gpu_review]
+            approval_mode = "prompt"
+            {{ProductInfo.ManagedConfigEnd}}
+            """;
+        Assert.DoesNotContain("env_vars", legacy, StringComparison.Ordinal);
         File.WriteAllText(paths.CodexConfigFile, legacy, new UTF8Encoding(false));
 
         Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
@@ -138,7 +161,15 @@ public sealed class ManagedFilesTests
         Assert.True(repaired.Changed);
         Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
         Assert.Equal(1, Count(File.ReadAllText(paths.CodexConfigFile), "env_vars = [\"OLLAMA_MODELS\"]"));
-        Assert.False(manager.PreviewInstall(paths, enabled: true).Changed);
+        var secondPreview = manager.PreviewInstall(paths, enabled: true);
+        Assert.False(secondPreview.Changed);
+        var second = manager.InstallOrRepair(
+            paths,
+            enabled: true,
+            expectedSourceSha256: secondPreview.SourceSha256,
+            expectedPlannedSha256: secondPreview.PlannedSha256);
+        Assert.False(second.Changed);
+        Assert.Equal(1, Count(File.ReadAllText(paths.CodexConfigFile), "env_vars = [\"OLLAMA_MODELS\"]"));
     }
 
     [Theory]

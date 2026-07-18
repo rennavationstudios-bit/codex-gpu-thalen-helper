@@ -79,7 +79,6 @@ public sealed class SafeRepairTests
             command = "docker.exe"
 
             [mcp_servers.local_gpu_reviewer.env]
-            CUSTOM_ENV = "keep"
             {{name}} = "injected"
             """;
         File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
@@ -90,6 +89,30 @@ public sealed class SafeRepairTests
             manager.PreviewInstall(paths, enabled: false, migrateExisting: true));
 
         Assert.Contains("No automatic migration or repair was applied", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
+        Assert.Empty(Directory.GetFiles(paths.CodexHome, "config.toml.thalen-helper.*.bak"));
+    }
+
+    [Fact]
+    public void ExplicitMigrationRefusesUnknownEnvironmentWithoutMutation()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var original = """
+            [mcp_servers.local_gpu_reviewer]
+            command = "external-reviewer.exe"
+
+            [mcp_servers.local_gpu_reviewer.env]
+            EXTERNAL_REVIEWER_SENTINEL = "preserve-before-migration"
+            """;
+        File.WriteAllText(paths.CodexConfigFile, original, new UTF8Encoding(false));
+        var before = File.ReadAllBytes(paths.CodexConfigFile);
+
+        var manager = new CodexConfigManager();
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            manager.PreviewInstall(paths, enabled: false, migrateExisting: true));
+
+        Assert.Contains("unapproved environment entry", exception.Message, StringComparison.Ordinal);
         Assert.Equal(before, File.ReadAllBytes(paths.CodexConfigFile));
         Assert.Empty(Directory.GetFiles(paths.CodexHome, "config.toml.thalen-helper.*.bak"));
     }

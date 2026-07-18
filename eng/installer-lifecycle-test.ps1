@@ -258,7 +258,6 @@ enabled = true
 
 [mcp_servers.local_gpu_reviewer.env]
 OLLAMA_HOST = "http://127.0.0.1:11434"
-EXTERNAL_REVIEWER_SENTINEL = "preserve-before-migration"
 
 [user_extension]
 unknown_upgrade_fixture = true
@@ -406,8 +405,7 @@ $agentsAfterUpgrade = [System.IO.File]::ReadAllText($upgradeAgents)
 if (-not $configAfterUpgrade.Contains('# user comment retained across helper upgrades', [System.StringComparison]::Ordinal) -or
     -not $configAfterUpgrade.Contains('unknown_upgrade_fixture = true', [System.StringComparison]::Ordinal) -or
     -not $configAfterUpgrade.Contains('env_vars = ["OLLAMA_MODELS"]', [System.StringComparison]::Ordinal) -or
-    $configAfterUpgrade.Contains('external-reviewer.exe', [System.StringComparison]::Ordinal) -or
-    $configAfterUpgrade.Contains('EXTERNAL_REVIEWER_SENTINEL', [System.StringComparison]::Ordinal)) {
+    $configAfterUpgrade.Contains('external-reviewer.exe', [System.StringComparison]::Ordinal)) {
     throw 'The migration did not replace only the external reviewer family while preserving unknown config content.'
 }
 if (-not $agentsAfterUpgrade.Contains('<!-- user comment retained across helper upgrades -->', [System.StringComparison]::Ordinal) -or
