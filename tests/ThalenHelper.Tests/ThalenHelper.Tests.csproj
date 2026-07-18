@@ -2,9 +2,11 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/ThalenHelper.Cli/ThalenHelper.Cli.csproj" />
+    <ProjectReference Include="../../src/ThalenHelper.ControlCenter/ThalenHelper.ControlCenter.csproj" />
     <ProjectReference Include="../../src/ThalenHelper.Core/ThalenHelper.Core.csproj" />
     <ProjectReference Include="../../src/ThalenHelper.Mcp/ThalenHelper.Mcp.csproj" />
     <PackageReference Include="Coverlet.Collector" PrivateAssets="all" />

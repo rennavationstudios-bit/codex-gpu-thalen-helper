@@ -261,8 +261,7 @@
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.9",
           "Microsoft.Extensions.Logging": "10.0.9",
           "Microsoft.Extensions.Logging.Abstractions": "10.0.9",
-          "Microsoft.Extensions.Options": "10.0.9",
-          "System.Diagnostics.EventLog": "10.0.9"
+          "Microsoft.Extensions.Options": "10.0.9"
         }
       },
       "Microsoft.Extensions.Logging.EventSource": {
@@ -331,16 +330,6 @@
         "resolved": "13.0.3",
         "contentHash": "HrC5BXdl00IP9zeV+0Z848QWPAoCr9P3bDEZguI+gkLcBKAOxix/tLEAAHC+UvDNPv4a2d18lOReHMOagPa+zQ=="
       },
-      "System.CodeDom": {
-        "type": "Transitive",
-        "resolved": "10.0.9",
-        "contentHash": "scH7O8oAuOMyZKOEiOQB3ZVz6x9XkrZNKNeWVCxdvkJHSy4SYXyinGK0o2Rn5LiGh+ovezziT2WCdqWKa7WMKA=="
-      },
-      "System.Diagnostics.EventLog": {
-        "type": "Transitive",
-        "resolved": "10.0.9",
-        "contentHash": "s2PcxHK4IYQ6gmD3VSBkym9tWGkFisKjcjWBdl7a+n4Yy66ae4beJ1ZdjDp060SSll4W3Rt4H2LW87dWckv+QQ=="
-      },
       "xunit.abstractions": {
         "type": "Transitive",
         "resolved": "2.0.3",
@@ -386,13 +375,19 @@
         "dependencies": {
           "Microsoft.Extensions.Hosting": "[10.0.9, )",
           "ModelContextProtocol": "[1.4.1, )",
-          "ThalenHelper.Core": "[0.1.0-beta.6, )"
+          "ThalenHelper.Core": "[0.1.0-beta.15, )"
         }
       },
       "thalen-helper": {
         "type": "Project",
         "dependencies": {
-          "ThalenHelper.Core": "[0.1.0-beta.6, )"
+          "ThalenHelper.Core": "[0.1.0-beta.15, )"
+        }
+      },
+      "thalenhelper.controlcenter": {
+        "type": "Project",
+        "dependencies": {
+          "ThalenHelper.Core": "[0.1.0-beta.15, )"
         }
       },
       "thalenhelper.core": {
@@ -447,10 +442,7 @@
         "type": "CentralTransitive",
         "requested": "[10.0.9, )",
         "resolved": "10.0.9",
-        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw==",
-        "dependencies": {
-          "System.CodeDom": "10.0.9"
-        }
+        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw=="
       },
       "Tomlyn": {
         "type": "CentralTransitive",
@@ -460,19 +452,11 @@
       }
     },
     "net10.0-windows10.0.19041/win-x64": {
-      "System.Diagnostics.EventLog": {
-        "type": "Transitive",
-        "resolved": "10.0.9",
-        "contentHash": "s2PcxHK4IYQ6gmD3VSBkym9tWGkFisKjcjWBdl7a+n4Yy66ae4beJ1ZdjDp060SSll4W3Rt4H2LW87dWckv+QQ=="
-      },
       "System.Management": {
         "type": "CentralTransitive",
         "requested": "[10.0.9, )",
         "resolved": "10.0.9",
-        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw==",
-        "dependencies": {
-          "System.CodeDom": "10.0.9"
-        }
+        "contentHash": "8mfTzHLlMHCqFE1+iFGzxRCeCb2gDqvRQtZthuksYB+z546QZaFCiagbJ2KXHe7dy5ZpCUg/usaIqc2DxiemPw=="
       }
     }
   }

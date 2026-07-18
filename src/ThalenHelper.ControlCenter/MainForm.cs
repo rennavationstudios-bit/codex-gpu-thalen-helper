@@ -7,40 +7,46 @@ public sealed class MainForm : Form
     private readonly ProductPaths _paths = ProductPaths.Resolve(installDirectory: AppContext.BaseDirectory);
     private readonly DarkToolTip _toolTip = UiTheme.ToolTip();
     private readonly Label _stateBadge = UiTheme.Label("CHECKING", 8.5F, UiTheme.Muted, FontStyle.Bold);
-    private readonly Label _heroTitle = UiTheme.Label("Checking your local reviewer", 17F, UiTheme.Text, FontStyle.Bold);
+    private readonly Label _heroTitle = UiTheme.Label("Checking your local reviewer", 18F, UiTheme.Text, FontStyle.Bold);
     private readonly Label _heroMessage = UiTheme.Label("Reading passive local status. No model will be loaded.", 9.5F, UiTheme.Muted);
-    private readonly Label _modelValue = MetricValue();
-    private readonly Label _modelMeta = MetricMeta();
+    private readonly Label _routeValue = MetricValue();
+    private readonly Label _routeMeta = MetricMeta();
     private readonly Label _gpuValue = MetricValue();
     private readonly Label _gpuMeta = MetricMeta();
-    private readonly Label _ollamaValue = MetricValue();
-    private readonly Label _ollamaMeta = MetricMeta();
-    private readonly Label _storageValue = DetailValue();
-    private readonly Label _loadedValue = DetailValue();
-    private readonly Label _hardwareValue = DetailValue();
-    private readonly Label _technicalValue = DetailValue();
+    private readonly Label _providersValue = MetricValue();
+    private readonly Label _providersMeta = MetricMeta();
     private readonly Label _notice = UiTheme.Label("Low-impact mode protects other GPU workloads.", 9F, UiTheme.Muted);
-    private readonly List<Button> _actionButtons = [];
-    private readonly List<Button> _managedActionButtons = [];
-    private Button _primaryAction = null!;
-    private Button _lowImpactButton = null!;
-    private Button _keepWarmButton = null!;
-    private Button _modelRoutingButton = null!;
-    private Func<Task>? _primaryActionCommand;
-    private int _operationInProgress;
+    private readonly ToggleSwitch _reviewsToggle = UiTheme.Toggle("Local reviews");
+    private readonly ToggleSwitch _lowImpactToggle = UiTheme.Toggle("Low-impact mode");
+    private readonly ToggleSwitch _automaticRoutingToggle = UiTheme.Toggle("Automatic model routing");
+    private readonly ToggleSwitch _keepWarmToggle = UiTheme.Toggle("Keep model warm");
+    private readonly List<Control> _actionControls = [];
+    private readonly List<Control> _managedActionControls = [];
+    private Button _testReviewerButton = null!;
+    private Button _retryStatusButton = null!;
+    private Button _manageModelsButton = null!;
+    private Button _advancedButton = null!;
+    private Button _releaseGpuButton = null!;
+    private RoundedPanel _advancedCard = null!;
+    private InstallationState? _currentState;
     private bool _managedActionsAllowed;
+    private bool _managedConfigEnabled;
+    private bool _refreshingUi;
+    private bool _advancedExpanded;
+    private int _operationInProgress;
 
     public MainForm()
     {
-        Text = ProductInfo.Name;
-        Size = new Size(1080, 790);
-        UiTheme.Apply(this, new Size(980, 700));
+        Text = "Thalen AI — Local Review for Codex";
+        Size = new Size(1040, 740);
+        UiTheme.Apply(this, new Size(860, 620));
 
         var scroll = new Panel
         {
             Dock = DockStyle.Fill,
             AutoScroll = true,
-            BackColor = UiTheme.Canvas
+            BackColor = UiTheme.Canvas,
+            AccessibleName = "Thalen AI Control Center"
         };
         var stack = new TableLayoutPanel
         {
@@ -49,15 +55,17 @@ public sealed class MainForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Dock = DockStyle.Top,
-            Padding = new Padding(24, 22, 24, 26),
+            Padding = new Padding(24, 22, 24, 28),
             BackColor = UiTheme.Canvas
         };
         stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
 
         AddStackRow(stack, BuildHero());
-        AddStackRow(stack, BuildMetrics());
-        AddStackRow(stack, BuildDetails());
-        AddStackRow(stack, BuildActions());
+        AddStackRow(stack, BuildOverview());
+        AddStackRow(stack, BuildHomeControls());
+        _advancedCard = BuildAdvancedSettings();
+        _advancedCard.Visible = false;
+        AddStackRow(stack, _advancedCard);
         AddStackRow(stack, BuildNotice());
 
         scroll.Controls.Add(stack);
@@ -80,9 +88,9 @@ public sealed class MainForm : Form
         var hero = new GradientPanel
         {
             Dock = DockStyle.Top,
-            Height = 164,
+            Height = 202,
             Margin = new Padding(0, 0, 0, 16),
-            Padding = new Padding(26, 22, 26, 22),
+            Padding = new Padding(26, 21, 26, 21),
             AccessibleName = "Local reviewer overview"
         };
         var grid = new TableLayoutPanel
@@ -92,22 +100,27 @@ public sealed class MainForm : Form
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28F));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 70F));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
 
-        var copy = new FlowLayoutPanel
+        var copy = new TableLayoutPanel
         {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
+            ColumnCount = 1,
+            RowCount = 5,
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent
         };
-        var eyebrow = UiTheme.Label("PRIVATE AI REVIEW", 8.5F, UiTheme.Cyan, FontStyle.Bold);
-        eyebrow.Margin = new Padding(0, 0, 0, 9);
-        var product = UiTheme.Label("Codex GPU Thalen Helper", 22F, UiTheme.Text, FontStyle.Bold);
-        product.Margin = new Padding(0, 0, 0, 4);
-        var subtitle = UiTheme.Label("A quiet, local second opinion—only when you ask for it.", 10F, UiTheme.Muted);
-        subtitle.Margin = new Padding(0, 0, 0, 14);
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var eyebrow = UiTheme.Label("THALEN AI  •  PRIVATE LOCAL REVIEW", 8.5F, UiTheme.Cyan, FontStyle.Bold);
+        eyebrow.Margin = new Padding(0, 0, 0, 8);
+        var product = UiTheme.Label("Local review for Codex", 22F, UiTheme.Text, FontStyle.Bold);
+        product.Margin = new Padding(0, 0, 0, 3);
+        var subtitle = UiTheme.Label("A task-aware second opinion on your own hardware. Codex stays in charge.", 10F, UiTheme.Muted);
+        subtitle.Margin = new Padding(0, 0, 0, 12);
         var stateLine = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.LeftToRight,
@@ -119,173 +132,219 @@ public sealed class MainForm : Form
         _heroTitle.Margin = new Padding(10, 3, 0, 0);
         stateLine.Controls.Add(_stateBadge);
         stateLine.Controls.Add(_heroTitle);
-        copy.Controls.Add(eyebrow);
-        copy.Controls.Add(product);
-        copy.Controls.Add(subtitle);
-        copy.Controls.Add(stateLine);
-        _heroMessage.Margin = new Padding(0, 5, 0, 0);
-        copy.Controls.Add(_heroMessage);
+        _heroMessage.Margin = new Padding(0, 4, 0, 0);
+        copy.Controls.Add(eyebrow, 0, 0);
+        copy.Controls.Add(product, 0, 1);
+        copy.Controls.Add(subtitle, 0, 2);
+        copy.Controls.Add(stateLine, 0, 3);
+        copy.Controls.Add(_heroMessage, 0, 4);
 
-        var actionHost = new FlowLayoutPanel
+        var switchHost = SettingRow(
+            "Local reviews",
+            "Off pauses reviews but keeps Codex connected.",
+            _reviewsToggle,
+            compact: true);
+        switchHost.Padding = new Padding(12, 38, 0, 0);
+        SetHelp(_reviewsToggle, "Turn local reviews on or pause them without disconnecting Codex.");
+        _reviewsToggle.CheckedChanged += async (_, _) =>
         {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent,
-            Padding = new Padding(8, 42, 0, 0)
-        };
-        _primaryAction = UiTheme.Button("Checking…", AppButtonStyle.Primary);
-        _primaryAction.MinimumSize = new Size(210, 46);
-        _primaryAction.Enabled = false;
-        _primaryAction.Click += async (_, _) =>
-        {
-            if (_primaryActionCommand is not null)
+            if (!_refreshingUi)
             {
-                await RunButtonActionAsync(_primaryActionCommand);
+                await RunActionAsync(ToggleReviewsAsync);
             }
         };
-        SetHelp(_primaryAction, "Runs the safest primary action for the current state. It never downloads or preloads a model without a separate confirmation.");
-        var passive = UiTheme.Label("Passive status • zero telemetry", 8.5F, UiTheme.Muted);
-        passive.Margin = new Padding(4, 2, 0, 0);
-        actionHost.Controls.Add(_primaryAction);
-        actionHost.Controls.Add(passive);
+        RegisterAction(_reviewsToggle, managedOnly: true);
 
         grid.Controls.Add(copy, 0, 0);
-        grid.Controls.Add(actionHost, 1, 0);
+        grid.Controls.Add(switchHost, 1, 0);
         hero.Controls.Add(grid);
         return hero;
     }
 
-    private Control BuildMetrics()
+    private Control BuildOverview()
     {
         var grid = new TableLayoutPanel
         {
             ColumnCount = 3,
             RowCount = 1,
             Dock = DockStyle.Top,
-            Height = 126,
+            Height = 134,
             Margin = new Padding(0, 0, 0, 16),
             BackColor = UiTheme.Canvas
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334F));
-        grid.Controls.Add(MetricCard("MODEL", _modelValue, _modelMeta), 0, 0);
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 39F));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31F));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30F));
+        grid.Controls.Add(MetricCard("AUTOMATIC ROUTING", _routeValue, _routeMeta), 0, 0);
         grid.Controls.Add(MetricCard("GPU", _gpuValue, _gpuMeta), 1, 0);
-        grid.Controls.Add(MetricCard("OLLAMA", _ollamaValue, _ollamaMeta), 2, 0);
+        grid.Controls.Add(MetricCard("PROVIDERS", _providersValue, _providersMeta, last: true), 2, 0);
         return grid;
     }
 
-    private static Control MetricCard(string title, Label value, Label meta)
+    private static Control MetricCard(string title, Label value, Label meta, bool last = false)
     {
         var card = new RoundedPanel
         {
             Dock = DockStyle.Fill,
-            Margin = new Padding(0, 0, 12, 0),
+            Margin = last ? new Padding(0) : new Padding(0, 0, 12, 0),
             Padding = new Padding(18, 15, 18, 14)
         };
-        var flow = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent
-        };
-        flow.Controls.Add(UiTheme.SectionLabel(title));
-        value.Margin = new Padding(0, 0, 0, 5);
-        meta.Margin = new Padding(0);
-        flow.Controls.Add(value);
-        flow.Controls.Add(meta);
-        card.Controls.Add(flow);
-        return card;
-    }
-
-    private Control BuildDetails()
-    {
-        var card = new RoundedPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 184,
-            Margin = new Padding(0, 0, 0, 16),
-            Padding = new Padding(20, 16, 20, 16)
-        };
-        var title = UiTheme.SectionLabel("SYSTEM DETAILS");
-        title.Dock = DockStyle.Top;
         var table = new TableLayoutPanel
         {
-            ColumnCount = 4,
-            RowCount = 2,
+            ColumnCount = 1,
+            RowCount = 3,
             Dock = DockStyle.Fill,
-            BackColor = Color.Transparent,
-            Padding = new Padding(0, 10, 0, 0)
+            BackColor = Color.Transparent
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        AddDetail(table, 0, 0, "Model storage", _storageValue);
-        AddDetail(table, 2, 0, "Model loaded", _loadedValue);
-        AddDetail(table, 0, 1, "Hardware", _hardwareValue);
-        AddDetail(table, 2, 1, "Technical status", _technicalValue);
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        var heading = UiTheme.SectionLabel(title);
+        value.AutoSize = false;
+        value.Dock = DockStyle.Fill;
+        value.AutoEllipsis = true;
+        meta.AutoSize = false;
+        meta.Dock = DockStyle.Fill;
+        meta.AutoEllipsis = true;
+        table.Controls.Add(heading, 0, 0);
+        table.Controls.Add(value, 0, 1);
+        table.Controls.Add(meta, 0, 2);
         card.Controls.Add(table);
-        card.Controls.Add(title);
         return card;
     }
 
-    private Control BuildActions()
+    private Control BuildHomeControls()
     {
         var card = new RoundedPanel
         {
             Dock = DockStyle.Top,
-            Height = 292,
+            AutoSize = true,
             Margin = new Padding(0, 0, 0, 16),
-            Padding = new Padding(20, 16, 20, 14)
+            Padding = new Padding(20, 17, 20, 16)
         };
-        var grid = new TableLayoutPanel
+        var layout = new TableLayoutPanel
         {
-            ColumnCount = 2,
-            RowCount = 1,
-            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
             BackColor = Color.Transparent
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(UiTheme.SectionLabel("LOCAL REVIEW"), 0, 0);
 
-        var left = ActionColumn();
-        left.Controls.Add(UiTheme.SectionLabel("REVIEW CONTROLS"));
-        var review = ActionFlow();
-        AddActionButton(review, "Pause reviews", "Temporarily rejects new helper-owned reviews, requests cancellation, and waits for a tracked zero-keep-alive review to release. It never force-unloads a model tag. The Codex MCP entry remains configured.", async () => await Control().PauseAsync(), managedOnly: true);
-        AddActionButton(review, "Resume reviews", "Verifies Ollama, loopback networking, model storage, and model integrity before allowing reviews again. It does not preload the model.", async () => await Control().ResumeAsync(), managedOnly: true);
-        AddActionButton(review, "Release GPU", "Requests cancellation and waits for a tracked zero-keep-alive review to release without disabling future reviews. It never force-unloads a mutable model tag.", async () => await Control().ReleaseGpuAsync(), managedOnly: true);
-        AddActionButton(review, "Enable integration", "Persistently enables the helper-owned Codex MCP entry after safety checks. Restart Codex only if the tools are not already visible.", async () => await Control().EnableAsync(), managedOnly: true);
-        AddActionButton(review, "Disable integration", "Persistently disables the helper-owned MCP entry, cancels helper work, and observes zero-keep-alive release without force-unloading a tag. Restart Codex to remove the tools from the current session.", async () => await Control().DisableAsync(true), AppButtonStyle.Danger, managedOnly: true);
-        left.Controls.Add(review);
-        left.Controls.Add(UiTheme.SectionLabel("GPU BEHAVIOR"));
-        var preferences = ActionFlow();
-        _lowImpactButton = AddActionButton(preferences, "Low impact", "Keeps GPU impact minimal and unloads the model immediately after every response. Recommended while emulators, Expo, or graphics tools are active.", ToggleLowImpactAsync, managedOnly: true);
-        _keepWarmButton = AddActionButton(preferences, "Keep warm", "Keeps one pinned model in GPU memory for a bounded idle period for faster follow-up reviews. Entry-tier hardware and automatic model routing block this option.", ToggleKeepWarmAsync, managedOnly: true);
-        left.Controls.Add(preferences);
+        var actions = ActionFlow();
+        _testReviewerButton = AddActionButton(
+            actions,
+            "Test reviewer",
+            "Runs one small confirmed review using the current automatic route, then verifies release.",
+            TestLocalReviewAsync,
+            AppButtonStyle.Primary,
+            managedOnly: true);
+        _retryStatusButton = AddActionButton(
+            actions,
+            "Retry status",
+            "Run the passive status checks again. This does not load a model.",
+            () => Task.CompletedTask,
+            AppButtonStyle.Primary);
+        _retryStatusButton.Visible = false;
+        _manageModelsButton = AddActionButton(
+            actions,
+            "Models & storage",
+            "Open guided model and storage setup. Nothing downloads without confirmation.",
+            ShowModelSetupAsync,
+            managedOnly: true);
+        _advancedButton = AddActionButton(
+            actions,
+            "Advanced settings",
+            "Show less-common controls, diagnostics, repair, and disconnect options.",
+            ToggleAdvancedAsync,
+            AppButtonStyle.Quiet);
+        layout.Controls.Add(actions, 0, 1);
 
-        var right = ActionColumn();
-        right.Padding = new Padding(18, 0, 0, 0);
-        right.Controls.Add(UiTheme.SectionLabel("MODEL & SETUP"));
-        var setup = ActionFlow();
-        AddActionButton(setup, "Test local review", "Runs one small, explicitly confirmed local inference with zero keep-alive and verifies release afterward. This is the only button here that intentionally runs a model.", TestLocalReviewAsync, AppButtonStyle.Primary, managedOnly: true);
-        _modelRoutingButton = AddActionButton(setup, "Auto model", "Switches between automatic task-aware routing and one pinned model. Automatic mode selects only installed, audited, digest-matching Q4 models after passive hardware checks. Changing this setting never loads a model.", ToggleModelRoutingAsync, managedOnly: true);
-        AddActionButton(setup, "Choose model", "Shows hardware-safe supported models. After confirmation, it downloads only when missing, validates locally, and records ownership safely.", ChangeModelAsync, managedOnly: true);
-        AddActionButton(setup, "Move model storage", "Moves helper-managed Ollama model files to an empty fixed local folder, verifies every file with SHA-256, and rolls back on failure.", MoveModelsAsync, managedOnly: true);
-        AddActionButton(setup, "Repair integration", "Rechecks the managed configuration, startup, model path, and passive health. Existing unowned integrations remain untouched.", RepairAsync, managedOnly: true);
-        right.Controls.Add(setup);
-        right.Controls.Add(UiTheme.SectionLabel("PRIVACY & SUPPORT"));
-        var support = ActionFlow();
-        AddActionButton(support, "Reliability baseline", "Previews the complete before/after AGENTS.override.md diff before optionally adding or removing only the marked sanitized reliability section.", ConfigureReliabilityBaselineAsync, AppButtonStyle.Quiet);
-        AddActionButton(support, "Export diagnostics", "Saves a redacted JSON report without prompts, responses, usernames, hostnames, serial numbers, model contents, or credentials.", ExportDiagnosticsAsync, AppButtonStyle.Quiet);
-        AddActionButton(support, "Uninstall help", "Explains how to remove only helper-owned files and settings while preserving Ollama, pre-existing models, Codex authentication, and unrelated configuration.", ShowUninstallGuidanceAsync, AppButtonStyle.Quiet);
-        right.Controls.Add(support);
+        var lowImpact = SettingRow(
+            "Low-impact mode",
+            "Keeps local review light and unloads immediately—recommended during emulators, Expo, and graphics work.",
+            _lowImpactToggle);
+        SetHelp(_lowImpactToggle, "Reduce GPU impact and unload immediately after each review.");
+        _lowImpactToggle.CheckedChanged += async (_, _) =>
+        {
+            if (!_refreshingUi)
+            {
+                await RunActionAsync(ToggleLowImpactAsync);
+            }
+        };
+        RegisterAction(_lowImpactToggle, managedOnly: true);
+        layout.Controls.Add(lowImpact, 0, 2);
+        card.Controls.Add(layout);
+        return card;
+    }
 
-        grid.Controls.Add(left, 0, 0);
-        grid.Controls.Add(right, 1, 0);
-        card.Controls.Add(grid);
+    private RoundedPanel BuildAdvancedSettings()
+    {
+        var card = new RoundedPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            Margin = new Padding(0, 0, 0, 16),
+            Padding = new Padding(20, 17, 20, 16),
+            AccessibleName = "Advanced settings"
+        };
+        var layout = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            RowCount = 0,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
+            BackColor = Color.Transparent
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        AddStackRow(layout, UiTheme.SectionLabel("ADVANCED SETTINGS"));
+
+        var routing = SettingRow(
+            "Automatic model routing",
+            "Selects the best eligible installed model for each task. Turning this off pins the saved fallback model.",
+            _automaticRoutingToggle);
+        SetHelp(_automaticRoutingToggle, "Switch between task-aware automatic routing and one pinned model.");
+        _automaticRoutingToggle.CheckedChanged += async (_, _) =>
+        {
+            if (!_refreshingUi)
+            {
+                await RunActionAsync(ToggleModelRoutingAsync);
+            }
+        };
+        RegisterAction(_automaticRoutingToggle, managedOnly: true);
+        AddStackRow(layout, routing);
+
+        var keepWarm = SettingRow(
+            "Keep model warm",
+            "Optional faster follow-ups. Automatic routing and low-impact mode normally keep this off.",
+            _keepWarmToggle);
+        SetHelp(_keepWarmToggle, "Keep one pinned model loaded briefly between reviews when safety policy permits.");
+        _keepWarmToggle.CheckedChanged += async (_, _) =>
+        {
+            if (!_refreshingUi)
+            {
+                await RunActionAsync(ToggleKeepWarmAsync);
+            }
+        };
+        RegisterAction(_keepWarmToggle, managedOnly: true);
+        AddStackRow(layout, keepWarm);
+
+        var actions = ActionFlow();
+        _releaseGpuButton = AddActionButton(actions, "Release GPU", "Release only a proven helper-owned loaded model.", async () => await RunControlAsync(() => Control().ReleaseGpuAsync()), managedOnly: true);
+        AddActionButton(actions, "Move storage", "Move helper-managed Ollama files with hash verification and rollback.", MoveModelsAsync, managedOnly: true);
+        AddActionButton(actions, "Repair", "Recheck the managed integration, startup, paths, and passive health.", RepairAsync, managedOnly: true);
+        AddActionButton(actions, "Reliability baseline", "Preview the optional managed AGENTS reliability section before applying it.", ConfigureReliabilityBaselineAsync, AppButtonStyle.Quiet);
+        AddActionButton(actions, "Export diagnostics", "Save a redacted local diagnostics report.", ExportDiagnosticsAsync, AppButtonStyle.Quiet);
+        AddActionButton(actions, "Disconnect from Codex", "Disable the helper MCP entry. Restart Codex to remove its tools from an open task.", DisconnectAsync, AppButtonStyle.Danger, managedOnly: true);
+        AddActionButton(actions, "Uninstall help", "Explain safe removal while preserving unrelated Codex settings and existing models.", ShowUninstallGuidanceAsync, AppButtonStyle.Quiet);
+        AddStackRow(layout, actions);
+        card.Controls.Add(layout);
         return card;
     }
 
@@ -294,24 +353,28 @@ public sealed class MainForm : Form
         var card = new RoundedPanel
         {
             Dock = DockStyle.Top,
-            Height = 66,
+            AutoSize = true,
             Margin = new Padding(0),
-            Padding = new Padding(18, 14, 18, 12),
+            Padding = new Padding(18, 14, 18, 14),
             OutlineColor = Color.FromArgb(52, 61, 84)
         };
-        var row = new FlowLayoutPanel
+        var row = new TableLayoutPanel
         {
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            Dock = DockStyle.Top,
             BackColor = Color.Transparent
         };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 26));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         var mark = UiTheme.Label("●", 10F, UiTheme.Cyan, FontStyle.Bold);
-        mark.Margin = new Padding(0, 2, 10, 0);
+        mark.Margin = new Padding(0, 2, 8, 0);
+        _notice.AutoSize = true;
+        _notice.Dock = DockStyle.Fill;
         _notice.MaximumSize = new Size(900, 0);
-        _notice.Margin = new Padding(0, 1, 0, 0);
-        row.Controls.Add(mark);
-        row.Controls.Add(_notice);
+        row.Controls.Add(mark, 0, 0);
+        row.Controls.Add(_notice, 1, 0);
         card.Controls.Add(row);
         return card;
     }
@@ -322,10 +385,7 @@ public sealed class MainForm : Form
             ? await new StateStore(_paths.StateFile).LoadAsync().ConfigureAwait(true)
             : null;
         if (state is null
-            || string.Equals(
-                state.LastHealthCheckCode,
-                "INSTALLED_MODEL_SETUP_REQUIRED",
-                StringComparison.Ordinal))
+            || string.Equals(state.LastHealthCheckCode, "INSTALLED_MODEL_SETUP_REQUIRED", StringComparison.Ordinal))
         {
             using var wizard = new SetupWizardForm(
                 _paths,
@@ -347,83 +407,134 @@ public sealed class MainForm : Form
             var hardware = new HardwareDetector().Detect();
             var store = new StateStore(_paths.StateFile);
             var state = await store.LoadAsync().ConfigureAwait(true);
+            _currentState = state;
             using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
-            var health = await new ReviewerService(_paths, store, client).GetHealthAsync().ConfigureAwait(true);
-            var catalog = new ModelCatalogService().LoadBundled();
-            var model = catalog.Models.FirstOrDefault(item => string.Equals(item.Tag, state?.SelectedModel, StringComparison.OrdinalIgnoreCase));
-            var gpu = hardware.Gpus.OrderByDescending(item => item.DedicatedMemoryBytes).FirstOrDefault();
-            var managed = IntegrationOwnership.Inspect(_paths, state).Status == IntegrationOwnershipStatus.ManagedValid;
+            var reviewer = new ReviewerService(_paths, store, client);
+            var health = await reviewer.GetHealthAsync().ConfigureAwait(true);
+            var configManager = new CodexConfigManager();
+            var managed = IntegrationOwnership.Inspect(_paths, state, configManager).Status == IntegrationOwnershipStatus.ManagedValid;
+            var configEnabled = managed && configManager.TryReadManagedEnabled(_paths, out var enabledValue) && enabledValue;
             _managedActionsAllowed = managed;
+            _managedConfigEnabled = configEnabled;
             var listener = OllamaAutoStartManager.GetListenerStatus(11434);
             var externalExposure = !managed && listener.HasListeners && !listener.LoopbackOnly;
 
-            UpdateHero(state, health, managed, listener);
-            _modelValue.Text = state?.SelectedModel ?? (managed ? "Not selected" : "Existing setup");
-            _modelMeta.Text = model is null
-                ? managed ? "Choose a supported model to begin" : "Preserved without takeover"
-                : $"{FormatBytes(model.ExpectedDownloadBytes)} expected download";
-            _gpuValue.Text = gpu?.Name ?? "No dedicated GPU";
+            ReviewerPlanResult? quickPlan = null;
+            ReviewerPlanResult? standardPlan = null;
+            ReviewerPlanResult? deepPlan = null;
+            if (managed && state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
+            {
+                quickPlan = await reviewer.PlanAsync(new ReviewRequest(
+                    "Preview a small local review route.",
+                    TaskKind: ReviewTaskKind.LogTriage,
+                    Effort: ReviewEffort.Quick,
+                    EstimatedInputCharacters: 1_000)).ConfigureAwait(true);
+                standardPlan = await reviewer.PlanAsync(new ReviewRequest(
+                    "Preview a normal code review route.",
+                    TaskKind: ReviewTaskKind.DiffReview,
+                    Effort: ReviewEffort.Standard,
+                    EstimatedInputCharacters: 8_000)).ConfigureAwait(true);
+                deepPlan = await reviewer.PlanAsync(new ReviewRequest(
+                    "Preview a deep code review route.",
+                    TaskKind: ReviewTaskKind.DiffReview,
+                    Effort: ReviewEffort.Deep,
+                    EstimatedInputCharacters: 24_000)).ConfigureAwait(true);
+            }
+
+            UpdateHero(state, health, managed, configEnabled, listener);
+            UpdateRoutePresentation(state, health, quickPlan, standardPlan, deepPlan);
+            _testReviewerButton.Visible = true;
+            _retryStatusButton.Visible = false;
+            var gpu = hardware.Gpus.OrderByDescending(item => item.DedicatedMemoryBytes).FirstOrDefault();
+            _gpuValue.Text = gpu?.Name.Replace("NVIDIA GeForce ", string.Empty, StringComparison.OrdinalIgnoreCase) ?? "CPU only";
             _gpuMeta.Text = gpu is null
                 ? "CPU fallback is never automatic"
-                : $"{FormatBytes(gpu.DedicatedMemoryBytes)} VRAM • {gpu.AccelerationRoute}";
-            _ollamaValue.Text = managed
-                ? health.EndpointReachable ? "Online" : "Needs attention"
-                : externalExposure ? "NETWORK EXPOSED" : listener.HasListeners ? "External • loopback" : "External • offline";
-            _ollamaValue.ForeColor = managed && health.EndpointReachable
-                ? UiTheme.Success
-                : externalExposure || managed
-                    ? UiTheme.Warning
-                    : UiTheme.Cyan;
-            _ollamaMeta.Text = managed
-                ? health.ModelLoaded ? "Model currently loaded" : "No helper model loaded"
-                : externalExposure
-                    ? "Unsafe listener detected outside helper control"
-                    : "Listener checked; external model state was not queried";
-            _storageValue.Text = state?.ModelStorageLocation ?? (managed ? "Not selected" : "Existing path preserved");
-            _loadedValue.Text = managed ? health.ModelLoaded ? "Yes" : "No" : "Not checked";
-            _loadedValue.ForeColor = managed && health.ModelLoaded ? UiTheme.Warning : managed ? UiTheme.Success : UiTheme.Muted;
-            _hardwareValue.Text = state is null
-                ? "Setup required"
-                : $"{state.HardwareTier} tier • {gpu?.Name ?? "CPU only"}";
-            _technicalValue.Text = managed
-                ? health.ErrorCode is null ? "Healthy (passive check)" : FriendlyHealth(health.ErrorCode, health.ErrorMessage)
-                : externalExposure
-                    ? "External reviewer is active; packaged safeguards do not control its exposed Ollama listener"
-                    : "External local_gpu_reviewer preserved; packaged controls do not apply";
-            _technicalValue.ForeColor = managed && health.ErrorCode is not null || externalExposure ? UiTheme.Warning : UiTheme.Muted;
-            _lowImpactButton.Text = state?.Preferences.LowImpactMode == true ? "Low impact: On" : "Low impact: Off";
-            _keepWarmButton.Text = state?.Preferences.KeepWarm == true ? "Keep warm: On" : "Keep warm: Off";
-            _modelRoutingButton.Text = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                ? "Auto model: On"
-                : "Auto model: Off";
+                : $"{FormatBytes(gpu.DedicatedMemoryBytes)} VRAM  •  {(health.ModelLoaded ? "Model loaded" : "GPU free")}";
+            _releaseGpuButton.Visible = managed && health.ModelLoaded;
+
+            _refreshingUi = true;
+            _reviewsToggle.Checked = state?.Availability == HelperAvailability.Enabled && configEnabled;
+            _lowImpactToggle.Checked = state?.Preferences.LowImpactMode == true;
+            _automaticRoutingToggle.Checked = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic;
+            _keepWarmToggle.Checked = state?.Preferences.KeepWarm == true;
+            _refreshingUi = false;
+
             _notice.Text = !managed
                 ? externalExposure
-                    ? "Codex may see the external reviewer, but this app cannot pause, lock, unload, or secure it. Ollama is reachable beyond loopback; stop and correct that external startup before local review."
-                    : "Codex may see the preserved external reviewer, but this app cannot pause, lock, unload, or verify it. Packaged controls apply only to helper-managed integrations."
+                    ? "This preserved external reviewer is network-exposed and outside Thalen's safety controls."
+                    : "An existing external reviewer was preserved. Thalen will not take control without a reviewed migration."
                 : string.Equals(state?.LastHealthCheckCode, "EXTERNAL_AUTOSTART_UNVERIFIED", StringComparison.Ordinal)
-                    ? "Another Ollama startup artifact was preserved to avoid duplication, but it is not verified. Review/remove it or use manual startup before enabling local review."
-                : state?.Preferences.AutoStartOllama == false
-                    ? "Automatic Ollama startup is off. Start Ollama manually after sign-in before using local review."
-                    : "Low-impact mode is recommended while emulators, Expo, device testing, or graphics workloads are active.";
+                    ? "An existing Ollama startup entry was preserved but could not be verified."
+                    : state?.Preferences.AutoStartOllama == false
+                        ? "Automatic Ollama startup is off. Start Ollama manually after sign-in when that provider is needed."
+                        : "Models stay unloaded until Codex requests a review. Low-impact mode is recommended during GPU-heavy work.";
             SetActionControlsEnabled(!IsOperationInProgress);
         }
         catch (Exception exception)
         {
             _managedActionsAllowed = false;
+            _refreshingUi = true;
+            _reviewsToggle.Checked = false;
+            _refreshingUi = false;
             StyleBadge(_stateBadge, UiTheme.Danger);
             _stateBadge.Text = "UNAVAILABLE";
             _heroTitle.Text = "Status could not be read";
             _heroMessage.Text = "No configuration was changed.";
-            _technicalValue.Text = exception.Message;
+            _routeValue.Text = "Unavailable";
+            _routeMeta.Text = FriendlyHealth("STATUS_UNAVAILABLE", exception.Message);
             _notice.Text = exception.Message;
-            ConfigurePrimary("Retry status", RefreshAsync, "Runs the passive status check again. It does not load or download a model.");
+            SetActionControlsEnabled(false);
+            _testReviewerButton.Visible = false;
+            _retryStatusButton.Visible = true;
+            _retryStatusButton.Enabled = true;
         }
+    }
+
+    private void UpdateRoutePresentation(
+        InstallationState? state,
+        ReviewerHealthResult health,
+        ReviewerPlanResult? quickPlan,
+        ReviewerPlanResult? standardPlan,
+        ReviewerPlanResult? deepPlan)
+    {
+        if (state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
+        {
+            var quick = PlanLabel(quickPlan, "Quick route unavailable");
+            var deep = PlanLabel(deepPlan, "Deep route unavailable");
+            _routeValue.Text = standardPlan?.Allowed == true && !string.IsNullOrWhiteSpace(standardPlan.Model)
+                ? $"{DisplayModel(standardPlan.Model)}  •  {standardPlan.Provider}"
+                : "Automatic route unavailable";
+            _routeMeta.Text = $"Normal review  •  automatic   |   Quick: {quick}";
+            _toolTip.SetToolTip(_routeMeta, $"Quick: {quick}\nNormal: {PlanLabel(standardPlan, "Unavailable")}\nDeep: {deep}");
+            var providers = new[] { quickPlan, standardPlan, deepPlan }
+                .Where(plan => plan?.Allowed == true && !string.IsNullOrWhiteSpace(plan.Provider))
+                .Select(plan => plan!.Provider)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            _providersValue.Text = providers.Length == 0 ? "No ready provider" : string.Join(" + ", providers);
+            _providersMeta.Text = $"{health.EligibleInstalledModels} installed + validated model{(health.EligibleInstalledModels == 1 ? string.Empty : "s")} eligible";
+            return;
+        }
+
+        var catalog = new ModelCatalogService().LoadBundled();
+        var selected = catalog.Models.FirstOrDefault(item =>
+            string.Equals(item.Tag, state?.SelectedModel, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(ModelProviders.Normalize(item.Provider), ModelProviders.Normalize(state?.SelectedModelProvider), StringComparison.Ordinal));
+        _routeValue.Text = state?.SelectedModel is null ? "No model selected" : DisplayModel(state.SelectedModel);
+        _routeMeta.Text = health.ModelAvailable
+            ? $"Installed + validated  •  {ModelProviders.Normalize(state?.SelectedModelProvider)}"
+            : selected is null
+                ? "Choose a supported installed model"
+                : $"Not installed  •  {FormatBytes(selected.ExpectedDownloadBytes)} download if approved";
+        _providersValue.Text = ModelProviders.Normalize(state?.SelectedModelProvider);
+        _providersMeta.Text = health.EndpointReachable ? "Loopback provider ready" : "Provider needs attention";
     }
 
     private void UpdateHero(
         InstallationState? state,
         ReviewerHealthResult health,
         bool managed,
+        bool configEnabled,
         OllamaListenerStatus listener)
     {
         if (state is null)
@@ -431,8 +542,7 @@ public sealed class MainForm : Form
             StyleBadge(_stateBadge, UiTheme.Warning);
             _stateBadge.Text = "SETUP";
             _heroTitle.Text = "Finish local reviewer setup";
-            _heroMessage.Text = "Choose a supported model or point to an existing Ollama model folder.";
-            ConfigurePrimary("Open guided setup", ShowSetupAsync, "Opens the guided setup. Downloads occur only after an explicit model choice and confirmation.");
+            _heroMessage.Text = "Use models you already have or approve one guided download.";
             return;
         }
 
@@ -441,11 +551,19 @@ public sealed class MainForm : Form
             var exposed = listener.HasListeners && !listener.LoopbackOnly;
             StyleBadge(_stateBadge, exposed ? UiTheme.Danger : UiTheme.Cyan);
             _stateBadge.Text = exposed ? "EXTERNAL RISK" : "EXTERNAL";
-            _heroTitle.Text = exposed ? "External Ollama is network-exposed" : "Codex reviewer is external";
+            _heroTitle.Text = exposed ? "External provider is network-exposed" : "Existing reviewer preserved";
             _heroMessage.Text = exposed
-                ? "The preserved reviewer is outside this app, and its Ollama listener is not loopback-only."
-                : "Codex may use the preserved reviewer, but this Control Center does not control or verify it.";
-            ConfigurePrimary("Understand external setup", ShowProtectedStatusAsync, "Explains the preserved ownership boundary and which packaged safeguards do not apply.");
+                ? "That listener is outside Thalen's loopback safety boundary."
+                : "Thalen did not replace or take control of the existing integration.";
+            return;
+        }
+
+        if (!configEnabled)
+        {
+            StyleBadge(_stateBadge, UiTheme.Warning);
+            _stateBadge.Text = "OFF";
+            _heroTitle.Text = "Codex integration is off";
+            _heroMessage.Text = "Turn Local reviews on, then restart Codex to reconnect its tools.";
             return;
         }
 
@@ -454,87 +572,73 @@ public sealed class MainForm : Form
             case HelperAvailability.Enabled:
                 StyleBadge(_stateBadge, UiTheme.Success);
                 _stateBadge.Text = "READY";
-                _heroTitle.Text = "Local review is ready";
+                _heroTitle.Text = "Local reviews are on";
                 _heroMessage.Text = health.ModelLoaded
-                    ? "A routed model is reported loaded. Release GPU requests cancellation and observes release without force-unloading a tag."
-                    : "The model stays unloaded until Codex requests a review.";
-                ConfigurePrimary("Pause reviews", async () => await RunControlAsync(() => Control().PauseAsync()), "Pauses new reviews, requests cancellation, and observes zero-keep-alive release while leaving the MCP entry configured.");
+                    ? "A helper-owned model is currently active."
+                    : "Nothing is loaded until Codex asks for a review.";
                 break;
             case HelperAvailability.Paused:
                 StyleBadge(_stateBadge, UiTheme.Warning);
                 _stateBadge.Text = "PAUSED";
-                _heroTitle.Text = "Local review is paused";
-                _heroMessage.Text = "No new helper reviews will run until you resume.";
-                ConfigurePrimary("Resume reviews", async () => await RunControlAsync(() => Control().ResumeAsync()), "Verifies the local safety checks and resumes reviews without preloading the model.");
+                _heroTitle.Text = "Local reviews are paused";
+                _heroMessage.Text = "Codex stays connected, but no new local reviews will run.";
                 break;
             default:
                 StyleBadge(_stateBadge, UiTheme.Muted);
                 _stateBadge.Text = "OFF";
-                _heroTitle.Text = state.SelectedModel is null ? "Choose a model to begin" : "Local review is disabled";
+                _heroTitle.Text = state.SelectedModel is null ? "Choose a model to begin" : "Local review is disconnected";
                 _heroMessage.Text = state.SelectedModel is null
-                    ? "Open guided setup to use an existing model or explicitly approve a supported download."
-                    : "Enable after the passive safety checks pass.";
-                ConfigurePrimary(
-                    state.SelectedModel is null ? "Finish guided setup" : "Enable integration",
-                    state.SelectedModel is null ? ShowSetupAsync : async () => await RunControlAsync(() => Control().EnableAsync()),
-                    state.SelectedModel is null
-                        ? "Shows supported models and asks before any download or local validation."
-                        : "Verifies Ollama, model storage, integrity, and loopback networking before enabling the MCP entry.");
+                    ? "Open Models & storage to finish setup."
+                    : "Reconnect after the passive safety checks pass.";
                 break;
         }
     }
 
-    private void ConfigurePrimary(string text, Func<Task> command, string help)
+    private async Task ToggleReviewsAsync()
     {
-        _primaryAction.Text = text;
-        _primaryAction.Enabled = !IsOperationInProgress;
-        _primaryActionCommand = command;
-        SetHelp(_primaryAction, help);
-    }
+        var state = _currentState ?? await new StateStore(_paths.StateFile).LoadAsync();
+        if (state is null)
+        {
+            await ShowModelSetupAsync();
+            return;
+        }
 
-    private async Task ShowSetupAsync()
-    {
-        var state = await new StateStore(_paths.StateFile).LoadAsync();
-        using var wizard = new SetupWizardForm(_paths, state?.Preferences.AutoStartOllama);
-        _ = wizard.ShowDialog(this);
-        await RefreshAsync();
-    }
+        if (IntegrationOwnership.Inspect(_paths, state).Status != IntegrationOwnershipStatus.ManagedValid)
+        {
+            await ShowProtectedStatusAsync();
+            return;
+        }
 
-    private Task ShowProtectedStatusAsync()
-    {
-        var listener = OllamaAutoStartManager.GetListenerStatus(11434);
-        var listenerMessage = listener.HasListeners && !listener.LoopbackOnly
-            ? "\n\nSafety warning: Ollama currently has a non-loopback listener. Local review is not safe until that external startup is corrected."
-            : "\n\nThe current listener check found no network-exposed Ollama endpoint.";
-        MessageBox.Show(
-            this,
-            "A local_gpu_reviewer entry already existed before this helper was installed, so it was preserved byte-for-byte. Codex can expose that external reviewer's tools, but this Control Center cannot pause, disable, lock, unload, test, or secure it. The packaged concurrency lock, pressure guard, and rollback controls apply only after a separate explicitly reviewed migration to the packaged integration."
-                + listenerMessage,
-            "External reviewer preserved",
-            MessageBoxButtons.OK,
-            listener.HasListeners && !listener.LoopbackOnly ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
-        return Task.CompletedTask;
+        if (_reviewsToggle.Checked)
+        {
+            await RunControlAsync(() => ShouldEnableCodexEntry(state.Availability, _managedConfigEnabled)
+                ? Control().EnableAsync()
+                : Control().ResumeAsync());
+        }
+        else if (state.Availability == HelperAvailability.Enabled)
+        {
+            await RunControlAsync(() => Control().PauseAsync());
+        }
     }
 
     private async Task ToggleLowImpactAsync()
-    {
-        var state = await new StateStore(_paths.StateFile).LoadAsync();
-        await RunControlAsync(() => Control().SetLowImpactAsync(!(state?.Preferences.LowImpactMode ?? false)));
-    }
+        => await RunControlAsync(() => Control().SetLowImpactAsync(_lowImpactToggle.Checked));
 
     private async Task ToggleKeepWarmAsync()
-    {
-        var state = await new StateStore(_paths.StateFile).LoadAsync();
-        await RunControlAsync(() => Control().SetKeepWarmAsync(!(state?.Preferences.KeepWarm ?? false)));
-    }
+        => await RunControlAsync(() => Control().SetKeepWarmAsync(_keepWarmToggle.Checked));
 
     private async Task ToggleModelRoutingAsync()
     {
-        var state = await new StateStore(_paths.StateFile).LoadAsync();
-        var mode = state?.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-            ? ModelSelectionMode.Pinned
-            : ModelSelectionMode.Automatic;
+        var mode = _automaticRoutingToggle.Checked ? ModelSelectionMode.Automatic : ModelSelectionMode.Pinned;
         await RunControlAsync(() => Control().SetModelSelectionModeAsync(mode));
+    }
+
+    private Task ToggleAdvancedAsync()
+    {
+        _advancedExpanded = !_advancedExpanded;
+        _advancedCard.Visible = _advancedExpanded;
+        _advancedButton.Text = _advancedExpanded ? "Hide advanced" : "Advanced settings";
+        return Task.CompletedTask;
     }
 
     private async Task TestLocalReviewAsync()
@@ -546,100 +650,92 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (state is null || string.IsNullOrWhiteSpace(state.SelectedModel))
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
+        var reviewer = new ReviewerService(_paths, new StateStore(_paths.StateFile), client);
+        var request = new ReviewRequest(
+            "Return exactly THALEN_READY. Do not add explanation.",
+            Focus: "One bounded connectivity check only.",
+            MaximumOutputTokens: 32,
+            BusyBehavior: ReviewBusyBehavior.Skip,
+            TaskKind: ReviewTaskKind.DiffReview,
+            Effort: ReviewEffort.Standard,
+            DesiredContextTokens: 8_192,
+            EstimatedInputCharacters: 120);
+        var plan = await reviewer.PlanAsync(request);
+        if (!plan.Allowed || string.IsNullOrWhiteSpace(plan.Model))
         {
-            MessageBox.Show(this, "Choose and validate a model first.", ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, plan.ErrorMessage ?? plan.Reason ?? "No safe local route is currently available.", "Test reviewer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         if (MessageBox.Show(
             this,
-            $"Run one small local inference with {state.SelectedModel}, verify the response, and confirm zero-keep-alive release afterward?",
-            "Test local review",
+            $"Run one small review with {DisplayModel(plan.Model)} through {plan.Provider}? The model will unload afterward.",
+            "Test reviewer",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question) != DialogResult.Yes)
         {
             return;
         }
 
-        _notice.Text = $"local_gpu_reviewer • Ollama • {state.SelectedModel} • bounded validation";
-        var validation = await new InstallationManager().ValidateSelectedModelAsync(_paths, state);
-        MessageBox.Show(this, validation.Message, validation.Code, MessageBoxButtons.OK,
-            validation.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        await RefreshAsync();
+        _notice.Text = $"local_gpu_reviewer  •  {plan.Provider}  •  {DisplayModel(plan.Model)}  •  bounded test";
+        var result = await reviewer.ReviewAsync(request);
+        var after = await reviewer.GetHealthAsync();
+        if (result.ModelRan && after.ModelLoaded)
+        {
+            _ = await Control().ReleaseGpuAsync();
+            after = await reviewer.GetHealthAsync();
+        }
+        var released = !after.ModelLoaded;
+        var responseVerified = IsReadyResponse(result);
+        var passed = result.ModelRan && responseVerified && released;
+        var message = result.ModelRan && responseVerified
+            ? $"Review succeeded with {DisplayModel(result.Model ?? plan.Model)} through {result.Provider}.\n\nElapsed: {TimeSpan.FromMilliseconds(result.ElapsedMilliseconds):m\\:ss}.  Model released: {(released ? "Yes" : "Needs attention")}."
+            : result.ModelRan
+                ? "The model ran, but its response did not match the expected bounded readiness token."
+                : result.ErrorMessage ?? "The model did not run.";
+        MessageBox.Show(this, message, passed ? "Local review passed" : result.ErrorCode ?? "Local review needs attention", MessageBoxButtons.OK, passed ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
 
-    private async Task ChangeModelAsync()
+    internal static bool IsReadyResponse(ReviewerResult result)
+        => result.ModelRan
+           && string.Equals(result.Findings?.Trim(), "THALEN_READY", StringComparison.Ordinal);
+
+    internal static bool ShouldEnableCodexEntry(HelperAvailability availability, bool managedConfigEnabled)
+        => availability == HelperAvailability.Disabled || !managedConfigEnabled;
+
+    private async Task ShowModelSetupAsync()
     {
         var state = await new StateStore(_paths.StateFile).LoadAsync();
-        if (state is null)
-        {
-            await ShowSetupAsync();
-            return;
-        }
+        using var wizard = new SetupWizardForm(_paths, state?.Preferences.AutoStartOllama, startAtModelSelection: state is not null);
+        _ = wizard.ShowDialog(this);
+    }
 
-        if (IntegrationOwnership.Inspect(_paths, state).Status != IntegrationOwnershipStatus.ManagedValid)
-        {
-            await ShowProtectedStatusAsync();
-            return;
-        }
-
-        if (state.SelectedModel is null)
-        {
-            await ShowSetupAsync();
-            return;
-        }
-
-        var catalog = new ModelCatalogService().LoadBundled();
-        var recommendation = new ModelSelector().Recommend(new HardwareDetector().Detect(), catalog, false);
-        var safeModels = catalog.Models
-            .Where(model => recommendation.Model is not null
-                && model.ParameterBillions <= recommendation.Model.ParameterBillions)
-            .ToArray();
-        using var dialog = new ModelSelectionDialog(safeModels);
-        if (dialog.ShowDialog(this) != DialogResult.OK || dialog.SelectedModel is null)
-        {
-            return;
-        }
-
-        if (MessageBox.Show(
+    private Task ShowProtectedStatusAsync()
+    {
+        var listener = OllamaAutoStartManager.GetListenerStatus(11434);
+        var listenerMessage = listener.HasListeners && !listener.LoopbackOnly
+            ? "\n\nSafety warning: the current provider listener is not loopback-only."
+            : "\n\nThe current listener check found no network-exposed Ollama endpoint.";
+        MessageBox.Show(
             this,
-            $"Use {dialog.SelectedModel.Tag}? It will download only if missing, run one bounded local validation with zero keep-alive, and verify release afterward.",
-            "Confirm model",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question) != DialogResult.Yes)
-        {
-            return;
-        }
-
-        var store = new StateStore(_paths.StateFile);
-        var result = await new ModelChangeService(_paths, store, Control(), new InstallationManager())
-            .ChangeAsync(dialog.SelectedModel.Tag, dialog.AcceptRestrictedLicense);
-        MessageBox.Show(this, result.Message, result.Code, MessageBoxButtons.OK,
-            result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        await RefreshAsync();
+            "A local_gpu_reviewer entry existed before this helper was installed, so it was preserved. Thalen cannot pause, disable, lock, unload, test, or secure that external integration without an explicitly reviewed migration."
+                + listenerMessage,
+            "Existing reviewer preserved",
+            MessageBoxButtons.OK,
+            listener.HasListeners && !listener.LoopbackOnly ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        return Task.CompletedTask;
     }
 
     private async Task MoveModelsAsync()
     {
-        var state = await new StateStore(_paths.StateFile).LoadAsync();
-        if (IntegrationOwnership.Inspect(_paths, state).Status != IntegrationOwnershipStatus.ManagedValid)
-        {
-            await ShowProtectedStatusAsync();
-            return;
-        }
-
         using var dialog = new FolderBrowserDialog
         {
             Description = "Choose an empty folder on fixed local storage. The move is verified and rolls back on failure.",
             UseDescriptionForTitle = true
         };
-        if (dialog.ShowDialog(this) != DialogResult.OK)
-        {
-            return;
-        }
-
-        if (MessageBox.Show(this, "Move and verify all helper-managed Ollama model files now?", "Move model storage", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+        if (dialog.ShowDialog(this) != DialogResult.OK
+            || MessageBox.Show(this, "Move and verify all helper-managed Ollama model files now?", "Move model storage", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
         {
             return;
         }
@@ -647,14 +743,12 @@ public sealed class MainForm : Form
         var store = new StateStore(_paths.StateFile);
         var result = await new ModelsMoveService(_paths, store, Control()).MoveAsync(dialog.SelectedPath);
         MessageBox.Show(this, result.Message, result.Code, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        await RefreshAsync();
     }
 
     private async Task RepairAsync()
     {
         var result = await new InstallationManager().RepairAsync(_paths);
         MessageBox.Show(this, result.Message, result.Code, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        await RefreshAsync();
     }
 
     private async Task ConfigureReliabilityBaselineAsync()
@@ -680,15 +774,9 @@ public sealed class MainForm : Form
             dialog.InstallBaseline,
             dialog.Preview.SourceSha256,
             dialog.Preview.PlannedSha256);
-        MessageBox.Show(
-            this,
-            result.Changed
-                ? "The reviewed managed section was applied and a timestamped backup was retained."
-                : "The file already matches the reviewed choice; nothing changed.",
-            ProductInfo.Name,
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
-        await RefreshAsync();
+        MessageBox.Show(this, result.Changed
+            ? "The reviewed managed section was applied and a timestamped backup was retained."
+            : "The file already matches the reviewed choice; nothing changed.", ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private async Task ExportDiagnosticsAsync()
@@ -712,30 +800,26 @@ public sealed class MainForm : Form
         MessageBox.Show(this, "Redacted diagnostics exported. Prompts, responses, identities, model contents, and credentials were excluded.", ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    private async Task DisconnectAsync()
+    {
+        if (MessageBox.Show(this, "Disconnect the local reviewer from future Codex tasks? Existing models and unrelated Codex settings remain untouched.", "Disconnect from Codex", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        await RunControlAsync(() => Control().DisableAsync(true));
+    }
+
     private Task ShowUninstallGuidanceAsync()
     {
-        MessageBox.Show(
-            this,
-            "Open Windows Settings > Apps > Installed apps > Codex GPU Thalen Helper > Uninstall. Only helper-owned files and marked sections are removed. Pre-existing Ollama, models, Codex authentication, and unrelated configuration are preserved.",
-            "Uninstall help",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
+        MessageBox.Show(this, "Open Windows Settings > Apps > Installed apps > Codex GPU Thalen Helper > Uninstall. Only helper-owned files and managed sections are removed. Existing models, Codex authentication, and unrelated settings are preserved.", "Uninstall help", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return Task.CompletedTask;
     }
 
     private async Task RunControlAsync(Func<Task<ControlResult>> action)
     {
-        try
-        {
-            var result = await action();
-            _notice.Text = result.Message;
-        }
-        catch (Exception exception)
-        {
-            MessageBox.Show(this, exception.Message, ProductInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-
-        await RefreshAsync();
+        var result = await action();
+        _notice.Text = result.Message;
     }
 
     private Button AddActionButton(
@@ -748,17 +832,22 @@ public sealed class MainForm : Form
     {
         var button = UiTheme.Button(text, style);
         SetHelp(button, help);
-        button.Click += async (_, _) => await RunButtonActionAsync(action);
+        button.Click += async (_, _) => await RunActionAsync(action);
         panel.Controls.Add(button);
-        _actionButtons.Add(button);
-        if (managedOnly)
-        {
-            _managedActionButtons.Add(button);
-        }
+        RegisterAction(button, managedOnly);
         return button;
     }
 
-    private async Task RunButtonActionAsync(Func<Task> action)
+    private void RegisterAction(Control control, bool managedOnly)
+    {
+        _actionControls.Add(control);
+        if (managedOnly)
+        {
+            _managedActionControls.Add(control);
+        }
+    }
+
+    private async Task RunActionAsync(Func<Task> action)
     {
         if (Interlocked.CompareExchange(ref _operationInProgress, 1, 0) != 0)
         {
@@ -799,11 +888,11 @@ public sealed class MainForm : Form
 
     private void SetActionControlsEnabled(bool enabled)
     {
-        _primaryAction.Enabled = enabled && _primaryActionCommand is not null;
-        foreach (var actionButton in _actionButtons)
+        foreach (var control in _actionControls)
         {
-            actionButton.Enabled = enabled
-                && (_managedActionsAllowed || !_managedActionButtons.Contains(actionButton));
+            var setupRecoveryAllowed = ReferenceEquals(control, _manageModelsButton) && _currentState is null;
+            control.Enabled = enabled
+                && (_managedActionsAllowed || setupRecoveryAllowed || !_managedActionControls.Contains(control));
         }
     }
 
@@ -813,34 +902,53 @@ public sealed class MainForm : Form
         _toolTip.SetToolTip(control, help);
     }
 
-    private static FlowLayoutPanel ActionColumn()
-        => new()
-        {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Dock = DockStyle.Fill,
-            BackColor = Color.Transparent
-        };
-
     private static FlowLayoutPanel ActionFlow()
         => new()
         {
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = true,
             AutoSize = true,
-            MaximumSize = new Size(490, 0),
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
             BackColor = Color.Transparent,
-            Margin = new Padding(0, 0, 0, 7)
+            Margin = new Padding(0, 0, 0, 6)
         };
 
-    private static void AddDetail(TableLayoutPanel table, int column, int row, string name, Label value)
+    private static Control SettingRow(string title, string description, ToggleSwitch toggle, bool compact = false)
     {
-        var label = UiTheme.Label(name, 8.75F, UiTheme.Muted);
-        label.Padding = new Padding(0, 7, 0, 5);
-        value.Padding = new Padding(0, 7, 8, 5);
-        value.MaximumSize = new Size(300, 42);
-        table.Controls.Add(label, column, row);
-        table.Controls.Add(value, column + 1, row);
+        var row = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Dock = DockStyle.Top,
+            BackColor = Color.Transparent,
+            Padding = compact ? new Padding(0) : new Padding(0, 10, 0, 8),
+            Margin = new Padding(0)
+        };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var copy = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoSize = true,
+            Dock = DockStyle.Top,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0)
+        };
+        var heading = UiTheme.Label(title, compact ? 9F : 10F, UiTheme.Text, FontStyle.Bold);
+        heading.Margin = new Padding(0, 0, 0, 2);
+        var detail = UiTheme.Label(description, compact ? 8F : 8.75F, UiTheme.Muted);
+        detail.Margin = new Padding(0);
+        copy.Controls.Add(heading);
+        copy.Controls.Add(detail);
+        toggle.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+        toggle.Margin = new Padding(18, compact ? 3 : 5, 0, 0);
+        row.Controls.Add(copy, 0, 0);
+        row.Controls.Add(toggle, 1, 0);
+        return row;
     }
 
     private static void AddStackRow(TableLayoutPanel stack, Control control)
@@ -858,9 +966,27 @@ public sealed class MainForm : Form
         badge.Margin = new Padding(0);
     }
 
-    private static Label MetricValue() => UiTheme.Label("—", 14F, UiTheme.Text, FontStyle.Bold);
+    private static string PlanLabel(ReviewerPlanResult? plan, string fallback)
+        => plan?.Allowed == true && !string.IsNullOrWhiteSpace(plan.Model)
+            ? $"{DisplayModel(plan.Model)} ({plan.Provider})"
+            : fallback;
+
+    internal static string DisplayModel(string model)
+    {
+        if (model.Contains("qwythos", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Qwythos 9B";
+        }
+
+        return model
+            .Replace("qwen3-coder:", "Qwen3 Coder ", StringComparison.OrdinalIgnoreCase)
+            .Replace("qwen3:", "Qwen3 ", StringComparison.OrdinalIgnoreCase)
+            .Replace("qwen2.5-coder:", "Qwen2.5 Coder ", StringComparison.OrdinalIgnoreCase)
+            .Replace("b", "B", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Label MetricValue() => UiTheme.Label("—", 13.5F, UiTheme.Text, FontStyle.Bold);
     private static Label MetricMeta() => UiTheme.Label("Checking…", 8.5F, UiTheme.Muted);
-    private static Label DetailValue() => UiTheme.Label("—", 9F, UiTheme.Text);
 
     private static string FriendlyHealth(string code, string? message)
         => code switch

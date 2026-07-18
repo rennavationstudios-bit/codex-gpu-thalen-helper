@@ -41,6 +41,8 @@ internal static class UiTheme
         form.MinimumSize = minimumSize;
         form.StartPosition = FormStartPosition.CenterScreen;
         form.AutoScaleMode = AutoScaleMode.Dpi;
+        form.ShowIcon = true;
+        form.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
     }
 
     public static Label Label(
@@ -91,6 +93,13 @@ internal static class UiTheme
         button.EnabledChanged += (_, _) => ApplyButtonColors(button, style, hovered: false);
         return button;
     }
+
+    public static ToggleSwitch Toggle(string accessibleName)
+        => new()
+        {
+            AccessibleName = accessibleName,
+            AccessibleRole = AccessibleRole.CheckButton
+        };
 
     public static TextBox TextBox(int width = 520)
         => new()
@@ -165,62 +174,41 @@ internal static class UiTheme
 
 internal sealed class RoundedButton : Button
 {
-    private const int LogicalCornerRadius = 10;
+    private const int LogicalCornerRadius = 12;
 
     public RoundedButton()
     {
+        SetStyle(
+            ControlStyles.UserPaint
+            | ControlStyles.AllPaintingInWmPaint
+            | ControlStyles.OptimizedDoubleBuffer
+            | ControlStyles.ResizeRedraw
+            | ControlStyles.SupportsTransparentBackColor,
+            true);
         DoubleBuffered = true;
-    }
-
-    protected override void OnHandleCreated(EventArgs eventArgs)
-    {
-        base.OnHandleCreated(eventArgs);
-        UpdateRoundedRegion();
-    }
-
-    protected override void OnResize(EventArgs eventArgs)
-    {
-        base.OnResize(eventArgs);
-        UpdateRoundedRegion();
-    }
-
-    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
-    {
-        base.OnDpiChangedAfterParent(eventArgs);
-        UpdateRoundedRegion();
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
-        base.OnPaint(eventArgs);
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius());
-        using var border = new Pen(FlatAppearance.BorderColor);
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        using var path = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
+        using var fill = new SolidBrush(BackColor);
+        using var border = new Pen(FlatAppearance.BorderColor, 1F);
+        eventArgs.Graphics.FillPath(fill, path);
         eventArgs.Graphics.DrawPath(border, path);
-    }
 
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
+        var flags = TextFormatFlags.HorizontalCenter
+            | TextFormatFlags.VerticalCenter
+            | TextFormatFlags.SingleLine
+            | TextFormatFlags.EndEllipsis
+            | TextFormatFlags.NoPadding;
+        TextRenderer.DrawText(eventArgs.Graphics, Text, Font, ClientRectangle, ForeColor, flags);
+        if (Focused && ShowFocusCues)
         {
-            Region?.Dispose();
-            Region = null;
+            var focus = Rectangle.Inflate(ClientRectangle, -4, -4);
+            ControlPaint.DrawFocusRectangle(eventArgs.Graphics, focus, ForeColor, Color.Transparent);
         }
-
-        base.Dispose(disposing);
-    }
-
-    private void UpdateRoundedRegion()
-    {
-        if (Width <= 0 || Height <= 0)
-        {
-            return;
-        }
-
-        using var path = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius());
-        var previous = Region;
-        Region = new Region(path);
-        previous?.Dispose();
     }
 
     private int ScaledCornerRadius()
@@ -229,13 +217,13 @@ internal sealed class RoundedButton : Button
 
 internal sealed class DarkToolTip : ToolTip
 {
-    private const int MaximumWidth = 440;
+    private const int MaximumWidth = 320;
     private readonly Font _font = UiTheme.BodyFont(9F);
 
     public DarkToolTip()
     {
-        AutoPopDelay = 12_000;
-        InitialDelay = 450;
+        AutoPopDelay = 6_000;
+        InitialDelay = 550;
         ReshowDelay = 120;
         ShowAlways = true;
         OwnerDraw = true;
@@ -288,37 +276,52 @@ internal class RoundedPanel : Panel
     {
         BackColor = UiTheme.Surface;
         Padding = new Padding(20);
+        SetStyle(
+            ControlStyles.UserPaint
+            | ControlStyles.AllPaintingInWmPaint
+            | ControlStyles.OptimizedDoubleBuffer
+            | ControlStyles.ResizeRedraw
+            | ControlStyles.SupportsTransparentBackColor,
+            true);
         DoubleBuffered = true;
-        Resize += (_, _) => UpdateRegion();
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs eventArgs)
+    {
+        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        eventArgs.Graphics.Clear(Parent?.BackColor ?? UiTheme.Canvas);
+        using var path = RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
+        using var fill = new SolidBrush(BackColor);
+        eventArgs.Graphics.FillPath(fill, path);
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
-        base.OnPaint(eventArgs);
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = RoundedRectangle(ClientRectangle, CornerRadius);
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        using var path = RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
         using var pen = new Pen(OutlineColor);
         eventArgs.Graphics.DrawPath(pen, path);
     }
 
-    private void UpdateRegion()
-    {
-        if (Width <= 0 || Height <= 0)
-        {
-            return;
-        }
+    protected int ScaledCornerRadius()
+        => Math.Max(8, CornerRadius * DeviceDpi / 96);
 
-        using var path = RoundedRectangle(ClientRectangle, CornerRadius);
-        Region?.Dispose();
-        Region = new Region(path);
-    }
-
-    internal static GraphicsPath RoundedRectangle(Rectangle rectangle, int radius)
+    internal static GraphicsPath RoundedRectangle(Rectangle rectangle, int radius, float inset = 0F)
     {
         var path = new GraphicsPath();
-        var diameter = Math.Max(2, radius * 2);
-        var bounds = Rectangle.Inflate(rectangle, -1, -1);
-        var arc = new Rectangle(bounds.Location, new Size(diameter, diameter));
+        var bounds = RectangleF.Inflate(rectangle, -inset, -inset);
+        if (bounds.Width <= 1F || bounds.Height <= 1F)
+        {
+            path.AddRectangle(bounds);
+            return path;
+        }
+
+        var clampedRadius = Math.Max(1F, Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2F));
+        var diameter = clampedRadius * 2F;
+        var arc = new RectangleF(bounds.Location, new SizeF(diameter, diameter));
         path.AddArc(arc, 180, 90);
         arc.X = bounds.Right - diameter;
         path.AddArc(arc, 270, 90);
@@ -342,7 +345,9 @@ internal sealed class GradientPanel : RoundedPanel
     protected override void OnPaintBackground(PaintEventArgs eventArgs)
     {
         eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = RoundedRectangle(ClientRectangle, CornerRadius);
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        eventArgs.Graphics.Clear(Parent?.BackColor ?? UiTheme.Canvas);
+        using var path = RoundedRectangle(ClientRectangle, ScaledCornerRadius(), 1F);
         using var brush = new LinearGradientBrush(ClientRectangle, GradientStart, GradientEnd, 18F);
         eventArgs.Graphics.FillPath(brush, path);
 
@@ -352,5 +357,70 @@ internal sealed class GradientPanel : RoundedPanel
             var y = 30 + index * 22;
             eventArgs.Graphics.DrawLine(glow, Width - 260, y, Width - 40, y + 35);
         }
+    }
+}
+
+internal sealed class ToggleSwitch : CheckBox
+{
+    private const int LogicalWidth = 52;
+    private const int LogicalHeight = 28;
+
+    public ToggleSwitch()
+    {
+        Appearance = Appearance.Button;
+        AutoSize = false;
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        Cursor = Cursors.Hand;
+        TabStop = true;
+        Text = string.Empty;
+        SetStyle(
+            ControlStyles.UserPaint
+            | ControlStyles.AllPaintingInWmPaint
+            | ControlStyles.OptimizedDoubleBuffer
+            | ControlStyles.ResizeRedraw,
+            true);
+        UpdateLogicalSize();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
+    {
+        base.OnDpiChangedAfterParent(eventArgs);
+        UpdateLogicalSize();
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        eventArgs.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        var bounds = RectangleF.Inflate(ClientRectangle, -1F, -1F);
+        var radius = bounds.Height / 2F;
+        using var track = RoundedPanel.RoundedRectangle(Rectangle.Round(bounds), (int)radius, 0.5F);
+        using var trackBrush = new SolidBrush(Enabled
+            ? Checked ? UiTheme.Accent : UiTheme.SurfaceHover
+            : UiTheme.Surface);
+        using var trackPen = new Pen(Enabled && Checked ? UiTheme.AccentHover : UiTheme.Border, 1F);
+        eventArgs.Graphics.FillPath(trackBrush, track);
+        eventArgs.Graphics.DrawPath(trackPen, track);
+
+        var thumbSize = bounds.Height - Scale(6);
+        var thumbX = Checked ? bounds.Right - thumbSize - Scale(3) : bounds.Left + Scale(3);
+        var thumbY = bounds.Top + (bounds.Height - thumbSize) / 2F;
+        using var thumbBrush = new SolidBrush(Enabled ? Color.White : UiTheme.Muted);
+        eventArgs.Graphics.FillEllipse(thumbBrush, thumbX, thumbY, thumbSize, thumbSize);
+
+        if (Focused && ShowFocusCues)
+        {
+            ControlPaint.DrawFocusRectangle(eventArgs.Graphics, Rectangle.Inflate(ClientRectangle, -1, -1));
+        }
+    }
+
+    private int Scale(int value) => Math.Max(1, value * DeviceDpi / 96);
+
+    private void UpdateLogicalSize()
+    {
+        Size = new Size(Scale(LogicalWidth), Scale(LogicalHeight));
+        MinimumSize = Size;
+        MaximumSize = Size;
     }
 }
