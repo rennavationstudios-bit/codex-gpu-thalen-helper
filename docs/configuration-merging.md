@@ -8,6 +8,8 @@ If an unmarked `mcp_servers.local_gpu_reviewer` table already exists, setup trea
 
 Migration is a separate explicit operation. `repair --dry-run --diff-out <private-local-file> --migrate-existing` reads current state and both protected files, writes only the requested private diff, and returns source/planned SHA-256 values for each file. Apply requires `--migrate-existing` plus all four hashes. Both plans are recomputed and validated before either protected file is written. The TOML migration accepts one contiguous root reviewer table and its nested subtables; duplicate, displaced, interleaved, or ambiguous layouts fail without mutation. The original unmarked reviewer is retained in a timestamped backup for surgical uninstall/rollback.
 
+The explicit migration flow also recovers one ownership contradiction: helper state records a prior managed reviewer, but an external rewrite removed both markers and left exactly one structurally valid unmarked reviewer family. Ordinary repair still refuses. Only a fresh private `--migrate-existing` diff followed by the exact four hash values may adopt that current family. The helper never edits ownership state or inserts markers as an unreviewed shortcut.
+
 The managed entry uses the exact installed executable path and includes:
 
 - `required = false`;

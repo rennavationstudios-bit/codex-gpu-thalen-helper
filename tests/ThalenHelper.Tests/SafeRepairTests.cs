@@ -224,6 +224,113 @@ public sealed class SafeRepairTests
     }
 
     [Fact]
+    public async Task ExplicitHashBoundMigrationReconcilesManagedStateWithOneUnmarkedReviewer()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var config = """
+            # personal config
+            model = "cloud"
+
+            [mcp_servers.local_gpu_reviewer]
+            command = "legacy-reviewer.exe"
+            custom_option = "preserve"
+
+            [mcp_servers.local_gpu_reviewer.env]
+            OLLAMA_HOST = "http://127.0.0.1:11434"
+            """;
+        var agents = "# personal instructions\r\n";
+        await File.WriteAllTextAsync(paths.CodexConfigFile, config, new UTF8Encoding(false));
+        await File.WriteAllTextAsync(paths.AgentsOverrideFile, agents, new UTF8Encoding(false));
+        await new StateStore(paths.StateFile).SaveAsync(new InstallationState
+        {
+            ProductVersion = "0.1.0-beta.11",
+            ManagedCodexHome = paths.CodexHome,
+            ExistingIntegrationPreserved = false,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            HardwareTier = HardwareTier.High,
+            Availability = HelperAvailability.Disabled
+        });
+        var configBefore = await File.ReadAllBytesAsync(paths.CodexConfigFile);
+        var agentsBefore = await File.ReadAllBytesAsync(paths.AgentsOverrideFile);
+        var stateBefore = await File.ReadAllBytesAsync(paths.StateFile);
+        var manager = new InstallationManager(
+            hardwareProvider: () => throw new InvalidOperationException("Dry-run must not inspect runtime hardware."));
+        var ordinaryDiff = Path.Combine(temporary.Path, "ordinary-repair.diff");
+
+        var ordinaryFailure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            manager.PreviewRepairAsync(paths, ordinaryDiff));
+
+        Assert.Contains("ownership record", ordinaryFailure.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(ordinaryDiff));
+        Assert.Equal(configBefore, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(agentsBefore, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(paths.StateFile));
+
+        var migrationDiff = Path.Combine(temporary.Path, "explicit-migration.diff");
+        var preview = await manager.PreviewRepairAsync(paths, migrationDiff, migrateExisting: true);
+
+        Assert.True(preview.Success);
+        Assert.Equal("migrated-existing", preview.CodexConfig.Action);
+        Assert.True(File.Exists(migrationDiff));
+        Assert.Equal(configBefore, await File.ReadAllBytesAsync(paths.CodexConfigFile));
+        Assert.Equal(agentsBefore, await File.ReadAllBytesAsync(paths.AgentsOverrideFile));
+        Assert.Equal(stateBefore, await File.ReadAllBytesAsync(paths.StateFile));
+        Assert.Empty(Directory.GetFiles(paths.CodexHome, "*.thalen-helper.*.bak"));
+
+        manager = new InstallationManager(hardwareProvider: ReviewerHardware);
+        var outcome = await manager.RepairAsync(
+            paths,
+            codexStartupValidator: _ => true,
+            binding: new RepairHashBinding(
+                preview.CodexConfig.SourceSha256,
+                preview.CodexConfig.PlannedSha256,
+                preview.AgentsOverride.SourceSha256,
+                preview.AgentsOverride.PlannedSha256),
+            migrateExisting: true);
+
+        Assert.True(outcome.Success);
+        Assert.False(outcome.State.ExistingIntegrationPreserved);
+        Assert.Equal(ProductInfo.Version, outcome.State.ProductVersion);
+        Assert.Contains(IntegrationOwnership.ManagedReviewerSection, outcome.State.ManagedConfigurationSections);
+        Assert.NotNull(outcome.CodexConfig.BackupPath);
+        Assert.NotNull(outcome.AgentsOverride.BackupPath);
+        Assert.Equal(configBefore, await File.ReadAllBytesAsync(outcome.CodexConfig.BackupPath));
+        Assert.Equal(agentsBefore, await File.ReadAllBytesAsync(outcome.AgentsOverride.BackupPath));
+        var migrated = await File.ReadAllTextAsync(paths.CodexConfigFile);
+        var migratedAgents = await File.ReadAllTextAsync(paths.AgentsOverrideFile);
+        Assert.Contains("custom_option = \"preserve\"", migrated, StringComparison.Ordinal);
+        Assert.DoesNotContain("legacy-reviewer.exe", migrated, StringComparison.Ordinal);
+        Assert.Equal(1, Count(migrated, ProductInfo.ManagedConfigStart));
+        Assert.Equal(1, Count(migrated, ProductInfo.ManagedConfigEnd));
+        Assert.StartsWith(agents, migratedAgents, StringComparison.Ordinal);
+        Assert.Equal(1, Count(migratedAgents, ProductInfo.ManagedAgentsStart));
+        Assert.Equal(CodexIntegrationOwnership.ManagedValid, new CodexConfigManager().InspectOwnership(paths));
+        var backupsAfterFirstApply = Directory.GetFiles(paths.CodexHome, "*.thalen-helper.*.bak");
+
+        var second = await manager.PreviewRepairAsync(
+            paths,
+            Path.Combine(temporary.Path, "idempotent-repair.diff"),
+            migrateExisting: true);
+        Assert.False(second.CodexConfig.Changed);
+        Assert.False(second.AgentsOverride.Changed);
+        var secondOutcome = await manager.RepairAsync(
+            paths,
+            codexStartupValidator: _ => true,
+            binding: new RepairHashBinding(
+                second.CodexConfig.SourceSha256,
+                second.CodexConfig.PlannedSha256,
+                second.AgentsOverride.SourceSha256,
+                second.AgentsOverride.PlannedSha256),
+            migrateExisting: true);
+        Assert.False(secondOutcome.CodexConfig.Changed);
+        Assert.False(secondOutcome.AgentsOverride.Changed);
+        Assert.Equal(
+            backupsAfterFirstApply.Order(StringComparer.OrdinalIgnoreCase),
+            Directory.GetFiles(paths.CodexHome, "*.thalen-helper.*.bak").Order(StringComparer.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task DryRunRefusesToOverwriteAnExistingDiffFileWithoutProtectedMutation()
     {
         using var temporary = new TemporaryDirectory();

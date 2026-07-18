@@ -140,7 +140,11 @@ public sealed class InstallationManager
         var state = await store.LoadAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No installation state was found.");
         ValidateCodexHomeRoute(paths, state, "Repair dry-run");
-        ValidateRepairOwnership(paths, state, allowManagedDrift: true);
+        ValidateRepairOwnership(
+            paths,
+            state,
+            allowManagedDrift: true,
+            allowExplicitExternalReconciliation: migrateExisting);
 
         var config = _codexConfig.PreviewInstall(
             paths,
@@ -667,7 +671,11 @@ public sealed class InstallationManager
         }
 
 
-        ValidateRepairOwnership(paths, state, allowManagedDrift: binding is not null);
+        ValidateRepairOwnership(
+            paths,
+            state,
+            allowManagedDrift: binding is not null,
+            allowExplicitExternalReconciliation: migrateExisting && binding is not null);
         var configPreview = _codexConfig.PreviewInstall(
             paths,
             state.Availability == HelperAvailability.Enabled,
@@ -1469,7 +1477,8 @@ public sealed class InstallationManager
     private void ValidateRepairOwnership(
         ProductPaths paths,
         InstallationState state,
-        bool allowManagedDrift)
+        bool allowManagedDrift,
+        bool allowExplicitExternalReconciliation)
     {
         var raw = _codexConfig.InspectOwnership(paths);
         var stateClaimsManaged = IntegrationOwnership.IsManagedByHelper(state);
@@ -1483,6 +1492,12 @@ public sealed class InstallationManager
         {
             if (raw == CodexIntegrationOwnership.ManagedValid
                 || (allowManagedDrift && raw == CodexIntegrationOwnership.ManagedDrift))
+            {
+                return;
+            }
+
+            if (allowExplicitExternalReconciliation
+                && raw == CodexIntegrationOwnership.ExternalUnmarked)
             {
                 return;
             }
