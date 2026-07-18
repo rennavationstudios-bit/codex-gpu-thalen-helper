@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.14 - 2026-07-18
+
+- Added an explicit recovery path for the narrow case where helper state records a prior managed reviewer but the current Codex file contains one structurally valid unmarked reviewer after an external rewrite.
+- Kept ordinary repair fail-closed: reconciliation requires `--migrate-existing`, a private dry-run diff, and all four source/planned SHA-256 values before either protected file can change.
+- Added regression coverage proving ordinary repair still refuses the ownership contradiction, the dry-run is read-only, the hash-bound migration preserves unrelated TOML and instructions, and the result is idempotent.
+
 ## 0.1.0-beta.13 - 2026-07-18
 
 - Restored catalog-audited LM Studio/GGUF routing with a signed current-user CLI binding that proves the exact indexed file before and after each bounded load, generation, and exact-instance unload.
