@@ -199,6 +199,14 @@ thalen-helper ollama verify
 
 See [docs/troubleshooting.md](docs/troubleshooting.md). Uninstall from Windows Settings or run `thalen-helper uninstall --yes`. The uninstaller removes only product-owned MCP/instruction sections, startup entry, state, shortcuts, and binaries. It preserves Codex authentication, unrelated settings, Ollama, and all model data. The legacy `--remove-owned-model` switch is accepted for compatibility but beta.12 does not delete a mutable model tag. See [docs/uninstall.md](docs/uninstall.md).
 
+## Built with Codex and GPT-5.6
+
+This project was developed for OpenAI Build Week 2026. The primary build task was to turn a Windows local-model experiment into a reusable, beginner-friendly product: a dark installer and Control Center, a bounded read-only stdio MCP reviewer, hardware-aware routing, protected and idempotent Codex configuration merging, rollback, documentation, and a public prerelease pipeline.
+
+Codex running GPT-5.6 served as the primary engineering agent and orchestrator. It inspected and modified the .NET, PowerShell, and Inno Setup codebase; created isolated mocked tests and disposable installer lifecycle fixtures; delegated bounded read-only reviews; ran Codex Security and CodeQL checks; performed desktop and browser QA; and drove the protected GitHub release checklist. The human owner set scope and approved external side effects. Codex independently verified subagent and local-model suggestions against source, tests, runtime evidence, and release artifacts before publication.
+
+The optional local GPU reviewer remained advisory throughout: it could review only text explicitly supplied to it and could not independently edit files, run commands, commit, push, deploy, or publish.
+
 ## Build from source
 
 See [docs/building.md](docs/building.md). The short form is:
