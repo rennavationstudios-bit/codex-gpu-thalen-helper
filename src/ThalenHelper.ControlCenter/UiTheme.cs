@@ -70,7 +70,7 @@ internal static class UiTheme
 
     public static Button Button(string text, AppButtonStyle style = AppButtonStyle.Secondary)
     {
-        var button = new Button
+        var button = new RoundedButton
         {
             Text = text,
             AutoSize = true,
@@ -84,7 +84,7 @@ internal static class UiTheme
             UseVisualStyleBackColor = false,
             AccessibleRole = AccessibleRole.PushButton
         };
-        button.FlatAppearance.BorderSize = 1;
+        button.FlatAppearance.BorderSize = 0;
         ApplyButtonColors(button, style, hovered: false);
         button.MouseEnter += (_, _) => ApplyButtonColors(button, style, hovered: true);
         button.MouseLeave += (_, _) => ApplyButtonColors(button, style, hovered: false);
@@ -161,6 +161,70 @@ internal static class UiTheme
             _ => (hovered ? SurfaceHover : SurfaceRaised, Text, hovered ? Color.FromArgb(71, 84, 111) : Border)
         };
     }
+}
+
+internal sealed class RoundedButton : Button
+{
+    private const int LogicalCornerRadius = 10;
+
+    public RoundedButton()
+    {
+        DoubleBuffered = true;
+    }
+
+    protected override void OnHandleCreated(EventArgs eventArgs)
+    {
+        base.OnHandleCreated(eventArgs);
+        UpdateRoundedRegion();
+    }
+
+    protected override void OnResize(EventArgs eventArgs)
+    {
+        base.OnResize(eventArgs);
+        UpdateRoundedRegion();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs eventArgs)
+    {
+        base.OnDpiChangedAfterParent(eventArgs);
+        UpdateRoundedRegion();
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs)
+    {
+        base.OnPaint(eventArgs);
+        eventArgs.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius());
+        using var border = new Pen(FlatAppearance.BorderColor);
+        eventArgs.Graphics.DrawPath(border, path);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            Region?.Dispose();
+            Region = null;
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void UpdateRoundedRegion()
+    {
+        if (Width <= 0 || Height <= 0)
+        {
+            return;
+        }
+
+        using var path = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius());
+        var previous = Region;
+        Region = new Region(path);
+        previous?.Dispose();
+    }
+
+    private int ScaledCornerRadius()
+        => Math.Max(6, LogicalCornerRadius * DeviceDpi / 96);
 }
 
 internal sealed class DarkToolTip : ToolTip

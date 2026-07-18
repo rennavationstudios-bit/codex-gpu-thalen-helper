@@ -39,6 +39,7 @@ Copy-Item -LiteralPath $sourceInstaller -Destination $installer
 Copy-Item -LiteralPath $sourceSigning -Destination (Join-Path $stage 'SIGNING_STATUS.txt')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'README.md') -Destination (Join-Path $stage 'README.md')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'INSTALL-WITH-CODEX.md') -Destination (Join-Path $stage '0 - PASTE THIS INTO CODEX.md')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\friend-install-and-use-guide.md') -Destination (Join-Path $stage 'INSTALL AND USE GUIDE.md')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\CODEX-HANDOFF.md') -Destination (Join-Path $stage '3 - CODEX HANDOFF.md')
 $friendDocs = [ordered]@{
@@ -56,6 +57,9 @@ $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.T
     Set-Content -LiteralPath (Join-Path $stage 'INSTALLER-SHA256.txt') -Encoding ascii
 @(
     "CODEX GPU THALEN HELPER $Version",
+    '',
+    'EASIEST: Open 0 - PASTE THIS INTO CODEX.md and paste its prompt into a new Codex task.',
+    'Codex will verify the official GitHub release, ask before running the unsigned installer, and guide the remaining setup.',
     '',
     '1. Extract this entire ZIP to a normal local folder.',
     "2. Verify $installerName with INSTALLER-SHA256.txt:",
@@ -77,6 +81,7 @@ $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.T
 ) | Set-Content -LiteralPath (Join-Path $stage '1 - START HERE.txt') -Encoding utf8
 
 $expectedRoot = @(
+    '0 - PASTE THIS INTO CODEX.md',
     '1 - START HERE.txt',
     $installerName,
     '3 - CODEX HANDOFF.md',

@@ -6,6 +6,8 @@ All notable changes are documented here.
 
 ## 0.1.0-beta.12 - 2026-07-18
 
+- Rounded every themed setup and Control Center action button with DPI-aware clipping and borders while preserving hover, disabled, focus, keyboard, and accessibility behavior.
+- Added a copy-ready Codex MCP installation handoff that fetches only the exact official GitHub release, verifies checksums and attestations, and retains explicit consent for the unsigned installer and model operations.
 - Removed name-based Ollama unload and deletion calls. Reviews and validation request `keep_alive=0s`, then observe release; pause, disable, release, and uninstall never target a mutable model tag destructively.
 - Closed provider-restart races so setup, repair, move, activation, recovery, and repair rollback never stop a shared Ollama process while changing `OLLAMA_MODELS`.
 - Temporarily disabled LM Studio registration and routing because its loopback inventory does not expose the absolute file behind a loaded model key. Prior validation is invalidated and no inference runs rather than claiming an unprovable file binding.

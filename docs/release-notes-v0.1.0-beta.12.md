@@ -11,6 +11,8 @@ This prerelease makes automatic local-model routing and lifecycle cleanup fail c
 - LM Studio registration and routing are temporarily disabled because the current loopback inventory does not expose the absolute file behind a loaded model key. A registration attempt removes stale approval and returns `LMSTUDIO_EXACT_FILE_BINDING_UNAVAILABLE` without running inference.
 - Helper-managed MCP configuration accepts only the exact product environment allowlist. Unknown environment entries are preserved and automatic repair is refused.
 - Repair precomputes its exact startup/environment write set, never starts or stops Ollama, restores only values it actually wrote, and preserves concurrent edits.
+- The dark first-run setup and Control Center now use rounded, DPI-aware action buttons while retaining hover help, keyboard focus, and accessible push-button semantics.
+- `INSTALL-WITH-CODEX.md` and the friend bundle's root `0 - PASTE THIS INTO CODEX.md` provide a copy-ready beginner path for Codex to fetch the exact official release, verify provenance, run the installer with consent, and complete the packaged handoff checklist.
 
 ## Behavior and boundaries
 

@@ -4,6 +4,8 @@ This bundle is designed for a Windows user who has never configured Codex, Ollam
 
 ## Install
 
+The simplest option is to open `0 - PASTE THIS INTO CODEX.md`, copy its prompt into a new Codex task, and let Codex select the highest valid semantic prerelease from the exact official repository, verify it, install it, and validate setup. Codex must still ask immediately before running the unsigned installer and must ask separately before each model download, load, validation, move, or delete action.
+
 1. Extract the entire ZIP to a normal local folder. Do not run the installer from inside the ZIP preview.
 2. Open `1 - START HERE.txt` and verify the installer SHA-256 as shown there.
 3. Double-click `2 - INSTALL Codex GPU Thalen Helper.exe`.
@@ -18,7 +20,7 @@ This bundle is designed for a Windows user who has never configured Codex, Ollam
 
 ## Let Codex help safely
 
-Drag `3 - CODEX HANDOFF.md` from the extracted friend bundle into a new Codex task. Or, after installation, open **Start > Codex GPU Thalen Helper > Codex setup handoff**, press **Ctrl+A**, then **Ctrl+C**, and paste the whole document into Codex. The handoff tells Codex which packaged files to read, which passive checks to run first, which protected-file and privacy rules to preserve, when consent is required, and exactly what must be verified before setup can be called complete.
+For a complete install, open `0 - PASTE THIS INTO CODEX.md` and paste its copy-ready prompt into a new Codex task. For post-install setup or repair, drag `3 - CODEX HANDOFF.md` into a new task. You can also open **Start > Codex GPU Thalen Helper > Codex setup handoff**, press **Ctrl+A**, then **Ctrl+C**, and paste the whole document into Codex. These handoffs tell Codex which public source and packaged files to trust, which passive checks to run first, which protected-file and privacy rules to preserve, when consent is required, and exactly what must be verified before setup can be called complete.
 
 The handoff is generic and contains no sender-specific paths, settings, model choices, credentials, or private instructions. It directs Codex to discover the current computer's state instead of assuming that another person's configuration applies.
 

@@ -23,7 +23,7 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 
 ## What is included
 
-- A modern dark-mode setup wizard and Control Center with plain-language status, contextual primary actions, and hover help on every action button.
+- A modern dark-mode setup wizard and Control Center with rounded action buttons, plain-language status, contextual primary actions, and hover help on every action button.
 - A self-contained x64 CLI (`thalen-helper.exe`).
 - A self-contained stdio MCP server (`local-gpu-reviewer.exe`).
 - Dynamic Windows, CPU, RAM, GPU, driver, VRAM, and storage detection.
@@ -58,7 +58,7 @@ End users do not need .NET, Node.js, Python, or a development SDK. The release e
 
 ## Install
 
-For the easiest beginner path, download the matching `Codex-GPU-Thalen-Helper-<version>-Friend-Installer.zip`, extract it, and open `1 - START HERE.txt`. Its root contains the clearly named installer, exact checksum command, beginner guide, and a Codex handoff you can drag into a new Codex task.
+For the easiest beginner path, either paste the prompt from [`INSTALL-WITH-CODEX.md`](INSTALL-WITH-CODEX.md) into Codex or download the matching `Codex-GPU-Thalen-Helper-<version>-Friend-Installer.zip`. The extracted friend bundle starts with `0 - PASTE THIS INTO CODEX.md` and `1 - START HERE.txt`; its root also contains the clearly named installer, exact checksum command, beginner guide, and post-install Codex handoff.
 
 1. Download `Codex-GPU-Thalen-Helper-Setup.exe`, `SHA256SUMS.txt`, and the matching GitHub attestation from the release.
 2. Verify the setup checksum:
@@ -75,7 +75,7 @@ For the easiest beginner path, download the matching `Codex-GPU-Thalen-Helper-<v
    - install the helper now and finish model setup later. This safe default downloads and loads nothing.
 6. Review the exact final action. Model storage has a **Browse** button, and the confirmation names the selected model and approximate size. A manifest is treated only as a local hint: the dialog explains that Ollama may repair or download that same model if inventory disagrees. Guided setup never switches to or downloads a different fallback model. The broader reliability baseline is unchecked by default and shows an `AGENTS.override.md` before/after diff before installation.
 7. Restart Codex after successful helper-owned setup so the new stdio MCP server is discovered. If an existing unmarked integration is detected, it is protected and no helper-owned restart is claimed.
-8. To let Codex finish or verify setup, drag `CODEX-HANDOFF.md` into a new Codex task, or open **Start > Codex GPU Thalen Helper > Codex setup handoff** and paste the whole document into Codex.
+8. To let Codex perform the complete beginner workflow, paste `INSTALL-WITH-CODEX.md` into a new task before installation. To finish or verify an existing installation, drag `CODEX-HANDOFF.md` into a new task, or open **Start > Codex GPU Thalen Helper > Codex setup handoff** and paste the whole document into Codex.
 
 ### Unsigned beta warning
 
