@@ -94,7 +94,7 @@ Do not say setup is complete unless the applicable items are verified:
 - protected Codex files were preserved except for the expected marked helper-owned additions;
 - a second run creates no duplicate TOML table or instruction section;
 - the endpoint responds on loopback and no port 11434 listener is exposed beyond loopback;
-- `OLLAMA_MODELS` resolves to the confirmed model store;
+- the managed MCP entry whitelists only `OLLAMA_MODELS`, and its forwarded value resolves to the confirmed model store;
 - the selected model remains listed and its manifest is present in that store;
 - automatic startup is helper-owned and verified, or manual startup is clearly reported as the user's choice;
 - the MCP reviewer appears after a fresh Codex restart when the integration is helper-owned and enabled;

@@ -48,6 +48,7 @@ public sealed class SafeRepairTests
         Assert.Contains("# preserve env comment", migrated, StringComparison.Ordinal);
         Assert.Contains("# preserve command comment", migrated, StringComparison.Ordinal);
         Assert.Contains(paths.McpExecutable.Replace("\\", "\\\\", StringComparison.Ordinal), migrated, StringComparison.Ordinal);
+        Assert.Contains("env_vars = [\"OLLAMA_MODELS\"]", migrated, StringComparison.Ordinal);
         Assert.Equal(1, Count(migrated, ProductInfo.ManagedConfigStart));
         Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
 

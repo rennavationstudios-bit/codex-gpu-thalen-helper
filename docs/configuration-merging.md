@@ -17,7 +17,8 @@ The managed entry uses the exact installed executable path and includes:
 - prompt approval for `local_gpu_review`;
 - no parallel tool calls;
 - bounded startup/tool timeouts;
-- only the product-state directory and loopback Ollama host as explicit environment values.
+- only the product-state directory and loopback Ollama host as literal environment values;
+- exactly one inherited-variable whitelist entry, `OLLAMA_MODELS`, so Codex forwards the helper-verified current-user model-store path to the stdio child.
 
 It never changes the primary model, reasoning effort, authentication, or unrelated MCP servers. After write, TOML is parsed again. A fresh-Codex startup validator can reject the change, which restores the exact original automatically.
 

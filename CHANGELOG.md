@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.11 - 2026-07-17
+
+- Added `OLLAMA_MODELS` to the managed Codex MCP `env_vars` whitelist so restarted stdio reviewer processes receive the helper-verified per-user model-store path.
+- Made beta.10 managed blocks without that whitelist fail ownership inspection as repairable drift, with hash-bound repair and idempotency coverage.
+
 ## 0.1.0-beta.10 - 2026-07-17
 
 - Ollama review and validation now refuse every loaded model that is not bound to the exact current helper ownership marker and requested route, including untracked same-name models and CPU-only foreign models.

@@ -91,6 +91,7 @@ public sealed class ManagedFilesTests
         Assert.Contains("[mcp_servers.local_gpu_reviewer]", content, StringComparison.Ordinal);
         Assert.Contains("enabled = false", content, StringComparison.Ordinal);
         Assert.Contains("default_tools_approval_mode = \"prompt\"", content, StringComparison.Ordinal);
+        Assert.Contains("env_vars = [\"OLLAMA_MODELS\"]", content, StringComparison.Ordinal);
         Assert.Contains("approval_mode = \"auto\"", content, StringComparison.Ordinal);
         Assert.Contains("approval_mode = \"prompt\"", content, StringComparison.Ordinal);
         Assert.Equal(1, Count(content, "[mcp_servers.local_gpu_reviewer]"));
@@ -110,6 +111,63 @@ public sealed class ManagedFilesTests
         Assert.Contains("enabled = true", File.ReadAllText(paths.CodexConfigFile), StringComparison.Ordinal);
         manager.Uninstall(paths, installed.BackupPath);
         Assert.Equal(Encoding.UTF8.GetBytes(original), File.ReadAllBytes(paths.CodexConfigFile));
+    }
+
+    [Fact]
+    public void CodexConfigRepairRestoresTheOllamaModelsEnvironmentWhitelist()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: true);
+        var current = File.ReadAllText(paths.CodexConfigFile);
+        var legacy = current.Replace("env_vars = [\"OLLAMA_MODELS\"]", string.Empty, StringComparison.Ordinal);
+        Assert.NotEqual(current, legacy);
+        File.WriteAllText(paths.CodexConfigFile, legacy, new UTF8Encoding(false));
+
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        var preview = manager.PreviewInstall(paths, enabled: true);
+        Assert.True(preview.Changed);
+        Assert.Contains("env_vars = [\"OLLAMA_MODELS\"]", preview.Diff, StringComparison.Ordinal);
+
+        var repaired = manager.InstallOrRepair(
+            paths,
+            enabled: true,
+            expectedSourceSha256: preview.SourceSha256,
+            expectedPlannedSha256: preview.PlannedSha256);
+        Assert.True(repaired.Changed);
+        Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
+        Assert.Equal(1, Count(File.ReadAllText(paths.CodexConfigFile), "env_vars = [\"OLLAMA_MODELS\"]"));
+        Assert.False(manager.PreviewInstall(paths, enabled: true).Changed);
+    }
+
+    [Theory]
+    [InlineData("env_vars = [\"OTHER\"]")]
+    [InlineData("env_vars = [\"OLLAMA_MODELS\", \"OTHER\"]")]
+    [InlineData("env_vars = [\"OLLAMA_MODELS\", \"OLLAMA_MODELS\"]")]
+    public void CodexConfigRejectsAnIncorrectOllamaModelsEnvironmentWhitelist(string replacement)
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new CodexConfigManager();
+        manager.InstallOrRepair(paths, enabled: true);
+        var current = File.ReadAllText(paths.CodexConfigFile);
+        File.WriteAllText(
+            paths.CodexConfigFile,
+            current.Replace("env_vars = [\"OLLAMA_MODELS\"]", replacement, StringComparison.Ordinal),
+            new UTF8Encoding(false));
+
+        Assert.Equal(CodexIntegrationOwnership.ManagedDrift, manager.InspectOwnership(paths));
+        var preview = manager.PreviewInstall(paths, enabled: true);
+        Assert.True(preview.Changed);
+        var repaired = manager.InstallOrRepair(
+            paths,
+            enabled: true,
+            expectedSourceSha256: preview.SourceSha256,
+            expectedPlannedSha256: preview.PlannedSha256);
+        Assert.True(repaired.Changed);
+        Assert.Equal(CodexIntegrationOwnership.ManagedValid, manager.InspectOwnership(paths));
+        Assert.Equal(1, Count(File.ReadAllText(paths.CodexConfigFile), "env_vars = [\"OLLAMA_MODELS\"]"));
     }
 
     [Fact]

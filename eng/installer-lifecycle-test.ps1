@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$SetupPath,
-    [string]$ExpectedVersion = '0.1.0-beta.10',
+    [string]$ExpectedVersion = '0.1.0-beta.11',
     [string]$PreviousSetupPath
 )
 
@@ -129,6 +129,9 @@ function Assert-SingleManagedSections {
         if ([regex]::Matches($configText, [regex]::Escape($marker)).Count -ne 1) {
             throw "Managed config marker was missing or duplicated: $marker"
         }
+    }
+    if ([regex]::Matches($configText, [regex]::Escape('env_vars = ["OLLAMA_MODELS"]')).Count -ne 1) {
+        throw 'Managed config did not contain exactly one OLLAMA_MODELS MCP environment whitelist.'
     }
     foreach ($marker in @(
         '<!-- BEGIN CODEX GPU THALEN HELPER (managed) -->',
@@ -402,6 +405,7 @@ $configAfterUpgrade = [System.IO.File]::ReadAllText($upgradeConfig)
 $agentsAfterUpgrade = [System.IO.File]::ReadAllText($upgradeAgents)
 if (-not $configAfterUpgrade.Contains('# user comment retained across helper upgrades', [System.StringComparison]::Ordinal) -or
     -not $configAfterUpgrade.Contains('unknown_upgrade_fixture = true', [System.StringComparison]::Ordinal) -or
+    -not $configAfterUpgrade.Contains('env_vars = ["OLLAMA_MODELS"]', [System.StringComparison]::Ordinal) -or
     $configAfterUpgrade.Contains('external-reviewer.exe', [System.StringComparison]::Ordinal) -or
     $configAfterUpgrade.Contains('EXTERNAL_REVIEWER_SENTINEL', [System.StringComparison]::Ordinal)) {
     throw 'The migration did not replace only the external reviewer family while preserving unknown config content.'

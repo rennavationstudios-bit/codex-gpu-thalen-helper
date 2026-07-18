@@ -122,7 +122,7 @@ Setup ranks suitable fixed local NVMe, SSD, unknown fixed media, then HDD with a
 
 The selected path is stored in product state and persisted as the current user's `OLLAMA_MODELS`. If the path changes, setup unloads active Ollama models, safely restarts Ollama once, and refuses to enable the reviewer unless the selected model manifest is present under that exact directory and the loopback API returns the selected tag.
 
-After a fresh Codex restart, the MCP process also requires its inherited `OLLAMA_MODELS` value to match product state. It checks that path and manifest before contacting Ollama and again immediately before generation, alongside the selected tag/digest and listener checks.
+The managed MCP entry explicitly whitelists the current user's `OLLAMA_MODELS` value through Codex's `env_vars` setting. After a fresh Codex restart, the MCP process requires that forwarded value to match product state. It checks the path and manifest before contacting Ollama and again immediately before generation, alongside the selected tag/digest and listener checks.
 
 `thalen-helper models move <directory> --yes` copies every model file, verifies size and SHA-256, activates and runtime-checks the new directory, then removes the old copy. Failure rolls back the path and preserves the source.
 

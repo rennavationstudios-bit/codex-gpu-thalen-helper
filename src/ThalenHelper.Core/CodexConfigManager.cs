@@ -611,6 +611,7 @@ public sealed partial class CodexConfigManager
             enabled = {{enabled.ToString().ToLowerInvariant()}}
             required = false
             enabled_tools = ["local_gpu_health", "local_gpu_plan", "local_gpu_review"]
+            env_vars = ["OLLAMA_MODELS"]
             default_tools_approval_mode = "prompt"
             supports_parallel_tool_calls = false
             startup_timeout_sec = 20
@@ -716,6 +717,7 @@ public sealed partial class CodexConfigManager
             "enabled",
             "enabled_tools",
             "env",
+            "env_vars",
             "required",
             "startup_timeout_sec",
             "supports_parallel_tool_calls",
@@ -741,6 +743,9 @@ public sealed partial class CodexConfigManager
             || !reviewer.TryGetValue("enabled_tools", out var enabledToolsValue)
             || enabledToolsValue is not TomlArray enabledTools
             || !enabledTools.OfType<string>().SequenceEqual(["local_gpu_health", "local_gpu_plan", "local_gpu_review"], StringComparer.Ordinal)
+            || !reviewer.TryGetValue("env_vars", out var environmentVariablesValue)
+            || environmentVariablesValue is not TomlArray environmentVariables
+            || !environmentVariables.OfType<string>().SequenceEqual(["OLLAMA_MODELS"], StringComparer.Ordinal)
             || !reviewer.TryGetValue("env", out var envValue)
             || envValue is not TomlTable env
             || !TryString(env, "OLLAMA_HOST", out var host)
