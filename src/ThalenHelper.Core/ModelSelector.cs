@@ -29,12 +29,7 @@ public sealed class ModelSelector
             .Where(model => model.AutomaticSelectionAllowed && model.CommercialUseAllowed)
             .OrderByDescending(model => model.ParameterBillions)
             .ToArray();
-        var usableGpu = profile.Gpus
-            .Where(gpu => !gpu.IsIntegrated
-                && gpu.DedicatedMemoryBytes > 0
-                && gpu.AccelerationRoute is not AccelerationRoute.None and not AccelerationRoute.Unknown)
-            .OrderByDescending(GetUsableVramGiB)
-            .FirstOrDefault();
+        var usableGpu = GetBestUsableGpu(profile);
 
         if (usableGpu is not null)
         {
@@ -44,12 +39,7 @@ public sealed class ModelSelector
                 usableVramGiB *= 0.8m;
             }
 
-            var totalRamGiB = profile.Memory.TotalBytes / GiB;
-            var availableRamGiB = profile.Memory.AvailableBytes / GiB;
-            var model = candidates.FirstOrDefault(candidate =>
-                candidate.MinimumDedicatedVramGiB <= usableVramGiB
-                && candidate.MinimumSystemRamGiB <= totalRamGiB
-                && Math.Min(candidate.MinimumSystemRamGiB * 0.40m, 16m) <= availableRamGiB);
+            var model = candidates.FirstOrDefault(candidate => FitsGpuAndMemory(profile, candidate, usableVramGiB));
 
             if (model is not null)
             {
@@ -107,6 +97,83 @@ public sealed class ModelSelector
             !allowCpuFallback,
             "No model fits with safe GPU and memory headroom. Install in disabled/no-model mode or explicitly evaluate CPU fallback.",
             ["Shared graphics memory was not counted as dedicated VRAM."]);
+    }
+
+    /// <summary>
+    /// Returns every catalog model that can be presented as a user-selectable choice on
+    /// the current hardware. This is intentionally broader than automatic routing: a
+    /// commercially usable manual candidate may be shown, but it is never downloaded,
+    /// loaded, or selected without a separate explicit confirmation.
+    /// </summary>
+    public IReadOnlyList<ModelCatalogEntry> GetCompatibleModels(
+        HardwareProfile profile,
+        ModelManifest catalog,
+        bool allowCpuFallback = false)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(catalog);
+
+        if (!profile.OperatingSystem.IsSupported
+            || !string.Equals(profile.OperatingSystem.Architecture, "X64", StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+
+        var candidates = catalog.Models
+            .Where(model => model.CommercialUseAllowed)
+            .ToArray();
+        var usableGpu = GetBestUsableGpu(profile);
+        if (usableGpu is not null)
+        {
+            var usableVramGiB = GetUsableVramGiB(usableGpu);
+            if (profile.IsLaptop)
+            {
+                usableVramGiB *= 0.8m;
+            }
+
+            return candidates
+                .Where(model => FitsGpuAndMemory(profile, model, usableVramGiB))
+                .OrderBy(model => model.ParameterBillions)
+                .ThenBy(model => model.Provider, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        if (!allowCpuFallback)
+        {
+            return [];
+        }
+
+        var totalRamGiB = profile.Memory.TotalBytes / GiB;
+        var availableRamGiB = profile.Memory.AvailableBytes / GiB;
+        return candidates
+            .Where(model => model.CpuFallbackReasonable
+                && model.MinimumSystemRamGiB <= totalRamGiB
+                && model.MinimumSystemRamGiB * 0.50m <= availableRamGiB)
+            .OrderBy(model => model.ParameterBillions)
+            .ThenBy(model => model.Provider, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static GpuInfo? GetBestUsableGpu(HardwareProfile profile)
+        => profile.Gpus
+            .Where(gpu => !gpu.IsIntegrated
+                && gpu.DedicatedMemoryBytes > 0
+                && gpu.AccelerationRoute is not AccelerationRoute.None and not AccelerationRoute.Unknown)
+            .OrderByDescending(GetUsableVramGiB)
+            .FirstOrDefault();
+
+    private static bool FitsGpuAndMemory(
+        HardwareProfile profile,
+        ModelCatalogEntry model,
+        decimal usableVramGiB)
+    {
+        var totalRamGiB = profile.Memory.TotalBytes / GiB;
+        var availableRamGiB = profile.Memory.AvailableBytes / GiB;
+        return model.MinimumDedicatedVramGiB <= usableVramGiB
+            && model.MinimumSystemRamGiB <= totalRamGiB
+            && Math.Min(model.MinimumSystemRamGiB * 0.40m, 16m) <= availableRamGiB;
     }
 
     private static decimal GetUsableVramGiB(GpuInfo gpu)

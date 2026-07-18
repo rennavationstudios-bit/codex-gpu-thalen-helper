@@ -234,11 +234,8 @@ public sealed class InstallationManager
         var store = new StateStore(options.Paths.StateFile);
         var priorState = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
         ValidateCodexHomeRoute(options.Paths, priorState, "Configuration");
-        if (options.DeferModelSelection && priorState?.SelectedModel is not null)
-        {
-            throw new InvalidOperationException(
-                "Deferred model bootstrap is only valid before model setup. Use repair for an existing configured installation.");
-        }
+        var preservePriorSelection = options.DeferModelSelection
+            && priorState?.SelectedModel is not null;
 
         InstallContextStore.Save(options.Paths);
 
@@ -250,7 +247,7 @@ public sealed class InstallationManager
         var recommendation = _modelSelector.Recommend(hardware, catalog, options.AllowCpuFallback);
         var selected = preserveExistingIntegration || options.DeferModelSelection
             ? null
-            : SelectRequestedModel(options, catalog, recommendation);
+            : SelectRequestedModel(options, catalog, recommendation, hardware);
         StorageRecommendation? storage = null;
         if (selected is not null)
         {
@@ -261,20 +258,26 @@ public sealed class InstallationManager
             {
                 throw new InvalidOperationException(storage.Explanation);
             }
+
+            storage = ValidateLiveStorageDestination(storage, selected);
         }
 
         var hasAgentsPreviewBinding = options.ExpectedAgentsSourceSha256 is not null;
         var installReliabilityBaseline = hasAgentsPreviewBinding
             ? options.InstallReliabilityBaseline
             : priorState?.ReliabilityBaselineInstalled ?? false;
-        var priorValidatedSelection = priorState?.Availability == HelperAvailability.Enabled
-            && string.Equals(priorState.SelectedModel, selected?.Tag, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(
-                priorState.ModelStorageLocation is null ? null : Path.GetFullPath(priorState.ModelStorageLocation),
-                storage?.ModelDirectory is null ? null : Path.GetFullPath(storage.ModelDirectory),
-                StringComparison.OrdinalIgnoreCase);
+        var priorValidatedSelection = preservePriorSelection
+            ? priorState?.Availability == HelperAvailability.Enabled
+            : priorState?.Availability == HelperAvailability.Enabled
+                && string.Equals(priorState.SelectedModel, selected?.Tag, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(
+                    priorState.ModelStorageLocation is null ? null : Path.GetFullPath(priorState.ModelStorageLocation),
+                    storage?.ModelDirectory is null ? null : Path.GetFullPath(storage.ModelDirectory),
+                    StringComparison.OrdinalIgnoreCase);
         var hardwareTier = preserveExistingIntegration && recommendation.Model is not null
             ? ModelSelector.GetHardwareTier(recommendation.Model)
+            : preservePriorSelection
+                ? priorState!.HardwareTier
             : selected is null
                 ? HardwareTier.NoModel
                 : ModelSelector.GetHardwareTier(selected);
@@ -292,10 +295,17 @@ public sealed class InstallationManager
                 : new Dictionary<string, string?>(priorState.PreviousUserEnvironment, StringComparer.OrdinalIgnoreCase),
             ExistingIntegrationPreserved = priorState?.ExistingIntegrationPreserved ?? false,
             ReliabilityBaselineInstalled = installReliabilityBaseline,
-            SelectedModel = selected?.Tag,
-            SelectedModelDigest = selected?.ExpectedDigest,
+            SelectedModel = preservePriorSelection ? priorState!.SelectedModel : selected?.Tag,
+            SelectedModelProvider = preservePriorSelection
+                ? priorState!.SelectedModelProvider
+                : selected is null
+                    ? ModelProviders.Ollama
+                    : ModelProviders.Normalize(selected.Provider),
+            SelectedModelDigest = preservePriorSelection ? priorState!.SelectedModelDigest : selected?.ExpectedDigest,
+            RegisteredLocalModels = priorState?.RegisteredLocalModels.ToList() ?? [],
             SelectedModelOwnedByHelper = priorValidatedSelection && priorState?.SelectedModelOwnedByHelper == true,
-            ModelStorageLocation = storage?.ModelDirectory,
+            ModelStorageLocation = preservePriorSelection ? priorState!.ModelStorageLocation : storage?.ModelDirectory,
+            ModelStorageTransition = priorState?.ModelStorageTransition,
             ManagedCodexHome = options.Paths.CodexHome,
             HardwareTier = hardwareTier,
             Acceleration = priorValidatedSelection ? priorState?.Acceleration : null,
@@ -430,14 +440,17 @@ public sealed class InstallationManager
         if (selected is not null && state.ModelStorageLocation is not null)
         {
             ThrowIfOwnershipInvalid(options.Paths, state);
-            Directory.CreateDirectory(state.ModelStorageLocation);
-            startup = await _autoStart.ApplyConfigurationAsync(
-                options.Paths,
-                state,
-                currentUserModelDirectory,
-                options.AutoStartOllama,
-                options.RestartOllamaForModelPath,
-                cancellationToken).ConfigureAwait(false);
+            using (var storageLease = ModelStoragePathLease.AcquireOrCreate(state.ModelStorageLocation))
+            {
+                startup = await _autoStart.ApplyConfigurationAsync(
+                    options.Paths,
+                    state,
+                    currentUserModelDirectory,
+                    options.AutoStartOllama,
+                    options.RestartOllamaForModelPath,
+                    cancellationToken).ConfigureAwait(false);
+                storageLease.ValidateUnchanged();
+            }
         }
 
         if (!options.AutoStartOllama)
@@ -1212,15 +1225,21 @@ public sealed class InstallationManager
         try
         {
             ThrowIfOwnershipInvalid(paths, state);
+            using var storageLease = ModelStoragePathLease.AcquireExisting(
+                state.ModelStorageLocation
+                ?? throw new InvalidOperationException("The Ollama model-storage directory is not configured."));
             using var client = _clientFactory();
             ThrowIfOwnershipInvalid(paths, state);
             var existing = await client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            storageLease.ValidateUnchanged();
             ThrowIfOwnershipInvalid(paths, state);
             var alreadyPresent = existing.Any(item => string.Equals(item.Name, model.Tag, StringComparison.OrdinalIgnoreCase));
             if (!alreadyPresent)
             {
                 ThrowIfOwnershipInvalid(paths, state);
+                storageLease.ValidateUnchanged();
                 await client.PullAsync(model.Tag, cancellationToken).ConfigureAwait(false);
+                storageLease.ValidateUnchanged();
                 ThrowIfOwnershipInvalid(paths, state);
                 state.SelectedModelOwnedByHelper = true;
             }
@@ -1233,6 +1252,7 @@ public sealed class InstallationManager
             state.SelectedModelDigest = model.ExpectedDigest;
             ThrowIfOwnershipInvalid(paths, state);
             var inventory = await client.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            storageLease.ValidateUnchanged();
             ThrowIfOwnershipInvalid(paths, state);
             var installed = ModelIntegrity.FindSelectedModel(inventory, model.Tag);
             if (installed is null)
@@ -1256,23 +1276,43 @@ public sealed class InstallationManager
     private static ModelCatalogEntry? SelectRequestedModel(
         InstallationOptions options,
         ModelManifest catalog,
-        ModelRecommendation recommendation)
+        ModelRecommendation recommendation,
+        HardwareProfile hardware)
     {
         if (string.IsNullOrWhiteSpace(options.RequestedModel))
         {
-            return recommendation.Model;
+            if (recommendation.Model is not null
+                && string.Equals(recommendation.Model.Provider, ModelProviders.Ollama, StringComparison.OrdinalIgnoreCase))
+            {
+                return recommendation.Model;
+            }
+
+            return new ModelSelector()
+                .GetCompatibleModels(hardware, catalog, options.AllowCpuFallback)
+                .Where(model => string.Equals(model.Provider, ModelProviders.Ollama, StringComparison.OrdinalIgnoreCase)
+                    && model.AutomaticSelectionAllowed)
+                .OrderByDescending(model => model.ParameterBillions)
+                .FirstOrDefault();
         }
 
         OllamaClient.ValidateModelIdentifier(options.RequestedModel);
         var requested = catalog.Models.FirstOrDefault(model =>
             string.Equals(model.Tag, options.RequestedModel, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("The requested model is not in the audited catalog.");
+        if (!string.Equals(requested.Provider, ModelProviders.Ollama, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "This acquisition path is for Ollama models only. Register an existing LM Studio GGUF through the dedicated LM Studio flow.");
+        }
         if (!requested.CommercialUseAllowed && !options.AcceptRestrictedModelLicense)
         {
             throw new InvalidOperationException("The requested model has a restrictive license and requires explicit acceptance.");
         }
 
-        if (recommendation.Model is null || requested.ParameterBillions > recommendation.Model.ParameterBillions)
+        var compatible = new ModelSelector().GetCompatibleModels(hardware, catalog, options.AllowCpuFallback);
+        if (!compatible.Any(model =>
+                string.Equals(model.Provider, requested.Provider, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(model.Tag, requested.Tag, StringComparison.OrdinalIgnoreCase)))
         {
             throw new InvalidOperationException("The requested model exceeds the conservative hardware recommendation.");
         }
@@ -1329,6 +1369,56 @@ public sealed class InstallationManager
                 ? "The user explicitly selected an attached fixed-volume model directory; it will never be selected automatically."
                 : "The user selected a suitable fixed local model directory.",
             warnings);
+    }
+
+    internal static StorageRecommendation ValidateLiveStorageDestination(
+        StorageRecommendation recommendation,
+        ModelCatalogEntry model,
+        Func<string, DriveInfo>? driveInfoFactory = null,
+        Action<string>? pathValidator = null)
+    {
+        if (recommendation.Volume is null || string.IsNullOrWhiteSpace(recommendation.ModelDirectory))
+        {
+            throw new InvalidOperationException("No model-storage destination is available to validate.");
+        }
+
+        var full = Path.GetFullPath(recommendation.ModelDirectory);
+        (pathValidator ?? ModelStoragePathLease.ValidateCandidate)(full);
+        var root = Path.GetPathRoot(full)
+            ?? throw new InvalidOperationException("The model-storage destination has no local drive root.");
+        var drive = (driveInfoFactory ?? (value => new DriveInfo(value)))(root);
+        if (!drive.IsReady || drive.DriveType != DriveType.Fixed)
+        {
+            throw new InvalidOperationException("The model-storage destination must resolve to a ready fixed local drive.");
+        }
+
+        var required = Math.Max(
+            (ulong)Math.Ceiling(model.MinimumFreeDiskGiB) * 1024UL * 1024UL * 1024UL,
+            (ulong)Math.Ceiling(model.ExpectedDownloadBytes * 2.15m));
+        var liveTotal = checked((ulong)drive.TotalSize);
+        var liveFree = checked((ulong)drive.AvailableFreeSpace);
+        var reserve = recommendation.Volume.IsSystem
+            ? Math.Max(20UL * 1024UL * 1024UL * 1024UL, liveTotal / 10)
+            : 10UL * 1024UL * 1024UL * 1024UL;
+        if (liveFree < required + reserve)
+        {
+            throw new InvalidOperationException(
+                "The selected model-storage destination no longer has enough free space plus the required safety reserve.");
+        }
+
+        return recommendation with
+        {
+            Volume = recommendation.Volume with
+            {
+                RootPath = root,
+                TotalBytes = liveTotal,
+                FreeBytes = liveFree,
+                IsFixed = true
+            },
+            ModelDirectory = full,
+            RequiredBytes = required,
+            RemainingBytes = liveFree - required
+        };
     }
 
     private static string NormalizeDirectory(string path)

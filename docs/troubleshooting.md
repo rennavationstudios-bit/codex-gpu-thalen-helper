@@ -11,13 +11,15 @@ These checks call inventory/runtime endpoints only and do not run model inferenc
 
 ## Setup finished but local review is not ready
 
-The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads and loads no model, so the dashboard reports that model setup is still required. Choose **Choose model** to point to an existing Ollama model folder or explicitly approve a download and bounded validation.
+The guided setup defaults to **Install the helper now and finish model setup later**. That path intentionally downloads, registers, loads, and runs no model, so the dashboard reports that model setup is still required. Open model setup and choose one path: select an Ollama storage folder and existing or hardware-compatible model, register the exact existing catalog-audited Qwythos GGUF already indexed by LM Studio, or keep setup deferred.
+
+Before any Ollama download, verify that the wizard shows the intended destination, current free space, approximate model size, temporary overhead, and required reserve. If a model is unavailable, read its hardware-fit explanation; do not work around the conservative GPU/RAM check by choosing a larger model manually.
 
 Hover over any Control Center button for a plain-language explanation before using it. **Pause** is temporary and keeps the MCP entry configured; **Disable** persistently turns off the helper-owned entry and can require a Codex restart. **Release GPU** requests cancellation and waits for zero-keep-alive release. It never force-unloads a mutable model tag and reports `GPU_RELEASE_UNCONFIRMED` when release cannot be proven.
 
 ## The Control Center says no model is loaded
 
-This is normally the safe idle state. Low-impact mode uses `keep_alive=0`, so Ollama unloads the model after each bounded review. A model being installed or selected is different from a model being loaded in GPU memory. Use the explicitly confirmed **Test local review** action only when you want to run inference; passive status never loads a model.
+This is normally the safe idle state. Low-impact mode requests immediate release, so Ollama unloads the tracked model and LM Studio unloads the exact helper-created instance after each bounded review. A model being installed, registered, or selected is different from a model being loaded in GPU memory. Use the explicitly confirmed **Test local review** action only when you want to run inference; passive status never loads a model.
 
 ## The reviewer is labeled external
 
@@ -41,9 +43,22 @@ Run `thalen-helper ollama autostart` and inspect the returned code. `OLLAMA_PROC
 
 `OLLAMA_RESTART_REQUIRED` during setup, repair, move, activation, or recovery means `OLLAMA_MODELS` must change while a shared Ollama process is still running. The helper deliberately does not stop it or unload its models. Close Ollama normally, confirm no Ollama process remains, and retry the same command; do not kill an active generation.
 
+## LM Studio model is not eligible
+
+LM Studio registration supports only the exact existing Qwythos GGUF listed in the bundled audited catalog. The helper does not download or import GGUF files and does not accept a different file merely because LM Studio can load it.
+
+- `LMSTUDIO_CLI_UNAVAILABLE` or `LMSTUDIO_CLI_UNTRUSTED` means the canonical current-user `lms` CLI is missing or its signature could not be trusted. Repair or update LM Studio from its official source; do not point the helper at another executable.
+- `LMSTUDIO_MODEL_BINDING_MISMATCH`, `MODEL_FILE_CATALOG_BINDING_MISMATCH`, or `MODEL_DIGEST_MISMATCH` means the key, catalog-relative path, size, regular-file identity, or full SHA-256 did not match the audited entry. Leave the file untouched and select the exact catalog file.
+- `LMSTUDIO_MODEL_NAMESPACE_UNSAFE` means the LM Studio models root or its local junction could not be pinned safely. Restore a stable current-user models root and retry; do not replace or retarget it during validation.
+- `FOREIGN_MODEL_LOADED` means LM Studio already has a user-owned model instance. The helper leaves it loaded and does not replace it. Unload it yourself when its work is finished, then retry.
+- `LMSTUDIO_LOADED_FILE_MISMATCH` or `MODEL_RESPONSE_IDENTITY_MISMATCH` means the loaded instance was not proven to be the exact audited file. The helper refuses generation and unloads only an instance it can prove it created.
+- `LMSTUDIO_UNLOAD_UNCONFIRMED` or `GPU_RELEASE_FAILED` means REST inventory and signed `lms ps` did not both prove the exact helper-created instance absent. Keep routing disabled and resolve the LM Studio state before retrying.
+
+A registration created by beta.11 lacks the current signed-CLI and pinned-path evidence. Select the same existing Qwythos file and explicitly revalidate it; do not edit the registration JSON. Do not manually load the same Qwythos key in another LM Studio client while registration or review is running because the REST load boundary has a small documented same-key race window.
+
 ## Network exposure warning
 
-Stop Ollama immediately if `OLLAMA_NETWORK_EXPOSURE` or **EXTERNAL RISK** appears. Remove any wildcard/LAN `OLLAMA_HOST` setting and firewall forwarding, set the user host to `127.0.0.1:11434`, restart Ollama, and rerun verification. The helper remains disabled until loopback-only status passes. An external reviewer remains outside packaged control even after its listener is corrected.
+Stop the affected provider immediately if a network-exposure warning appears. For `OLLAMA_NETWORK_EXPOSURE` or **EXTERNAL RISK**, remove any wildcard/LAN `OLLAMA_HOST` setting and firewall forwarding, set the user host to `127.0.0.1:11434`, restart Ollama, and rerun verification. LM Studio must use its unauthenticated HTTP loopback endpoint at `127.0.0.1:1234`; do not bind it to a LAN address or add port forwarding. The affected route remains disabled until loopback-only status passes. An external reviewer remains outside packaged control even after its listener is corrected.
 
 ## GPU is needed by another application
 
@@ -51,7 +66,7 @@ Use `thalen-helper pause` for immediate call blocking/cancellation, or `thalen-h
 
 ## Model validation fails
 
-Review the specific error code. Update the GPU driver/Ollama, close heavy GPU workloads, verify free disk/RAM, then retest. Guided setup does not switch to a different fallback model; select and confirm another supported model if needed. It never deletes pre-existing models.
+Review the specific error code. Update the GPU driver or chosen provider only through its normal trusted updater, close heavy GPU workloads, verify free disk/RAM, then retest. Guided setup does not switch to a different fallback model; select and confirm another supported route if needed. It never deletes pre-existing Ollama models or LM Studio GGUF files.
 
 ## Safe diagnostics
 

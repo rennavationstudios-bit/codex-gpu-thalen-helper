@@ -99,11 +99,29 @@ public sealed partial class LmStudioClient : IDisposable
         return results;
     }
 
-    public async Task<LmStudioLoadResult> LoadAsync(
+    public Task<LmStudioLoadResult> LoadAsync(
         string modelKey,
+        CancellationToken cancellationToken = default)
+        => throw new LmStudioException(
+            "LMSTUDIO_OWNERSHIP_TRACKER_REQUIRED",
+            "LM Studio refused to load a model without a durable helper ownership tracker.");
+
+    public async Task<LmStudioLoadResult> LoadOwnedAsync(
+        string modelKey,
+        ActiveModelTracker ownershipTracker,
+        Func<string, CancellationToken, Task> verifyUnloadedAsync,
         CancellationToken cancellationToken = default)
     {
         ValidateIdentifier(modelKey, "model key");
+        ArgumentNullException.ThrowIfNull(ownershipTracker);
+        ArgumentNullException.ThrowIfNull(verifyUnloadedAsync);
+        if (ownershipTracker.Inspect().Status != ActiveModelTrackerStatus.Absent)
+        {
+            throw new LmStudioException(
+                "FOREIGN_MODEL_LOADED",
+                "LM Studio refused to load because durable model ownership is already present or cannot be proven absent.");
+        }
+
         var payload = new
         {
             model = modelKey,
@@ -121,6 +139,28 @@ public sealed partial class LmStudioClient : IDisposable
         var root = document.RootElement;
         var instanceId = RequiredString(root, "instance_id", "LM Studio omitted the loaded instance identity.");
         ValidateIdentifier(instanceId, "instance identity");
+
+        try
+        {
+            // Persist the exact helper-created instance before inspecting any echoed
+            // model identity or load configuration. Any later failure can therefore
+            // be recovered after cancellation, process exit, or Codex restart.
+            ownershipTracker.Set(new ActiveModelReference(
+                ModelProviders.LmStudio,
+                modelKey,
+                instanceId));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            await CleanupUntrackedLoadAsync(
+                modelKey,
+                instanceId,
+                ownershipTracker,
+                verifyUnloadedAsync).ConfigureAwait(false);
+            throw new LmStudioException(
+                "LMSTUDIO_OWNERSHIP_TRACKER_WRITE_FAILED",
+                "LM Studio loaded a model, but durable helper ownership could not be recorded. The exact instance was unloaded before returning.");
+        }
 
         JsonElement? effectiveConfig = null;
         try
@@ -157,21 +197,11 @@ public sealed partial class LmStudioClient : IDisposable
         }
         catch
         {
-            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            try
-            {
-                using var ignored = await SendJsonAsync(
-                    HttpMethod.Post,
-                    "/api/v1/models/unload",
-                    new { instance_id = instanceId },
-                    TimeSpan.FromSeconds(15),
-                    cleanup.Token).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Preserve the primary validation failure.
-            }
-
+            await CleanupOwnedLoadFailureAsync(
+                modelKey,
+                instanceId,
+                ownershipTracker,
+                verifyUnloadedAsync).ConfigureAwait(false);
             throw;
         }
 
@@ -180,6 +210,115 @@ public sealed partial class LmStudioClient : IDisposable
             modelKey,
             instanceId,
             effectiveConfig);
+    }
+
+    private async Task CleanupUntrackedLoadAsync(
+        string modelKey,
+        string instanceId,
+        ActiveModelTracker ownershipTracker,
+        Func<string, CancellationToken, Task> verifyUnloadedAsync)
+    {
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        try
+        {
+            await UnloadAndWaitAsync(
+                modelKey,
+                instanceId,
+                TimeSpan.FromSeconds(30),
+                cleanup.Token).ConfigureAwait(false);
+            await verifyUnloadedAsync(instanceId, cleanup.Token).ConfigureAwait(false);
+            if (ownershipTracker.Inspect().Status != ActiveModelTrackerStatus.Absent)
+            {
+                throw new LmStudioException(
+                    "GPU_RELEASE_FAILED",
+                    "LM Studio unloaded the helper-created instance, but ownership state is not safely absent.",
+                    retryable: true);
+            }
+        }
+        catch (Exception exception) when (exception is LmStudioException
+            or OperationCanceledException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            // A failed initial tracker write can leave a usable temporary file behind.
+            // Retry the atomic promotion so recovery has the exact instance identity.
+            try
+            {
+                ownershipTracker.Set(new ActiveModelReference(
+                    ModelProviders.LmStudio,
+                    modelKey,
+                    instanceId));
+            }
+            catch (Exception trackerException) when (trackerException is IOException or UnauthorizedAccessException)
+            {
+                // The release failure remains the primary safety result. The caller is
+                // told that manual recovery is required even if storage also failed.
+            }
+
+            throw new LmStudioException(
+                "GPU_RELEASE_FAILED",
+                "LM Studio loaded a model, durable ownership could not be recorded, and exact unload could not be proven. Stop LM Studio before retrying.",
+                retryable: true);
+        }
+    }
+
+    private async Task CleanupOwnedLoadFailureAsync(
+        string modelKey,
+        string instanceId,
+        ActiveModelTracker ownershipTracker,
+        Func<string, CancellationToken, Task> verifyUnloadedAsync)
+    {
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        try
+        {
+            await UnloadAndWaitAsync(
+                modelKey,
+                instanceId,
+                TimeSpan.FromSeconds(30),
+                cleanup.Token).ConfigureAwait(false);
+            await verifyUnloadedAsync(instanceId, cleanup.Token).ConfigureAwait(false);
+            ClearExactOwnedReference(ownershipTracker, modelKey, instanceId);
+        }
+        catch (Exception exception) when (exception is LmStudioException
+            or OperationCanceledException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            throw new LmStudioException(
+                "GPU_RELEASE_FAILED",
+                "LM Studio load validation failed and exact unload could not be proven. Durable recovery evidence was retained.",
+                retryable: true);
+        }
+    }
+
+    internal static void ClearExactOwnedReference(
+        ActiveModelTracker ownershipTracker,
+        string modelKey,
+        string instanceId)
+    {
+        ArgumentNullException.ThrowIfNull(ownershipTracker);
+        var inspection = ownershipTracker.Inspect();
+        var tracked = inspection.Reference;
+        if (inspection.Status != ActiveModelTrackerStatus.Valid
+            || tracked is null
+            || !string.Equals(tracked.Provider, ModelProviders.LmStudio, StringComparison.Ordinal)
+            || !string.Equals(tracked.Model, modelKey, StringComparison.Ordinal)
+            || !string.Equals(tracked.InstanceId, instanceId, StringComparison.Ordinal))
+        {
+            throw new LmStudioException(
+                "GPU_RELEASE_FAILED",
+                "The helper-created LM Studio instance was unloaded, but its exact durable ownership record could not be proven.",
+                retryable: true);
+        }
+
+        ownershipTracker.Clear(modelKey);
+        if (ownershipTracker.Inspect().Status != ActiveModelTrackerStatus.Absent)
+        {
+            throw new LmStudioException(
+                "GPU_RELEASE_FAILED",
+                "The helper-created LM Studio instance was unloaded, but its durable ownership record could not be cleared.",
+                retryable: true);
+        }
     }
 
     public async Task<LmStudioGenerationResult> GenerateAsync(
@@ -396,8 +535,7 @@ public sealed partial class LmStudioClient : IDisposable
         {
             var models = await GetModelsAsync(cancellationToken).ConfigureAwait(false);
             var stillLoaded = models.Any(model =>
-                string.Equals(model.Key, modelKey, StringComparison.Ordinal)
-                && model.LoadedInstances.Any(instance =>
+                model.LoadedInstances.Any(instance =>
                     string.Equals(instance.Id, instanceId, StringComparison.Ordinal)));
             if (!stillLoaded)
             {

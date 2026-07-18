@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-beta.12"
+  #define MyAppVersion "0.1.0-beta.13"
 #endif
 
 #ifndef MyAppPeVersion
-  #define MyAppPeVersion "0.1.0.12"
+  #define MyAppPeVersion "0.1.0.13"
 #endif
 
 #define MyAppName "Codex GPU Thalen Helper"
@@ -294,8 +294,8 @@ begin
     'It never downloads or loads a model during installation.';
   WizardForm.FinishedHeadingLabel.Caption := 'Your protected base setup is ready';
   WizardForm.FinishedLabel.Caption :=
-    'The Control Center can now guide you to an existing Ollama model or ask before downloading one. ' +
-    'Existing unowned local_gpu_reviewer integrations are preserved instead of replaced.';
+    'The guided first-run screen now checks this PC, asks where Ollama models should be stored, shows real free space, and offers only compatible model choices. ' +
+    'It can also register an existing catalog-audited LM Studio GGUF. Every model action requires a separate confirmation, and existing unowned local_gpu_reviewer integrations are preserved instead of replaced.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

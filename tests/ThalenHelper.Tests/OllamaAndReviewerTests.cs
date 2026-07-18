@@ -905,7 +905,7 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
-    public async Task AutomaticLmStudioPlanFailsClosedUntilLoadedKeyCanBindToExactFile()
+    public async Task AutomaticLmStudioPlanFailsClosedForLegacyRegistrationWithoutCurrentFileIdentity()
     {
         using var temporary = new TemporaryDirectory();
         var paths = temporary.CreatePaths();
@@ -927,7 +927,7 @@ public sealed class OllamaAndReviewerTests
             DateTimeOffset.UtcNow,
             modelProof.Length,
             modelProof.LastWriteTimeUtc,
-            modelProof.FileIdentity);
+            FileIdentity: null);
         await store.SaveAsync(new InstallationState
         {
             SelectedModel = "qwen3:14b",

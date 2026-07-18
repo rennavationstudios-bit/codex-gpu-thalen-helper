@@ -368,8 +368,8 @@ public sealed class TaskAwareModelRouterTests
 
     [Theory]
     [InlineData(ReviewEffort.Quick, false, "Ollama", "qwen3:8b")]
-    [InlineData(ReviewEffort.Standard, false, "Ollama", "qwen3:14b")]
-    [InlineData(ReviewEffort.Deep, false, "Ollama", "qwen3-coder:30b")]
+    [InlineData(ReviewEffort.Standard, false, "LM Studio", "qwythos-9b-claude-mythos-5-1m")]
+    [InlineData(ReviewEffort.Deep, false, "LM Studio", "qwythos-9b-claude-mythos-5-1m")]
     [InlineData(ReviewEffort.Deep, true, "Ollama", "qwen3:8b")]
     public void AutomaticRoutingUsesExplicitCrossProviderPolicy(
         ReviewEffort effort,
@@ -397,7 +397,7 @@ public sealed class TaskAwareModelRouterTests
     }
 
     [Fact]
-    public void PinnedLmStudioRouteFailsClosedUntilExactLoadedFileBindingExists()
+    public void PinnedLmStudioRouteIsEligibleAfterExactBindingSupportAndValidation()
     {
         var model = Catalog().Models.Single(item => item.Provider == ModelProviders.LmStudio);
         var installed = new OllamaModelInfo(
@@ -425,9 +425,9 @@ public sealed class TaskAwareModelRouterTests
             [installed],
             ValidationRegistry([installed]));
 
-        Assert.False(route.Allowed);
+        Assert.True(route.Allowed, route.Reason);
         Assert.Equal(ModelProviders.LmStudio, route.Provider);
-        Assert.Contains("disabled until the runtime can prove", route.Reason, StringComparison.Ordinal);
+        Assert.Equal(model.Tag, route.Model);
     }
 
     [Fact]
