@@ -145,11 +145,11 @@ internal sealed class ModelStoragePathLease : IDisposable
 
     private static PinnedDirectory OpenOrdinaryDirectory(string path)
     {
+        // Omitting delete sharing pins this namespace component against
+        // deletion, rename, and replacement for the lifetime of the lease.
         var handle = CreateFileW(
             path,
             GenericRead,
-            // Omitting delete sharing pins this namespace component against
-            // deletion, rename, and replacement for the lifetime of the lease.
             FileShareRead | FileShareWrite,
             IntPtr.Zero,
             OpenExisting,
