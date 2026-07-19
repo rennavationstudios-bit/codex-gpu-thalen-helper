@@ -42,6 +42,19 @@ public sealed class ControlCenterUiTests
     }
 
     [Fact]
+    public void RoundedButtonsRenderLiteralAmpersandsInsteadOfMnemonicPrefixes()
+    {
+        RunSta(() =>
+        {
+            using var button = UiTheme.Button("Models & storage");
+
+            Assert.Equal("Models & storage", button.Text);
+            Assert.False(button.UseMnemonic);
+            Assert.True(RoundedButton.TextDrawingFlags.HasFlag(TextFormatFlags.NoPrefix));
+        });
+    }
+
+    [Fact]
     public void ToggleSwitchPublishesOneCheckedChangeAndAccessibleState()
     {
         RunSta(() =>

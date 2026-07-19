@@ -178,6 +178,12 @@ internal static class UiTheme
 internal sealed class RoundedButton : Button
 {
     private const int LogicalCornerRadius = 12;
+    internal const TextFormatFlags TextDrawingFlags = TextFormatFlags.HorizontalCenter
+        | TextFormatFlags.VerticalCenter
+        | TextFormatFlags.SingleLine
+        | TextFormatFlags.EndEllipsis
+        | TextFormatFlags.NoPadding
+        | TextFormatFlags.NoPrefix;
 
     public RoundedButton()
     {
@@ -201,12 +207,7 @@ internal sealed class RoundedButton : Button
         eventArgs.Graphics.FillPath(fill, path);
         eventArgs.Graphics.DrawPath(border, path);
 
-        var flags = TextFormatFlags.HorizontalCenter
-            | TextFormatFlags.VerticalCenter
-            | TextFormatFlags.SingleLine
-            | TextFormatFlags.EndEllipsis
-            | TextFormatFlags.NoPadding;
-        TextRenderer.DrawText(eventArgs.Graphics, Text, Font, ClientRectangle, ForeColor, flags);
+        TextRenderer.DrawText(eventArgs.Graphics, Text, Font, ClientRectangle, ForeColor, TextDrawingFlags);
         if (Focused && ShowFocusCues)
         {
             var focus = Rectangle.Inflate(ClientRectangle, -4, -4);
