@@ -19,7 +19,7 @@ Installation never downloads, registers, loads, or runs a model without a separa
 
 Optional Ollama startup is per-user after sign-in. The managed launcher uses the existing loopback endpoint and process inventory to avoid duplicate processes; if the user declines startup, Ollama reviews require manual startup after each sign-in. LM Studio and its loopback server are not started or reconfigured by the helper.
 
-The beta.18 release audit builds the self-contained x64 binaries and installer, runs all 358 isolated automated tests, audits NuGet vulnerabilities, scans tracked release inputs for secrets and personal paths, compiles the installer, generates the SPDX SBOM and friend bundle, and exercises the installer lifecycle against temporary Codex homes and mocked provider boundaries. Routine tests download no model and run no GPU inference.
+The beta.18 release audit builds the self-contained x64 binaries and installer, runs all 358 isolated automated tests, audits NuGet vulnerabilities, scans tracked release inputs for secrets and personal paths, compiles the installer, and generates the SPDX SBOM and friend bundle. The dedicated CI lifecycle job (or an explicit `release-audit.ps1 -RunInstallerLifecycle` run) exercises installer upgrades against temporary Codex homes and mocked provider boundaries. Routine tests download no model and run no GPU inference.
 
 All prior loopback enforcement, no-automatic-download behavior, foreign-model preservation, single-review concurrency, pressure refusal, exact-file LM Studio registration, helper-owned unloading, backups, hash-bound protected-file repair, idempotent updates, and rollback remain in force.
 
