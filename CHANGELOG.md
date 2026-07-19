@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.18 - 2026-07-18
+
+- Render literal ampersands in every owner-drawn rounded button instead of treating them as hidden WinForms mnemonic prefixes.
+- Added a regression test that binds the shared custom painter to `TextFormatFlags.NoPrefix`, preserving labels such as **Models & storage** in screenshots, accessibility review, and normal use.
+
 ## 0.1.0-beta.17 - 2026-07-18
 
 - Matched the desktop Control Center to the compact public-site card: one local-review switch, compact task-aware routes, two primary actions, and one GPU status strip. A separate Deep row appears only when it differs from Normal.
