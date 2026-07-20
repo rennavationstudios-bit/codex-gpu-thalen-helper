@@ -39,7 +39,7 @@ public static class LocalGpuReviewerTools
         Idempotent = true,
         OpenWorld = false,
         UseStructuredContent = true)]
-    [Description("Passively reports the local reviewer, selected model, Ollama endpoint, and load state. This tool never runs inference.")]
+    [Description("Passively reports the local reviewer, task-aware provider/model pool, eligible loopback endpoints, and load state. This tool never runs inference; local_gpu_plan remains authoritative for a specific task route.")]
     public static async Task<ReviewerHealthResult> HealthAsync(
         IServiceProvider services,
         CancellationToken cancellationToken)

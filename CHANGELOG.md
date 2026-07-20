@@ -8,6 +8,7 @@ All notable changes are documented here.
 - Automatic routing now uses existing catalog task guidance and soft task/effort hardware-tier floors while retaining exact model validation, hardware/resource guards, pinned behavior, LM Studio preference, and the smallest-safe-model rule during GPU-intensive work.
 - Added task-specific local-review rubrics, additive `structuredFindings`, and `structuredFindingsStatus` so valid empty, partially rejected, malformed, and not-run results remain distinguishable while preserving the original raw `findings` response.
 - Added regression coverage for deterministic task precedence, task-suitable model selection, safe fallback warnings, structured parsing bounds, malformed-output compatibility, and the public MCP schema.
+- Clarified automatic health output as a task-aware provider/model pool with eligible loopback endpoints; task planning remains the authoritative per-request route.
 
 ## 0.1.0-beta.18 - 2026-07-18
 

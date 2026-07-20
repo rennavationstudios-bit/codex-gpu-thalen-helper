@@ -94,6 +94,9 @@ public sealed class LmStudioReviewerLifecycleTests
         Assert.True(health.ModelAvailable);
         Assert.False(health.ModelLoaded);
         Assert.Equal("Automatic (LM Studio)", health.Provider);
+        Assert.Equal("Task-aware pool", health.Model);
+        Assert.Equal([ModelProviders.LmStudio], health.EligibleProviders);
+        Assert.Equal(["http://127.0.0.1:1234"], health.Endpoints);
         Assert.Equal("http://127.0.0.1:1234", health.Endpoint);
         Assert.True(plan.Allowed, plan.ErrorMessage);
         Assert.Equal(ModelProviders.LmStudio, plan.Provider);

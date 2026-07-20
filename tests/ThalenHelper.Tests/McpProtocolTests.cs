@@ -79,6 +79,10 @@ public sealed class McpProtocolTests
         Assert.Contains("\"findings\"", reviewResultSchema, StringComparison.Ordinal);
         Assert.Contains("\"structuredFindings\"", reviewResultSchema, StringComparison.Ordinal);
         Assert.Contains("\"structuredFindingsStatus\"", reviewResultSchema, StringComparison.Ordinal);
+        var healthResultSchema = JsonSerializer.Serialize(
+            tools.Single(tool => tool.Name == "local_gpu_health").ReturnJsonSchema);
+        Assert.Contains("\"eligibleProviders\"", healthResultSchema, StringComparison.Ordinal);
+        Assert.Contains("\"endpoints\"", healthResultSchema, StringComparison.Ordinal);
 
         var health = await client.CallToolAsync("local_gpu_health", new Dictionary<string, object?>());
         var healthJson = JsonSerializer.Serialize(health.StructuredContent);

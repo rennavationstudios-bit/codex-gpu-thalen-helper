@@ -406,6 +406,8 @@ public sealed record ReviewerHealthResult
     public string IntegrationType { get; init; } = "read-only local stdio MCP reviewer";
     public string Provider { get; init; } = "Ollama";
     public string? Model { get; init; }
+    public IReadOnlyList<string> EligibleProviders { get; init; } = [];
+    public IReadOnlyList<string> Endpoints { get; init; } = [];
     public string? HardwareTier { get; init; }
     public ModelSelectionMode SelectionMode { get; init; }
     public int EligibleInstalledModels { get; init; }

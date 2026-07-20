@@ -42,7 +42,7 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 
 The MCP server exposes only:
 
-- `local_gpu_health` — passive; never runs inference.
+- `local_gpu_health` — passive; in automatic mode it reports the task-aware provider/model pool and eligible loopback endpoints instead of presenting one stored model as the active route. It never runs inference; `local_gpu_plan` selects the route for a specific task.
 - `local_gpu_plan` — passive task-aware model/context selection; it never downloads, loads, or runs a model.
 - `local_gpu_review` — one bounded advisory generation using explicitly supplied text. It preserves the model's original `findings` text, adds shape-validated `structuredFindings`, and reports `structuredFindingsStatus` as `parsed`, `parsed_with_ignored_items`, `malformed`, or `not_run`.
 

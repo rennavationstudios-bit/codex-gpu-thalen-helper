@@ -127,7 +127,8 @@ public sealed class ReviewerService
             var running = ollamaConfigured
                 ? await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false)
                 : [];
-            var lmRuntimeRequired = !ollamaConfigured
+            var lmRuntimeRequired = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                || !ollamaConfigured
                 || (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
                     && string.Equals(
                         ModelProviders.Normalize(state.SelectedModelProvider),
@@ -153,6 +154,19 @@ public sealed class ReviewerService
                 models,
                 validations);
             var eligibleInstalledModels = eligibleModelTags.Count;
+            var eligibleProviders = models
+                .Where(model => eligibleModelTags.Any(tag => ModelIntegrity.NamesMatch(model.Name, tag)))
+                .Select(model => ModelProviders.Normalize(model.Provider))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(provider => string.Equals(provider, ModelProviders.Ollama, StringComparison.Ordinal) ? 0 : 1)
+                .ThenBy(provider => provider, StringComparer.Ordinal)
+                .ToArray();
+            var eligibleEndpoints = eligibleProviders
+                .Select(provider => string.Equals(provider, ModelProviders.Ollama, StringComparison.Ordinal)
+                    ? _ollama.BaseUri.ToString().TrimEnd('/')
+                    : (_lmStudio?.BaseUri.ToString().TrimEnd('/') ?? "http://127.0.0.1:1234"))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
             var available = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
                 ? eligibleInstalledModels > 0
                 : selectedModel is not null;
@@ -190,9 +204,15 @@ public sealed class ReviewerService
             return new ReviewerHealthResult
             {
                 Provider = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                    ? (ollamaConfigured ? "Automatic (Ollama)" : "Automatic (LM Studio)")
+                    ? eligibleProviders.Length > 0
+                        ? $"Automatic ({string.Join(" + ", eligibleProviders)})"
+                        : "Automatic (no eligible providers)"
                     : selectedProvider,
-                Model = selected,
+                Model = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
+                    ? "Task-aware pool"
+                    : selected,
+                EligibleProviders = eligibleProviders,
+                Endpoints = eligibleEndpoints,
                 HardwareTier = state.HardwareTier.ToString().ToLowerInvariant(),
                 SelectionMode = state.Preferences.ModelSelectionMode,
                 EligibleInstalledModels = eligibleInstalledModels,
@@ -202,9 +222,10 @@ public sealed class ReviewerService
                 ModelRan = false,
                 Paused = state.Availability == HelperAvailability.Paused,
                 Availability = state.Availability,
-                Endpoint = ollamaConfigured
-                    ? _ollama.BaseUri.ToString().TrimEnd('/')
-                    : (_lmStudio?.BaseUri.ToString().TrimEnd('/') ?? "http://127.0.0.1:1234"),
+                Endpoint = eligibleEndpoints.FirstOrDefault()
+                    ?? (ollamaConfigured
+                        ? _ollama.BaseUri.ToString().TrimEnd('/')
+                        : (_lmStudio?.BaseUri.ToString().TrimEnd('/') ?? "http://127.0.0.1:1234")),
                 Acceleration = runningModel is not null
                     ? new AccelerationResult(
                         runningModel.SizeVramBytes > 0 ? "GPU or partial GPU (verify with ollama ps)" : "CPU or unknown",
