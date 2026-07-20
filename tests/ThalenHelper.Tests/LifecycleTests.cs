@@ -731,6 +731,10 @@ public sealed class LifecycleTests
         OllamaClient ClientFactory()
             => new(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
         var control = new ControlService(paths, store, ClientFactory);
+        using var displayOnlyActivity = new ReviewActivityTracker(paths.StateDirectory).TryBegin(
+            ModelProviders.Ollama,
+            "qwen3:14b",
+            ReviewActivityPhase.Reviewing);
 
         try
         {
@@ -739,6 +743,7 @@ public sealed class LifecycleTests
             Assert.Equal("DISABLED", (await control.DisableAsync(disableCodexEntry: false)).Code);
             Assert.Empty(handler.Requests);
             Assert.Equal(ActiveModelTrackerStatus.Absent, new ActiveModelTracker(paths.StateDirectory).Inspect().Status);
+            Assert.NotNull(new ReviewActivityTracker(paths.StateDirectory).ReadCurrent());
         }
         finally
         {
@@ -958,6 +963,12 @@ public sealed class LifecycleTests
         };
         var store = new StateStore(paths.StateFile);
         await store.SaveAsync(state);
+        var reviewActivity = new ReviewActivityTracker(paths.StateDirectory);
+        using var activity = reviewActivity.TryBegin(
+            ModelProviders.Ollama,
+            "qwen2.5-coder:1.5b",
+            ReviewActivityPhase.Reviewing);
+        Assert.True(File.Exists(reviewActivity.Path));
         var platform = new FakeStartupPlatform { RunEntry = "owned" };
         platform.UserEnvironment["OLLAMA_MODELS"] = state.ModelStorageLocation;
         platform.UserEnvironment["OLLAMA_HOST"] = "127.0.0.1:11434";
@@ -975,6 +986,7 @@ public sealed class LifecycleTests
         Assert.Equal("prior-models", platform.UserEnvironment["OLLAMA_MODELS"]);
         Assert.Null(platform.UserEnvironment["OLLAMA_HOST"]);
         Assert.False(File.Exists(paths.StateFile));
+        Assert.False(File.Exists(reviewActivity.Path));
         var report = await File.ReadAllTextAsync(result.ReportPath);
         Assert.DoesNotContain(temporary.Path, report, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("all model data were preserved", report, StringComparison.OrdinalIgnoreCase);
@@ -1030,6 +1042,28 @@ public sealed class LifecycleTests
         Assert.False(result.ModelRemoved);
         Assert.DoesNotContain(handler.Requests, request => request.Path is "/api/tags" or "/api/delete");
         Assert.Contains("model data was preserved", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task UninstallReportsUseDistinctCollisionSafePaths()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var manager = new UninstallManager(paths, new StateStore(paths.StateFile));
+
+        var first = await manager.UninstallAsync(removeOwnedModel: false);
+        var second = await manager.UninstallAsync(removeOwnedModel: false);
+        try
+        {
+            Assert.NotEqual(first.ReportPath, second.ReportPath);
+            Assert.True(File.Exists(first.ReportPath));
+            Assert.True(File.Exists(second.ReportPath));
+        }
+        finally
+        {
+            File.Delete(first.ReportPath);
+            File.Delete(second.ReportPath);
+        }
     }
 
     [Fact]

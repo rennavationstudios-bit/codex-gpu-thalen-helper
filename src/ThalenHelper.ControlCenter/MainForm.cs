@@ -46,12 +46,14 @@ public sealed class MainForm : Form
     private readonly SupersedingRefreshCoordinator _refreshCoordinator = new();
     private readonly System.Windows.Forms.Timer _gpuActivityTimer = new() { Interval = 500 };
     private readonly ActiveModelTracker _activeModelTracker;
+    private readonly ReviewActivityTracker _reviewActivityTracker;
     private string? _lastTrackedActivity;
     private PassiveGpuPresentation? _passiveGpuPresentation;
 
     public MainForm()
     {
         _activeModelTracker = new ActiveModelTracker(_paths.StateDirectory);
+        _reviewActivityTracker = new ReviewActivityTracker(_paths.StateDirectory);
         Text = "Thalen AI — Local Review for Codex";
         Size = new Size(620, 570);
         UiTheme.Apply(this, new Size(560, 520));
@@ -755,20 +757,24 @@ public sealed class MainForm : Form
             return;
         }
 
+        ReviewActivityReference? activity;
         ActiveModelReference? active;
         try
         {
-            active = _activeModelTracker.ReadReference();
+            activity = _reviewActivityTracker.ReadCurrent();
+            active = activity is null ? _activeModelTracker.ReadReference() : null;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return;
         }
 
-        var activityKey = active is null
-            ? null
-            : $"{ModelProviders.Normalize(active.Provider)}\n{active.Model}\n{active.InstanceId}";
-        if (active is null && _lastTrackedActivity is null)
+        var activityKey = activity is not null
+            ? $"review\n{activity.OperationId}\n{activity.Phase}\n{ModelProviders.Normalize(activity.Provider)}\n{activity.Model}"
+            : active is not null
+                ? $"ownership\n{ModelProviders.Normalize(active.Provider)}\n{active.Model}\n{active.InstanceId}"
+                : null;
+        if (activity is null && active is null && _lastTrackedActivity is null)
         {
             return;
         }
@@ -779,11 +785,38 @@ public sealed class MainForm : Form
         }
 
         _lastTrackedActivity = activityKey;
-        ApplyTrackedGpuActivity(active);
+        ApplyTrackedGpuActivity(activity, active);
     }
 
-    internal void ApplyTrackedGpuActivity(ActiveModelReference? active)
+    internal void ApplyTrackedGpuActivity(
+        ReviewActivityReference? activity,
+        ActiveModelReference? active)
     {
+        if (activity is not null)
+        {
+            var provider = ModelProviders.Normalize(activity.Provider);
+            var model = DisplayModel(activity.Model);
+            var presentation = activity.Phase switch
+            {
+                ReviewActivityPhase.Loading => ($"{model} loading for review via {provider}", "LOADING", UiTheme.Cyan, $"The helper is preparing a bounded {model} review through {provider}."),
+                ReviewActivityPhase.Reviewing => ($"{model} review active via {provider}", "REVIEW ACTIVE", UiTheme.Success, $"A bounded {model} review is active through {provider}."),
+                ReviewActivityPhase.Releasing => ($"{model} release being verified via {provider}", "RELEASING", UiTheme.Cyan, $"The helper is verifying release of the bounded {model} review through {provider}."),
+                _ => ($"{model} review needs a status check via {provider}", "CHECK STATUS", UiTheme.Warning, $"The bounded {model} review through {provider} needs a fresh status check.")
+            };
+            _notice.Text = presentation.Item1;
+            _gpuModeValue.Text = presentation.Item2;
+            _gpuModeValue.ForeColor = presentation.Item3;
+            _toolTip.SetToolTip(
+                _notice,
+                $"The helper reported {activity.Phase.ToString().ToLowerInvariant()} activity for a bounded {model} review through the loopback-only {provider} provider. This informational activity signal does not prove model ownership, provider liveness, or GPU residency.");
+            if (_currentState?.Availability == HelperAvailability.Enabled && _managedConfigEnabled)
+            {
+                _heroMessage.Text = presentation.Item4;
+            }
+
+            return;
+        }
+
         if (active is not null)
         {
             var provider = ModelProviders.Normalize(active.Provider);
@@ -812,6 +845,9 @@ public sealed class MainForm : Form
             _toolTip.SetToolTip(_notice, _passiveGpuPresentation.ToolTip);
         }
     }
+
+    internal void ApplyTrackedGpuActivity(ActiveModelReference? active)
+        => ApplyTrackedGpuActivity(null, active);
 
     private void CapturePassiveGpuPresentation()
         => _passiveGpuPresentation = new PassiveGpuPresentation(

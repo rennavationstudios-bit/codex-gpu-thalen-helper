@@ -81,6 +81,7 @@ public sealed class UninstallManager
             if (ownsRuntime)
             {
                 StopOwnedMcpProcesses(managedPaths.McpExecutable);
+                DeleteDisplayOnlyReviewActivity(managedPaths.StateDirectory);
             }
 
             var originalConfigBackup = GetOriginalBackup(state, managedPaths.CodexConfigFile);
@@ -97,7 +98,7 @@ public sealed class UninstallManager
             string.Equals(item.Operation, "manual-cleanup-required", StringComparison.Ordinal));
         var reportPath = Path.Combine(
             Path.GetTempPath(),
-            $"CodexGpuThalenHelper-uninstall-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json");
+            $"CodexGpuThalenHelper-uninstall-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.json");
         var report = new
         {
             product = ProductInfo.Name,
@@ -221,6 +222,19 @@ public sealed class UninstallManager
                     // Inno Setup will retry file removal; do not terminate unrelated or unverifiable processes.
                 }
             }
+        }
+    }
+
+    private static void DeleteDisplayOnlyReviewActivity(string stateDirectory)
+    {
+        try
+        {
+            File.Delete(new ReviewActivityTracker(stateDirectory).Path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The record is informational and expires quickly. Package removal must not
+            // broaden into deleting unknown state when the exact file cannot be removed.
         }
     }
 }

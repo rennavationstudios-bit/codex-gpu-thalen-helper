@@ -32,11 +32,13 @@ flowchart LR
 
 A named cross-process semaphore limits helper inference to one request. A named cancellation event lets pause/release operations cancel an active request. Low-impact mode uses short context/output bounds and `keep_alive=0`. Health checks call only inventory/runtime endpoints. Planning uses deterministic local routing and provider inventory without generation. Review parsing caps structured findings and field lengths, preserves the original bounded response for compatibility, and writes neither form to product state or diagnostics.
 
+The Control Center observes two deliberately separate local records. `active-routed-model.txt` is the strict, fail-closed ownership reference used by cleanup controls. `active-review.json` is a short-lived display-only lifecycle signal for loading, reviewing, releasing, or attention states. The latter never authorizes unload, release, routing, health, configuration, or any provider mutation; malformed, future, and expired records are ignored. This separation lets a long LM Studio load become visible before the provider returns the exact instance identity needed for ownership proof without weakening the foreign-model boundary.
+
 Ollama auto-start uses a separate named cross-process semaphore. It checks a responding endpoint first, then checks existing Ollama processes. It does not spawn a duplicate when an existing process is unhealthy.
 
 ## Configuration ownership
 
-The product state JSON records only operational ownership and settings. The MCP table, automatic local GPU guidance, and opt-in reliability baseline use distinct start/end markers. New content is validated before and after atomic write; failures restore the exact original. Uninstall removes only marked content and product-owned state/startup entries.
+The product state JSON records only operational ownership and settings. The MCP table, automatic local GPU guidance, and opt-in reliability baseline use distinct start/end markers. New content is validated before and after atomic write; failures restore the exact original. Uninstall removes only marked content and product-owned state/startup entries, including the exact display-only activity file after owned reviewer processes are stopped.
 
 An existing unmarked `local_gpu_reviewer` table is a separate ownership boundary. Detection enters preservation mode before any Ollama, model-directory, startup, model, or control mutation. Product controls fail closed, and uninstall leaves the existing integration/runtime untouched.
 

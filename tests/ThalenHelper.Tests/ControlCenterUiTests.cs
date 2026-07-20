@@ -1,6 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using ThalenHelper.ControlCenter;
+using ThalenHelper.Core;
 
 namespace ThalenHelper.Tests;
 
@@ -239,6 +240,63 @@ public sealed class ControlCenterUiTests
             Assert.Equal("Manual Ollama startup", notice.Text);
             Assert.Equal("LOW IMPACT", mode.Text);
             Assert.Equal("Nothing is loaded until Codex asks for a review.", hero.Text);
+        });
+    }
+
+    [Theory]
+    [InlineData(ReviewActivityPhase.Loading, "LOADING", "loading for review")]
+    [InlineData(ReviewActivityPhase.Reviewing, "REVIEW ACTIVE", "review active")]
+    [InlineData(ReviewActivityPhase.Releasing, "RELEASING", "release being verified")]
+    [InlineData(ReviewActivityPhase.Attention, "CHECK STATUS", "needs a status check")]
+    public void ReviewActivityPhasesAreTruthfulAndRestorePassiveStatus(
+        ReviewActivityPhase phase,
+        string expectedMode,
+        string expectedNotice)
+    {
+        RunSta(() =>
+        {
+            using var form = new MainForm();
+            CreateControls(form);
+            var type = typeof(MainForm);
+            type.GetField("_currentState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, new InstallationState
+                {
+                    Availability = HelperAvailability.Enabled,
+                    Preferences = new HelperPreferences(LowImpactMode: true)
+                });
+            type.GetField("_managedActionsAllowed", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, true);
+            type.GetField("_managedConfigEnabled", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, true);
+
+            var notice = (Label)type.GetField("_notice", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            var mode = (Label)type.GetField("_gpuModeValue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            var release = (Button)type.GetField("_releaseGpuButton", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            notice.Text = "Manual Ollama startup";
+            mode.Text = "LOW IMPACT";
+            release.Visible = false;
+            type.GetMethod("CapturePassiveGpuPresentation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(form, null);
+
+            form.ApplyTrackedGpuActivity(
+                new ReviewActivityReference(
+                    1,
+                    "operation-1",
+                    ModelProviders.LmStudio,
+                    "qwythos-9b-claude-mythos-5-1m",
+                    phase,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow),
+                null);
+
+            Assert.Equal(expectedMode, mode.Text);
+            Assert.Contains(expectedNotice, notice.Text, StringComparison.OrdinalIgnoreCase);
+            Assert.False(release.Visible);
+
+            form.ApplyTrackedGpuActivity(null, null);
+            Assert.Equal("Manual Ollama startup", notice.Text);
+            Assert.Equal("LOW IMPACT", mode.Text);
+            Assert.False(release.Visible);
         });
     }
 

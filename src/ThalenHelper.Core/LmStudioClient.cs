@@ -159,7 +159,8 @@ public sealed partial class LmStudioClient : IDisposable
                 verifyUnloadedAsync).ConfigureAwait(false);
             throw new LmStudioException(
                 "LMSTUDIO_OWNERSHIP_TRACKER_WRITE_FAILED",
-                "LM Studio loaded a model, but durable helper ownership could not be recorded. The exact instance was unloaded before returning.");
+                "LM Studio loaded a model, but durable helper ownership could not be recorded. The exact instance was unloaded before returning.",
+                cleanupProven: true);
         }
 
         JsonElement? effectiveConfig = null;
@@ -194,6 +195,28 @@ public sealed partial class LmStudioClient : IDisposable
                     "MODEL_RESPONSE_IDENTITY_MISMATCH",
                     "LM Studio did not attribute the loaded instance to the validated model key.");
             }
+        }
+        catch (OperationCanceledException exception)
+        {
+            await CleanupOwnedLoadFailureAsync(
+                modelKey,
+                instanceId,
+                ownershipTracker,
+                verifyUnloadedAsync).ConfigureAwait(false);
+            throw new LmStudioCleanupProvenCancellationException(exception);
+        }
+        catch (LmStudioException exception)
+        {
+            await CleanupOwnedLoadFailureAsync(
+                modelKey,
+                instanceId,
+                ownershipTracker,
+                verifyUnloadedAsync).ConfigureAwait(false);
+            throw new LmStudioException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable,
+                cleanupProven: true);
         }
         catch
         {
@@ -840,13 +863,27 @@ public sealed record LmStudioGenerationResult(
 
 public sealed class LmStudioException : Exception
 {
-    public LmStudioException(string code, string message, bool retryable = false)
+    public LmStudioException(
+        string code,
+        string message,
+        bool retryable = false,
+        bool cleanupProven = false)
         : base(message)
     {
         Code = code;
         Retryable = retryable;
+        CleanupProven = cleanupProven;
     }
 
     public string Code { get; }
     public bool Retryable { get; }
+    public bool CleanupProven { get; }
+}
+
+internal sealed class LmStudioCleanupProvenCancellationException : OperationCanceledException
+{
+    internal LmStudioCleanupProvenCancellationException(OperationCanceledException exception)
+        : base(exception.Message, exception, exception.CancellationToken)
+    {
+    }
 }

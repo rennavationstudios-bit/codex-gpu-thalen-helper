@@ -70,13 +70,22 @@ public sealed class OllamaAndReviewerTests
             ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
             Availability = HelperAvailability.Enabled
         });
-        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(request.RequestUri?.AbsolutePath switch
+        ReviewActivityReference? activityDuringGenerate = null;
+        var handler = new FakeHttpMessageHandler((request, _) =>
         {
-            "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size\":100}]}"),
-            "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
-            "/api/generate" => FakeHttpMessageHandler.Json("{\"model\":\"qwen3:8b\",\"response\":\"UNTRUSTED_TEXT\",\"done\":true}"),
-            _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
-        }));
+            if (request.RequestUri?.AbsolutePath == "/api/generate")
+            {
+                activityDuringGenerate = new ReviewActivityTracker(paths.StateDirectory).ReadCurrent();
+                return Task.FromResult(FakeHttpMessageHandler.Json("{\"model\":\"qwen3:8b\",\"response\":\"UNTRUSTED_TEXT\",\"done\":true}"));
+            }
+
+            return Task.FromResult(request.RequestUri?.AbsolutePath switch
+            {
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size\":100}]}"),
+                "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            });
+        });
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
         var validations = new ModelValidationStore(paths.StateDirectory);
         await validations.UpsertAsync(Validation("qwen2.5-coder:1.5b", "d7372fd82851"));
@@ -94,8 +103,70 @@ public sealed class OllamaAndReviewerTests
         Assert.Equal("MODEL_RESPONSE_IDENTITY_MISMATCH", result.ErrorCode);
         Assert.False(result.ModelRan);
         Assert.True(string.IsNullOrEmpty(result.Findings));
+        Assert.Equal(ReviewActivityPhase.Reviewing, activityDuringGenerate?.Phase);
+        Assert.Equal(ModelProviders.Ollama, activityDuringGenerate?.Provider);
+        Assert.False(File.Exists(new ReviewActivityTracker(paths.StateDirectory).Path));
         var generation = JsonDocument.Parse(handler.Requests.Single(item => item.Path == "/api/generate").Body!);
         Assert.Equal("0s", generation.RootElement.GetProperty("keep_alive").GetString());
+    }
+
+    [Fact]
+    public async Task ReviewerCancellationClearsDisplayActivityButRetainsFailClosedOwnership()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Enabled
+        });
+        var generationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ReviewActivityReference? activityDuringGenerate = null;
+        async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            if (request.RequestUri?.AbsolutePath == "/api/generate")
+            {
+                activityDuringGenerate = new ReviewActivityTracker(paths.StateDirectory).ReadCurrent();
+                generationStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+
+            return request.RequestUri?.AbsolutePath switch
+            {
+                "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size\":100}]}"),
+                "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+                _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+            };
+        }
+
+        var handler = new FakeHttpMessageHandler(HandleAsync);
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var validations = new ModelValidationStore(paths.StateDirectory);
+        await validations.UpsertAsync(Validation("qwen2.5-coder:1.5b", "d7372fd82851"));
+        var reviewer = new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            (_, _) => new ResourcePressureCheck(true, "OK", "Safe."),
+            hardwareProvider: ReviewerHardware,
+            validationStore: validations);
+        using var cancellation = new CancellationTokenSource();
+
+        var review = reviewer.ReviewAsync(new ReviewRequest("Inspect."), cancellation.Token);
+        await generationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var result = await review;
+
+        Assert.Equal("CANCELLED", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal(ReviewActivityPhase.Reviewing, activityDuringGenerate?.Phase);
+        Assert.False(File.Exists(new ReviewActivityTracker(paths.StateDirectory).Path));
+        Assert.Equal(ActiveModelTrackerStatus.Valid, new ActiveModelTracker(paths.StateDirectory).Inspect().Status);
     }
 
     [Theory]

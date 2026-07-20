@@ -22,6 +22,7 @@ public sealed class ReviewerService
     private readonly Func<ModelManifest> _catalogProvider;
     private readonly Func<HardwareProfile> _hardwareProvider;
     private readonly ActiveModelTracker _activeModelTracker;
+    private readonly ReviewActivityTracker _reviewActivityTracker;
     private readonly ModelValidationStore _validationStore;
 
     public ReviewerService(
@@ -78,8 +79,10 @@ public sealed class ReviewerService
         _router = router ?? new TaskAwareModelRouter();
         _catalogProvider = catalogProvider ?? (() => new ModelCatalogService().LoadBundled());
         _hardwareProvider = hardwareProvider ?? (() => new HardwareDetector().Detect());
-        _activeModelTracker = new ActiveModelTracker(Path.GetDirectoryName(_stateStore.Path)!);
-        _validationStore = validationStore ?? new ModelValidationStore(Path.GetDirectoryName(_stateStore.Path)!);
+        var stateDirectory = Path.GetDirectoryName(_stateStore.Path)!;
+        _activeModelTracker = new ActiveModelTracker(stateDirectory);
+        _reviewActivityTracker = new ReviewActivityTracker(stateDirectory);
+        _validationStore = validationStore ?? new ModelValidationStore(stateDirectory);
     }
 
     public async Task<ReviewerHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
@@ -512,6 +515,10 @@ public sealed class ReviewerService
             throw new LmStudioException(pressure.Code, pressure.Message, true);
         }
 
+        using var reviewActivity = _reviewActivityTracker.TryBegin(
+            ModelProviders.LmStudio,
+            routedModel,
+            ReviewActivityPhase.Loading);
         LmStudioLoadResult? load = null;
         LmStudioGenerationResult? generation = null;
         try
@@ -543,6 +550,7 @@ public sealed class ReviewerService
                 catalog.IndexedModelPath!,
                 auditedProof,
                 cancellationToken).ConfigureAwait(false);
+            _ = reviewActivity?.TrySetPhase(ReviewActivityPhase.Reviewing);
             generation = await lmStudio.GenerateReasoningOffAsync(
                 routedModel,
                 load.InstanceId,
@@ -550,10 +558,42 @@ public sealed class ReviewerService
                 outputTokens,
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (LmStudioCleanupProvenCancellationException)
+        {
+            if (load is null)
+            {
+                reviewActivity?.Complete();
+            }
+            throw;
+        }
+        catch (LmStudioException exception)
+        {
+            if (load is null)
+            {
+                if (exception.CleanupProven)
+                {
+                    reviewActivity?.Complete();
+                }
+                else
+                {
+                    reviewActivity?.PreserveAsAttention();
+                }
+            }
+            throw;
+        }
+        catch
+        {
+            if (load is null)
+            {
+                reviewActivity?.PreserveAsAttention();
+            }
+            throw;
+        }
         finally
         {
             if (load is not null)
             {
+                _ = reviewActivity?.TrySetPhase(ReviewActivityPhase.Releasing);
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(45));
                 try
                 {
@@ -566,9 +606,11 @@ public sealed class ReviewerService
                         _activeModelTracker,
                         routedModel,
                         load.InstanceId);
+                    reviewActivity?.Complete();
                 }
                 catch (Exception exception) when (exception is LmStudioException or OperationCanceledException)
                 {
+                    reviewActivity?.PreserveAsAttention();
                     throw new LmStudioException("GPU_RELEASE_FAILED", "LM Studio did not prove the helper-created model instance was unloaded.", true);
                 }
             }
@@ -885,6 +927,7 @@ public sealed class ReviewerService
             : TimeSpan.Zero;
         var stopwatch = Stopwatch.StartNew();
         ModelRouteDecision? route = null;
+        IDisposable? ollamaReviewActivity = null;
         try
         {
             if (state.RegisteredLocalModels.Any(item =>
@@ -986,6 +1029,10 @@ public sealed class ReviewerService
 
                         _activeModelTracker.Set(route.Model, routedDigest);
                     }
+                    ollamaReviewActivity ??= _reviewActivityTracker.TryBegin(
+                        ModelProviders.Ollama,
+                        route.Model,
+                        ReviewActivityPhase.Reviewing);
                     return new OllamaGenerationSpec(
                         route.Model,
                         BuildPrompt(request, route.HardwareTier, route.TaskKind),
@@ -1111,6 +1158,10 @@ public sealed class ReviewerService
                 ErrorCode = "CANCELLED",
                 ErrorMessage = "The local review was cancelled to release resources."
             };
+        }
+        finally
+        {
+            ollamaReviewActivity?.Dispose();
         }
     }
 

@@ -73,6 +73,12 @@ public sealed class LmStudioReviewerLifecycleTests
         Assert.Equal([ReviewerFixture.InstanceId], fixture.Rest.UnloadedInstances);
         Assert.False(fixture.Rest.HelperLoaded);
         Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
+        Assert.Equal(ReviewActivityPhase.Loading, fixture.Rest.ActivityAtLoad?.Phase);
+        Assert.Equal(ReviewActivityPhase.Reviewing, fixture.Rest.ActivityAtGeneration?.Phase);
+        Assert.Equal(ReviewActivityPhase.Releasing, fixture.Rest.ActivityAtUnload?.Phase);
+        Assert.Equal(ModelProviders.LmStudio, fixture.Rest.ActivityAtLoad?.Provider);
+        Assert.Equal(fixture.Model.Tag, fixture.Rest.ActivityAtLoad?.Model);
+        Assert.False(File.Exists(new ReviewActivityTracker(fixture.Paths.StateDirectory).Path));
     }
 
     [Fact]
@@ -208,6 +214,96 @@ public sealed class LmStudioReviewerLifecycleTests
             [(ReviewerFixture.InstanceId, fixture.Model.IndexedModelPath!)],
             fixture.Cli.UnloadedInstances);
         Assert.False(fixture.Rest.HelperLoaded);
+        Assert.False(File.Exists(new ReviewActivityTracker(fixture.Paths.StateDirectory).Path));
+        Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
+    }
+
+    [Fact]
+    public async Task LoadConfigMismatchWithVerifiedCleanupReturnsDirectlyToIdle()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(loadConfigMismatch: true);
+
+        var result = await fixture.Reviewer.ReviewAsync(Request());
+
+        Assert.Equal("LMSTUDIO_LOAD_CONFIG_MISMATCH", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal([ReviewerFixture.InstanceId], fixture.Rest.UnloadedInstances);
+        Assert.False(fixture.Rest.HelperLoaded);
+        Assert.False(File.Exists(new ReviewActivityTracker(fixture.Paths.StateDirectory).Path));
+        Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
+    }
+
+    [Fact]
+    public async Task CancellationDuringLoadVerificationWithVerifiedCleanupReturnsToIdle()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(cancelDuringLoadVerification: true);
+
+        var result = await fixture.Reviewer.ReviewAsync(Request());
+
+        Assert.Equal("CANCELLED", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal([ReviewerFixture.InstanceId], fixture.Rest.UnloadedInstances);
+        Assert.Equal(
+            [(ReviewerFixture.InstanceId, fixture.Model.IndexedModelPath!)],
+            fixture.Cli.UnloadedInstances);
+        Assert.False(fixture.Rest.HelperLoaded);
+        Assert.False(File.Exists(new ReviewActivityTracker(fixture.Paths.StateDirectory).Path));
+        Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
+    }
+
+    [Fact]
+    public async Task CancellationDuringGenerationUnloadsAndClearsReviewActivity()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(cancelDuringGeneration: true);
+        using var cancellation = new CancellationTokenSource();
+
+        var review = fixture.Reviewer.ReviewAsync(Request(), cancellation.Token);
+        await fixture.Rest.GenerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var result = await review;
+
+        Assert.Equal("CANCELLED", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        Assert.Equal([ReviewerFixture.InstanceId], fixture.Rest.UnloadedInstances);
+        Assert.Equal(
+            [(ReviewerFixture.InstanceId, fixture.Model.IndexedModelPath!)],
+            fixture.Cli.UnloadedInstances);
+        Assert.False(fixture.Rest.HelperLoaded);
+        Assert.False(File.Exists(new ReviewActivityTracker(fixture.Paths.StateDirectory).Path));
+        Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
+    }
+
+    [Fact]
+    public async Task UnloadVerificationFailureRetainsBoundedAttentionAndOwnershipEvidence()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(cliUnloadFailure: true);
+
+        var result = await fixture.Reviewer.ReviewAsync(Request());
+
+        Assert.Equal("GPU_RELEASE_FAILED", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        var tracker = new ReviewActivityTracker(fixture.Paths.StateDirectory);
+        var attention = Assert.IsType<ReviewActivityReference>(tracker.ReadCurrent());
+        Assert.Equal(ReviewActivityPhase.Attention, attention.Phase);
+        Assert.Null(tracker.ReadCurrent(attention.UpdatedAtUtc.AddMinutes(3)));
+        Assert.Equal(ActiveModelTrackerStatus.Valid, new ActiveModelTracker(fixture.Paths.StateDirectory).Inspect().Status);
+    }
+
+    [Fact]
+    public async Task AmbiguousLoadFailureRetainsOnlyBoundedDisplayAttention()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(failLoadRequest: true);
+
+        var result = await fixture.Reviewer.ReviewAsync(Request());
+
+        Assert.Equal("LMSTUDIO_UNAVAILABLE", result.ErrorCode);
+        Assert.False(result.ModelRan);
+        var tracker = new ReviewActivityTracker(fixture.Paths.StateDirectory);
+        var attention = Assert.IsType<ReviewActivityReference>(tracker.ReadCurrent());
+        Assert.Equal(ReviewActivityPhase.Attention, attention.Phase);
+        Assert.Null(tracker.ReadCurrent(attention.UpdatedAtUtc.AddMinutes(3)));
+        Assert.Equal(ActiveModelTrackerStatus.Absent, new ActiveModelTracker(fixture.Paths.StateDirectory).Inspect().Status);
+        Assert.Empty(fixture.Rest.UnloadedInstances);
     }
 
     private static ReviewRequest Request()
@@ -263,7 +359,12 @@ public sealed class LmStudioReviewerLifecycleTests
             bool foreignLmStudio = false,
             bool registrationDigestMatchesFile = true,
             bool cliLoadedMismatch = false,
+            bool cliUnloadFailure = false,
+            bool cancelDuringLoadVerification = false,
             bool attemptWriteDuringGeneration = false,
+            bool cancelDuringGeneration = false,
+            bool failLoadRequest = false,
+            bool loadConfigMismatch = false,
             ModelSelectionMode modelSelectionMode = ModelSelectionMode.Pinned,
             bool ollamaUnavailable = false,
             bool ollamaEligible = false,
@@ -372,12 +473,17 @@ public sealed class LmStudioReviewerLifecycleTests
                         ModelProviders.Ollama));
                 }
 
-                var cli = new FakeCliBinding(cliLoadedMismatch);
+                var cli = new FakeCliBinding(cliLoadedMismatch, cliUnloadFailure);
                 var rest = new RestHarness(
                     model,
                     modelPath,
+                    paths.StateDirectory,
                     foreignLmStudio,
                     attemptWriteDuringGeneration,
+                    cancelDuringGeneration,
+                    failLoadRequest,
+                    cancelDuringLoadVerification,
+                    loadConfigMismatch,
                     generationResponse,
                     () => cli.ActivePathLeases);
                 var ollamaHttp = new FakeHttpMessageHandler((request, _) =>
@@ -463,8 +569,13 @@ public sealed class LmStudioReviewerLifecycleTests
     private sealed class RestHarness(
         ModelCatalogEntry model,
         string modelPath,
+        string stateDirectory,
         bool foreignLmStudio,
         bool attemptWriteDuringGeneration,
+        bool cancelDuringGeneration,
+        bool failLoadRequest,
+        bool cancelDuringLoadVerification,
+        bool loadConfigMismatch,
         string generationResponse,
         Func<int> activePathLeases)
     {
@@ -472,14 +583,33 @@ public sealed class LmStudioReviewerLifecycleTests
         internal bool WriteSucceededDuringGeneration { get; private set; }
         internal bool PathLeaseHeldDuringGeneration { get; private set; }
         internal List<string> UnloadedInstances { get; } = [];
+        internal ReviewActivityReference? ActivityAtLoad { get; private set; }
+        internal ReviewActivityReference? ActivityAtGeneration { get; private set; }
+        internal ReviewActivityReference? ActivityAtUnload { get; private set; }
+        internal TaskCompletionSource GenerationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private bool _loadVerificationCancellationRaised;
 
         internal Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            return Task.FromResult(request.RequestUri?.AbsolutePath switch
+            var path = request.RequestUri?.AbsolutePath;
+            if (path == "/api/v1/chat")
+            {
+                return GenerateAsync(cancellationToken);
+            }
+            if (path == "/api/v1/models"
+                && HelperLoaded
+                && cancelDuringLoadVerification
+                && !_loadVerificationCancellationRaised)
+            {
+                _loadVerificationCancellationRaised = true;
+                return Task.FromException<HttpResponseMessage>(
+                    new OperationCanceledException("Mocked post-load REST verification cancellation.", cancellationToken));
+            }
+
+            return Task.FromResult(path switch
             {
                 "/api/v1/models" => FakeHttpMessageHandler.Json(Inventory()),
                 "/api/v1/models/load" => Load(),
-                "/api/v1/chat" => Generate(),
                 "/api/v1/models/unload" => Unload(),
                 _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
             });
@@ -512,6 +642,11 @@ public sealed class LmStudioReviewerLifecycleTests
 
         private HttpResponseMessage Load()
         {
+            ActivityAtLoad = new ReviewActivityTracker(stateDirectory).ReadCurrent();
+            if (failLoadRequest)
+            {
+                throw new HttpRequestException("Mocked ambiguous load failure.");
+            }
             HelperLoaded = true;
             return FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
             {
@@ -519,15 +654,17 @@ public sealed class LmStudioReviewerLifecycleTests
                 model_key = model.Tag,
                 load_config = new
                 {
-                    context_length = 65_536,
+                    context_length = loadConfigMismatch ? 8_192 : 65_536,
                     flash_attention = true,
                     offload_kv_cache_to_gpu = true
                 }
             }));
         }
 
-        private HttpResponseMessage Generate()
+        private async Task<HttpResponseMessage> GenerateAsync(CancellationToken cancellationToken)
         {
+            ActivityAtGeneration = new ReviewActivityTracker(stateDirectory).ReadCurrent();
+            GenerationStarted.TrySetResult();
             PathLeaseHeldDuringGeneration = activePathLeases() > 0;
             if (attemptWriteDuringGeneration)
             {
@@ -540,6 +677,11 @@ public sealed class LmStudioReviewerLifecycleTests
                 {
                     WriteSucceededDuringGeneration = false;
                 }
+            }
+
+            if (cancelDuringGeneration)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             }
 
             return FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
@@ -557,6 +699,7 @@ public sealed class LmStudioReviewerLifecycleTests
 
         private HttpResponseMessage Unload()
         {
+            ActivityAtUnload = new ReviewActivityTracker(stateDirectory).ReadCurrent();
             HelperLoaded = false;
             UnloadedInstances.Add(ReviewerFixture.InstanceId);
             return FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
@@ -566,7 +709,7 @@ public sealed class LmStudioReviewerLifecycleTests
         }
     }
 
-    private sealed class FakeCliBinding(bool loadedMismatch) : ILmStudioCliModelBinding
+    private sealed class FakeCliBinding(bool loadedMismatch, bool unloadFailure) : ILmStudioCliModelBinding
     {
         internal int ActivePathLeases { get; private set; }
         internal List<LmStudioModelFileProof> DownloadedProofs { get; } = [];
@@ -618,6 +761,13 @@ public sealed class LmStudioReviewerLifecycleTests
             CancellationToken cancellationToken = default)
         {
             UnloadedInstances.Add((instanceId, indexedPath));
+            if (unloadFailure)
+            {
+                throw new LmStudioException(
+                    "LMSTUDIO_UNLOAD_UNCONFIRMED",
+                    "Mocked unload verification failure.",
+                    retryable: true);
+            }
             return Task.CompletedTask;
         }
     }

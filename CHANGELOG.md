@@ -4,6 +4,14 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.21 - 2026-07-20
+
+- Added a separate display-only review activity signal so Codex-started Ollama and LM Studio work is visible during provider loading, reviewing, releasing, and attention states without weakening strict model-ownership tracking.
+- Made the Control Center restore its exact passive status after the bounded activity ends and ignore malformed, future, or expired activity records.
+- Kept activity informational: it cannot authorize unload, release, routing, health, configuration, or model-control actions, and it contains no prompt, response, path, digest, user, or machine identity.
+- Added mocked LM Studio and Ollama lifecycle coverage, phase/status rendering tests, expiry/privacy tests, and a negative control-action authority test.
+- Made temporary uninstall reports collision-safe when independent removals finish during the same second, without changing surgical configuration or model-preservation behavior.
+
 ## 0.1.0-beta.20 - 2026-07-20
 
 - Replaced the compact three-dot menu pill with a transparent keyboard-accessible ellipsis glyph, removing its rectangular background and focus-mask artifacts entirely.
