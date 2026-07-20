@@ -28,7 +28,7 @@ public sealed class MainForm : Form
     private Button _testReviewerButton = null!;
     private Button _retryStatusButton = null!;
     private Button _manageModelsButton = null!;
-    private Button _advancedButton = null!;
+    private GlyphButton _advancedButton = null!;
     private Button _releaseGpuButton = null!;
     private RoundedPanel _advancedCard = null!;
     private Label _normalRoutePurpose = null!;
@@ -44,9 +44,14 @@ public sealed class MainForm : Form
     private int _operationInProgress;
     private long _refreshSequence;
     private readonly SupersedingRefreshCoordinator _refreshCoordinator = new();
+    private readonly System.Windows.Forms.Timer _gpuActivityTimer = new() { Interval = 500 };
+    private readonly ActiveModelTracker _activeModelTracker;
+    private string? _lastTrackedActivity;
+    private PassiveGpuPresentation? _passiveGpuPresentation;
 
     public MainForm()
     {
+        _activeModelTracker = new ActiveModelTracker(_paths.StateDirectory);
         Text = "Thalen AI — Local Review for Codex";
         Size = new Size(620, 570);
         UiTheme.Apply(this, new Size(560, 520));
@@ -80,6 +85,7 @@ public sealed class MainForm : Form
 
         scroll.Controls.Add(stack);
         Controls.Add(scroll);
+        _gpuActivityTimer.Tick += (_, _) => RefreshTrackedGpuActivity();
         Shown += OnShownAsync;
     }
 
@@ -88,6 +94,8 @@ public sealed class MainForm : Form
         if (disposing)
         {
             _refreshCoordinator.Dispose();
+            _gpuActivityTimer.Stop();
+            _gpuActivityTimer.Dispose();
             _toolTip.Dispose();
             _brandIcon?.Dispose();
         }
@@ -178,12 +186,10 @@ public sealed class MainForm : Form
         _stateBadge.Padding = new Padding(0);
         _statePill.Controls.Add(_stateBadge);
 
-        _advancedButton = UiTheme.Button("•••", AppButtonStyle.Quiet);
-        _advancedButton.AutoSize = false;
+        _advancedButton = UiTheme.GlyphButton("⋯");
         _advancedButton.Size = new Size(38, 30);
         _advancedButton.MinimumSize = new Size(38, 30);
         _advancedButton.MaximumSize = new Size(38, 30);
-        _advancedButton.Padding = new Padding(7, 3, 7, 3);
         _advancedButton.Margin = new Padding(0, 0, 8, 0);
         _advancedButton.AccessibleName = "Advanced settings";
         SetHelp(_advancedButton, "Open less-common routing, GPU, repair, diagnostics, and disconnect settings.");
@@ -596,6 +602,11 @@ public sealed class MainForm : Form
         }
 
         await RefreshAsync().ConfigureAwait(true);
+        if (!IsDisposed && !Disposing)
+        {
+            RefreshTrackedGpuActivity(force: true);
+            _gpuActivityTimer.Start();
+        }
     }
 
     private ControlService Control()
@@ -688,8 +699,11 @@ public sealed class MainForm : Form
                     ? "Ollama startup needs attention"
                     : state?.Preferences.AutoStartOllama == false
                         ? "Manual Ollama startup"
-                        : health.ModelLoaded ? "Helper model loaded" : "No model loaded";
+                        : "No model loaded";
             _gpuModeValue.Text = state?.Preferences.LowImpactMode == true ? "LOW IMPACT" : "BALANCED";
+            _gpuModeValue.ForeColor = UiTheme.Cyan;
+            CapturePassiveGpuPresentation();
+            RefreshTrackedGpuActivity(force: true);
             SetActionControlsEnabled(!IsOperationInProgress);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -733,6 +747,80 @@ public sealed class MainForm : Form
             _refreshCoordinator.Complete(refreshCancellation);
         }
     }
+
+    private void RefreshTrackedGpuActivity(bool force = false)
+    {
+        if (IsDisposed || Disposing || !_managedActionsAllowed)
+        {
+            return;
+        }
+
+        ActiveModelReference? active;
+        try
+        {
+            active = _activeModelTracker.ReadReference();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var activityKey = active is null
+            ? null
+            : $"{ModelProviders.Normalize(active.Provider)}\n{active.Model}\n{active.InstanceId}";
+        if (active is null && _lastTrackedActivity is null)
+        {
+            return;
+        }
+
+        if (!force && string.Equals(activityKey, _lastTrackedActivity, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastTrackedActivity = activityKey;
+        ApplyTrackedGpuActivity(active);
+    }
+
+    internal void ApplyTrackedGpuActivity(ActiveModelReference? active)
+    {
+        if (active is not null)
+        {
+            var provider = ModelProviders.Normalize(active.Provider);
+            var model = DisplayModel(active.Model);
+            _notice.Text = $"{model} review via {provider}";
+            _gpuModeValue.Text = "REVIEW TRACKED";
+            _gpuModeValue.ForeColor = UiTheme.Success;
+            _toolTip.SetToolTip(
+                _notice,
+                $"The helper is tracking {model} through the loopback-only {provider} provider until exact release is verified. A retained tracker does not by itself prove current GPU residency.");
+            if (_currentState?.Availability == HelperAvailability.Enabled && _managedConfigEnabled)
+            {
+                _heroMessage.Text = $"The helper is tracking a bounded {model} review through {provider}.";
+            }
+
+            return;
+        }
+
+        if (_passiveGpuPresentation is not null)
+        {
+            _notice.Text = _passiveGpuPresentation.Notice;
+            _gpuModeValue.Text = _passiveGpuPresentation.Mode;
+            _gpuModeValue.ForeColor = _passiveGpuPresentation.ModeColor;
+            _heroMessage.Text = _passiveGpuPresentation.HeroMessage;
+            _releaseGpuButton.Visible = _passiveGpuPresentation.ReleaseVisible;
+            _toolTip.SetToolTip(_notice, _passiveGpuPresentation.ToolTip);
+        }
+    }
+
+    private void CapturePassiveGpuPresentation()
+        => _passiveGpuPresentation = new PassiveGpuPresentation(
+            _notice.Text,
+            _gpuModeValue.Text,
+            _gpuModeValue.ForeColor,
+            _heroMessage.Text,
+            _releaseGpuButton.Visible,
+            _toolTip.GetToolTip(_notice) ?? string.Empty);
 
     private void UpdateRoutePresentation(
         InstallationState? state,
@@ -844,9 +932,7 @@ public sealed class MainForm : Form
                 StyleBadge(_stateBadge, UiTheme.Success);
                 _stateBadge.Text = "READY";
                 _heroTitle.Text = "Local reviews are on";
-                _heroMessage.Text = health.ModelLoaded
-                    ? "A helper-owned model is currently active."
-                    : "Nothing is loaded until Codex asks for a review.";
+                _heroMessage.Text = "Nothing is loaded until Codex asks for a review.";
                 break;
             case HelperAvailability.Paused:
                 StyleBadge(_stateBadge, UiTheme.Warning);
@@ -912,7 +998,7 @@ public sealed class MainForm : Form
     {
         _advancedExpanded = !_advancedExpanded;
         _advancedCard.Visible = _advancedExpanded;
-        _advancedButton.Text = _advancedExpanded ? "×" : "•••";
+        _advancedButton.Text = _advancedExpanded ? "×" : "⋯";
         return Task.CompletedTask;
     }
 
@@ -1411,6 +1497,14 @@ public sealed class MainForm : Form
 
         return $"{value:F1} {units[unit]}";
     }
+
+    private sealed record PassiveGpuPresentation(
+        string Notice,
+        string Mode,
+        Color ModeColor,
+        string HeroMessage,
+        bool ReleaseVisible,
+        string ToolTip);
 }
 
 internal enum ReviewToggleMutation

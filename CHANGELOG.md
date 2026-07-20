@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.20 - 2026-07-20
+
+- Replaced the compact three-dot menu pill with a transparent keyboard-accessible ellipsis glyph, removing its rectangular background and focus-mask artifacts entirely.
+- Made the Control Center GPU status reflect helper-owned reviews started by Codex: a lightweight local tracker observer shows the tracked provider and model during the bounded lifecycle, then restores the exact prior passive status after the tracker clears.
+- Kept live status passive and low overhead. The observer reads only the helper-owned activity tracker; it does not poll providers, load models, run inference, or interfere with review locking and cleanup.
+- Added focused WinForms rendering and active-to-idle status regression coverage.
+
 ## 0.1.0-beta.19 - 2026-07-20
 
 - Made automatic task inference meaning-aware without running inference: an explicit task kind still wins, then automatic routing checks deterministic focus and assignment phrases for test-failure, diff-review, repository-analysis, log-triage, and edge-case work before the existing conservative input-size fallback.

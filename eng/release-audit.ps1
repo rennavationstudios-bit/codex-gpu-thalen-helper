@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.19',
+    [string]$Version = '0.1.0-beta.20',
     [switch]$SkipPackage,
     [switch]$RunInstallerLifecycle
 )

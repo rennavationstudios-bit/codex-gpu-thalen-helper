@@ -104,6 +104,16 @@ internal static class UiTheme
             AccessibleRole = AccessibleRole.CheckButton
         };
 
+    public static GlyphButton GlyphButton(string text)
+        => new()
+        {
+            Text = text,
+            ForeColor = Muted,
+            Font = BodyFont(15F, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            AccessibleRole = AccessibleRole.PushButton
+        };
+
     public static TextBox TextBox(int width = 520)
         => new()
         {
@@ -210,13 +220,82 @@ internal sealed class RoundedButton : Button
         TextRenderer.DrawText(eventArgs.Graphics, Text, Font, ClientRectangle, ForeColor, TextDrawingFlags);
         if (Focused && ShowFocusCues)
         {
-            var focus = Rectangle.Inflate(ClientRectangle, -4, -4);
-            ControlPaint.DrawFocusRectangle(eventArgs.Graphics, focus, ForeColor, Color.Transparent);
+            using var focusPath = RoundedPanel.RoundedRectangle(ClientRectangle, ScaledCornerRadius() - 2, 4F);
+            using var focusPen = new Pen(Color.FromArgb(190, ForeColor), 1F)
+            {
+                DashStyle = DashStyle.Dot,
+                DashCap = DashCap.Round
+            };
+            eventArgs.Graphics.DrawPath(focusPen, focusPath);
         }
     }
 
     private int ScaledCornerRadius()
         => Math.Max(6, LogicalCornerRadius * DeviceDpi / 96);
+}
+
+internal sealed class GlyphButton : Label
+{
+    private Color _idleColor = UiTheme.Muted;
+
+    public GlyphButton()
+    {
+        AutoSize = false;
+        BackColor = Color.Transparent;
+        TextAlign = ContentAlignment.MiddleCenter;
+        TabStop = true;
+        SetStyle(ControlStyles.Selectable | ControlStyles.StandardClick, true);
+    }
+
+    protected override bool IsInputKey(Keys keyData)
+        => keyData is Keys.Space or Keys.Enter || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs eventArgs)
+    {
+        if (Enabled && eventArgs.KeyCode is Keys.Space or Keys.Enter)
+        {
+            OnClick(EventArgs.Empty);
+            eventArgs.Handled = true;
+            eventArgs.SuppressKeyPress = true;
+            return;
+        }
+
+        base.OnKeyDown(eventArgs);
+    }
+
+    protected override void OnMouseEnter(EventArgs eventArgs)
+    {
+        base.OnMouseEnter(eventArgs);
+        ForeColor = UiTheme.Cyan;
+    }
+
+    protected override void OnMouseLeave(EventArgs eventArgs)
+    {
+        base.OnMouseLeave(eventArgs);
+        ForeColor = Focused ? UiTheme.Text : _idleColor;
+    }
+
+    protected override void OnGotFocus(EventArgs eventArgs)
+    {
+        base.OnGotFocus(eventArgs);
+        ForeColor = UiTheme.Text;
+    }
+
+    protected override void OnLostFocus(EventArgs eventArgs)
+    {
+        base.OnLostFocus(eventArgs);
+        ForeColor = _idleColor;
+    }
+
+    protected override void OnForeColorChanged(EventArgs eventArgs)
+    {
+        if (!Focused && !ClientRectangle.Contains(PointToClient(Cursor.Position)))
+        {
+            _idleColor = ForeColor;
+        }
+
+        base.OnForeColorChanged(eventArgs);
+    }
 }
 
 internal sealed class DarkToolTip : ToolTip

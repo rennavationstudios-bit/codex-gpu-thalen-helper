@@ -55,6 +55,66 @@ public sealed class ControlCenterUiTests
     }
 
     [Fact]
+    public void AdvancedMenuGlyphHasNoRectangularSurfaceAcrossTransparentAncestors()
+    {
+        RunSta(() =>
+        {
+            using var parent = new GradientPanel
+            {
+                Size = new Size(180, 100),
+                GradientStart = Color.FromArgb(42, 32, 82),
+                GradientEnd = Color.FromArgb(17, 22, 31)
+            };
+            using var transparentHost = new FlowLayoutPanel
+            {
+                Size = new Size(100, 60),
+                Location = new Point(40, 20),
+                BackColor = Color.Transparent,
+                Padding = new Padding(10)
+            };
+            using var glyph = UiTheme.GlyphButton("⋯");
+            glyph.Size = new Size(38, 30);
+            glyph.Margin = new Padding(0);
+            transparentHost.Controls.Add(glyph);
+            parent.Controls.Add(transparentHost);
+            CreateControls(parent);
+
+            using var baseline = new Bitmap(parent.Width, parent.Height);
+            var glyphColor = glyph.ForeColor;
+            glyph.ForeColor = Color.Transparent;
+            parent.DrawToBitmap(baseline, parent.ClientRectangle);
+
+            using var rendered = new Bitmap(parent.Width, parent.Height);
+            glyph.ForeColor = glyphColor;
+            parent.DrawToBitmap(rendered, parent.ClientRectangle);
+
+            var left = transparentHost.Left + glyph.Left;
+            var top = transparentHost.Top + glyph.Top;
+            foreach (var offset in new[] { new Point(0, 0), new Point(2, 2), new Point(35, 2), new Point(2, 27), new Point(37, 29) })
+            {
+                Assert.Equal(
+                    baseline.GetPixel(left + offset.X, top + offset.Y).ToArgb(),
+                    rendered.GetPixel(left + offset.X, top + offset.Y).ToArgb());
+            }
+
+            var changedPixels = 0;
+            for (var y = 0; y < glyph.Height; y++)
+            {
+                for (var x = 0; x < glyph.Width; x++)
+                {
+                    if (baseline.GetPixel(left + x, top + y).ToArgb()
+                        != rendered.GetPixel(left + x, top + y).ToArgb())
+                    {
+                        changedPixels++;
+                    }
+                }
+            }
+
+            Assert.InRange(changedPixels, 1, 300);
+        });
+    }
+
+    [Fact]
     public void ToggleSwitchPublishesOneCheckedChangeAndAccessibleState()
     {
         RunSta(() =>
@@ -134,6 +194,51 @@ public sealed class ControlCenterUiTests
 
             Assert.Equal(parent.BackColor.ToArgb(), focused.GetPixel(4, 4).ToArgb());
             Assert.NotEqual(parent.BackColor.ToArgb(), focused.GetPixel(toggle.Width / 2, 1).ToArgb());
+        });
+    }
+
+    [Fact]
+    public void GpuStatusReflectsTrackedHelperActivityAndReturnsToIdle()
+    {
+        RunSta(() =>
+        {
+            using var form = new MainForm();
+            CreateControls(form);
+            var type = typeof(MainForm);
+            type.GetField("_currentState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, new ThalenHelper.Core.InstallationState
+                {
+                    Availability = ThalenHelper.Core.HelperAvailability.Enabled,
+                    Preferences = new ThalenHelper.Core.HelperPreferences(LowImpactMode: true)
+                });
+            type.GetField("_managedActionsAllowed", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, true);
+            type.GetField("_managedConfigEnabled", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(form, true);
+
+            var notice = (Label)type.GetField("_notice", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            var mode = (Label)type.GetField("_gpuModeValue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            var hero = (Label)type.GetField("_heroMessage", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(form)!;
+            notice.Text = "Manual Ollama startup";
+            mode.Text = "LOW IMPACT";
+            hero.Text = "Nothing is loaded until Codex asks for a review.";
+            type.GetMethod("CapturePassiveGpuPresentation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(form, null);
+
+            form.ApplyTrackedGpuActivity(new ThalenHelper.Core.ActiveModelReference(
+                ThalenHelper.Core.ModelProviders.LmStudio,
+                "qwythos-9b-claude-mythos-5-1m",
+                "instance-1"));
+
+            Assert.Equal("Qwythos 9B review via LM Studio", notice.Text);
+            Assert.Equal("REVIEW TRACKED", mode.Text);
+            Assert.Contains("tracking a bounded", hero.Text, StringComparison.OrdinalIgnoreCase);
+
+            form.ApplyTrackedGpuActivity(null);
+
+            Assert.Equal("Manual Ollama startup", notice.Text);
+            Assert.Equal("LOW IMPACT", mode.Text);
+            Assert.Equal("Nothing is loaded until Codex asks for a review.", hero.Text);
         });
     }
 
@@ -253,7 +358,7 @@ public sealed class ControlCenterUiTests
             PerformLayoutTree(form);
 
             var visibleActions = Descendants(form)
-                .Where(control => control is Button or ToggleSwitch)
+                .Where(control => control is Button or ToggleSwitch or GlyphButton)
                 .Where(control => control.Text != "Retry status")
                 .Where(control => !HasAncestor(control, "Advanced settings"))
                 .ToArray();
@@ -261,7 +366,7 @@ public sealed class ControlCenterUiTests
 
             Assert.Contains(visibleActions.OfType<Button>(), button => button.Text == "Test reviewer");
             Assert.Contains(visibleActions.OfType<Button>(), button => button.Text == "Models & storage");
-            Assert.Contains(visibleActions.OfType<Button>(), button => button.AccessibleName == "Advanced settings");
+            Assert.Contains(visibleActions.OfType<GlyphButton>(), button => button.AccessibleName == "Advanced settings");
             Assert.DoesNotContain(visibleActions.OfType<Button>(), button => button.Text is "Pause reviews" or "Resume reviews" or "Enable integration" or "Disable integration");
             Assert.False(Descendants(form).OfType<Button>().Single(button => button.Text == "Retry status").Visible);
 
