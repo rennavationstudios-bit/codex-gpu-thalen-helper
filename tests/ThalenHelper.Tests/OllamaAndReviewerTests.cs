@@ -838,6 +838,152 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
+    public async Task ReviewPreservesFindingsAndAddsOnlyValidatedStructuredAdvisoryFindings()
+    {
+        using var temporary = new TemporaryDirectory();
+        var paths = temporary.CreatePaths();
+        var store = new StateStore(paths.StateFile);
+        await store.SaveAsync(new InstallationState
+        {
+            SelectedModel = "qwen2.5-coder:1.5b",
+            SelectedModelDigest = "d7372fd82851",
+            HardwareTier = HardwareTier.Entry,
+            ManagedConfigurationSections = [IntegrationOwnership.ManagedReviewerSection],
+            Availability = HelperAvailability.Enabled
+        });
+        var structured = """
+            {"findings":[{"id":"F1","claim":"A supplied branch may miss null input.","location":"Parser.cs:42","evidence":"The supplied branch dereferences value before its null check.","confidence":"HIGH","impact":"A bounded input could fail.","verification":"Run the null-input unit test against the supplied branch.","falsePositiveCondition":"An earlier guard guarantees value is non-null."}]}
+            """;
+        var generationCount = 0;
+        var handler = new FakeHttpMessageHandler((request, _) => Task.FromResult(request.RequestUri?.AbsolutePath switch
+        {
+            "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[{\"name\":\"qwen2.5-coder:1.5b\",\"digest\":\"sha256:d7372fd828510000000000000000000000000000000000000000000000000000\",\"size\":100}]}"),
+            "/api/ps" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
+            "/api/generate" => FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
+            {
+                model = "qwen2.5-coder:1.5b",
+                response = ++generationCount == 1 ? structured : "prose fallback { not valid JSON",
+                done = true
+            })),
+            _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
+        }));
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(handler));
+        var validations = new ModelValidationStore(paths.StateDirectory);
+        await validations.UpsertAsync(Validation("qwen2.5-coder:1.5b", "d7372fd82851"));
+        var reviewer = new ReviewerService(
+            store,
+            client,
+            _ => true,
+            StorageOk,
+            (_, _) => new ResourcePressureCheck(true, "OK", "Safe."),
+            hardwareProvider: ReviewerHardware,
+            validationStore: validations);
+
+        var result = await reviewer.ReviewAsync(new ReviewRequest(
+            "Review the supplied diff.",
+            Context: "Parser.cs:42 supplied branch",
+            MaximumOutputTokens: int.MaxValue,
+            TaskKind: ReviewTaskKind.DiffReview));
+
+        Assert.True(result.ModelRan, result.ErrorMessage);
+        Assert.Equal(structured, result.Findings);
+        var finding = Assert.Single(result.StructuredFindings);
+        Assert.Equal("parsed", result.StructuredFindingsStatus);
+        Assert.Equal("F1", finding.Id);
+        Assert.Equal("high", finding.Confidence);
+        Assert.Equal("An earlier guard guarantees value is non-null.", finding.FalsePositiveCondition);
+        Assert.Empty(result.ConfirmedObservations);
+        Assert.Single(result.Hypotheses);
+        var requestBody = JsonDocument.Parse(handler.Requests.Single(item => item.Path == "/api/generate").Body!);
+        Assert.Equal(2_048, requestBody.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+        var prompt = requestBody.RootElement.GetProperty("prompt").GetString();
+        Assert.Contains("TASK RUBRIC (DiffReview)", prompt, StringComparison.Ordinal);
+        Assert.Contains("falsePositiveCondition", prompt, StringComparison.Ordinal);
+
+        var fallback = await reviewer.ReviewAsync(new ReviewRequest("Review malformed model output."));
+
+        Assert.True(fallback.ModelRan, fallback.ErrorMessage);
+        Assert.Equal("prose fallback { not valid JSON", fallback.Findings);
+        Assert.Empty(fallback.StructuredFindings);
+        Assert.Equal("malformed", fallback.StructuredFindingsStatus);
+        Assert.Empty(fallback.ConfirmedObservations);
+    }
+
+    [Theory]
+    [InlineData(ReviewTaskKind.General, "concrete, actionable issues")]
+    [InlineData(ReviewTaskKind.LogTriage, "Group related symptoms")]
+    [InlineData(ReviewTaskKind.TestFailure, "Connect each failure")]
+    [InlineData(ReviewTaskKind.DiffReview, "Review only the supplied diff")]
+    [InlineData(ReviewTaskKind.RepositoryAnalysis, "supplied repository inventory")]
+    [InlineData(ReviewTaskKind.EdgeCases, "boundary and adversarial cases")]
+    public void PromptInjectsTaskSpecificRubric(ReviewTaskKind taskKind, string expectedRubric)
+    {
+        var prompt = ReviewerService.BuildPrompt(
+            new ReviewRequest("Bounded assignment.", TaskKind: taskKind),
+            HardwareTier.Mid,
+            taskKind);
+
+        Assert.Contains($"TASK RUBRIC ({taskKind})", prompt, StringComparison.Ordinal);
+        Assert.Contains(expectedRubric, prompt, StringComparison.Ordinal);
+        Assert.Contains("Never describe a model interpretation as a confirmed observation.", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StructuredFindingParserBoundsCountAndRejectsIncompleteOrOversizedRecords()
+    {
+        var valid = Enumerable.Range(1, ReviewerService.MaximumStructuredFindings + 5)
+            .Select(index => (object)new
+            {
+                id = $"F{index}",
+                claim = "Claim",
+                location = "File.cs:1",
+                evidence = "Supplied evidence",
+                confidence = "medium",
+                impact = "Impact",
+                verification = "Verification",
+                false_positive_condition = "False-positive condition"
+            })
+            .ToList();
+        valid.Insert(0, new
+        {
+            id = "OVERSIZED",
+            claim = new string('x', 2_001),
+            location = "File.cs:1",
+            evidence = "Evidence",
+            confidence = "high",
+            impact = "Impact",
+            verification = "Verification",
+            false_positive_condition = "Condition"
+        });
+        valid.Insert(0, new
+        {
+            id = "INCOMPLETE",
+            claim = "Missing required fields"
+        });
+        var json = JsonSerializer.Serialize(new { findings = valid });
+
+        var findings = ReviewerService.ParseStructuredFindings(json);
+        var parseResult = ReviewerService.ParseStructuredFindingsWithStatus(json);
+
+        Assert.Equal(ReviewerService.MaximumStructuredFindings, findings.Count);
+        Assert.Equal("parsed_with_ignored_items", parseResult.Status);
+        Assert.Equal("F1", findings[0].Id);
+        Assert.DoesNotContain(findings, item => item.Id is "OVERSIZED" or "INCOMPLETE");
+    }
+
+    [Fact]
+    public void StructuredFindingParserDistinguishesValidEmptyFromMalformedOutput()
+    {
+        var validEmpty = ReviewerService.ParseStructuredFindingsWithStatus("{\"findings\":[]}");
+        var malformed = ReviewerService.ParseStructuredFindingsWithStatus("{not-json");
+
+        Assert.Empty(validEmpty.Findings);
+        Assert.Equal("parsed", validEmpty.Status);
+        Assert.Empty(malformed.Findings);
+        Assert.Equal("malformed", malformed.Status);
+    }
+
+    [Fact]
     public async Task AutomaticPlanIsPassiveAndReviewUsesItsTaskAwareModelInsideTheLock()
     {
         using var temporary = new TemporaryDirectory();

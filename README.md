@@ -31,7 +31,7 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 - A self-contained x64 CLI (`thalen-helper.exe`).
 - A self-contained stdio MCP server (`local-gpu-reviewer.exe`).
 - Dynamic Windows, CPU, RAM, GPU, driver, VRAM, and storage detection.
-- A versioned model catalog, dynamic hardware-aware choices, and conservative automatic routing across eligible providers.
+- A versioned model catalog, dynamic hardware-aware choices, and conservative automatic routing that combines deterministic task cues, catalog task guidance, and current hardware headroom across eligible providers.
 - A fail-closed LM Studio/Qwythos route that binds the signed current-user LM Studio inventory and loaded instance to the exact catalog path, size, file identity, and full SHA-256 digest.
 - Preservation-first, backed-up, idempotent merging of `config.toml` and `AGENTS.override.md`.
 - A sanitized reusable reliability baseline that is installed only through an explicit opt-in preview.
@@ -43,9 +43,8 @@ The MCP reviewer is not described or configured as a native Codex subagent.
 The MCP server exposes only:
 
 - `local_gpu_health` — passive; never runs inference.
-- `local_gpu_review` — one bounded advisory generation using explicitly supplied text.
-
-- `local_gpu_plan` is also passive task-aware model/context selection; it never downloads, loads, or runs a model.
+- `local_gpu_plan` — passive task-aware model/context selection; it never downloads, loads, or runs a model.
+- `local_gpu_review` — one bounded advisory generation using explicitly supplied text. It preserves the model's original `findings` text, adds shape-validated `structuredFindings`, and reports `structuredFindingsStatus` as `parsed`, `parsed_with_ignored_items`, `malformed`, or `not_run`.
 
 It exposes no filesystem, shell, Git, deployment, publishing, email, arbitrary network, or mutation tool.
 
@@ -97,7 +96,7 @@ gh attestation verify .\Codex-GPU-Thalen-Helper-Setup.exe --repo rennavationstud
 
 Local Ollama and LM Studio operation requires no OpenAI API key. Codex itself still requires ChatGPT sign-in or another supported Codex authentication method. The helper never asks for, inspects, transmits, or stores OpenAI authentication.
 
-Prompts and responses are not written to disk. Provider traffic is restricted to HTTP loopback URIs. The Ollama transport verifies the exact connected process as a current-user, validly signed Ollama executable before it sends HTTP bytes. The LM Studio route likewise requires the signed current-user CLI and a verified loopback LM Studio process before it trusts inventory or sends a review. Hardware discovery collects no username, hostname, serial number, Windows product identifier, network identifier, or unrelated application inventory. Exported diagnostics are redacted and opt-in.
+Prompts and responses are not written to disk. Provider traffic is restricted to HTTP loopback URIs. The Ollama transport verifies the exact connected process as a current-user, validly signed Ollama executable before it sends HTTP bytes. The LM Studio route likewise requires the signed current-user CLI and a verified loopback LM Studio process before it trusts inventory or sends a review. Hardware discovery collects no username, hostname, serial number, Windows product identifier, network identifier, or unrelated application inventory. Exported diagnostics are redacted and opt-in. Structured locations, evidence, confidence, and verification steps are still untrusted model claims grounded only in text Codex supplied; shape validation does not verify their truth or give the reviewer repository access.
 
 See [PRIVACY.md](PRIVACY.md) and [docs/privacy-and-security.md](docs/privacy-and-security.md).
 
@@ -116,11 +115,15 @@ Approximate catalog tiers are conservative guardrails, not guarantees:
 
 Hardware fixtures cover integrated graphics, small dedicated GPUs, mainstream cards, large-VRAM cards, multiple GPUs, laptops, unsupported acceleration, and CPU-only systems. They are regression boundaries, not preferred hardware. Production selection is dynamic for the current user's measured dedicated/available VRAM, system RAM, acceleration route, storage headroom, and installed audited models with a current provider-specific exact-identity validation pass on that installation; shared graphics memory is never counted as dedicated VRAM. Validation stores only bounded timing/acceleration evidence and never prompts or responses. Guided setup keeps the user-confirmed provider and model and stops safely if validation fails; it never downloads or substitutes a different fallback model without a new selection.
 
+When `taskKind` is explicit, routing uses it unchanged. In automatic mode, review routing checks deterministic phrases in `focus` before `assignment`; passive `local_gpu_plan`, which has no focus input, checks its assignment. Both recognize test-failure, diff-review, repository-analysis, log-triage, and edge-case work, then fall back to the existing conservative input-size categories when no phrase matches. This is local phrase matching, not model inference, embeddings, or a quality benchmark. Among models that already pass every catalog, license, digest, validation, storage, and hardware requirement, routing uses the catalog's existing task descriptions and soft task/effort hardware-tier floors. If no eligible model meets a preferred floor, it uses the best safe eligible fallback and reports a warning. A GPU-intensive workload still forces quick effort and the smallest safe eligible model; pinned mode never switches models, and the configured LM Studio preference still leads standard/deep automatic selection among floor-eligible routes.
+
 Before Ollama review or validation, the helper checks runtime ownership inside its shared inference lease. An empty runtime may be claimed for the bounded operation. A loaded runtime is accepted only when exactly one running model matches both the current helper ownership marker and the requested route. CPU-only models, GPU models, and same-name models without that proof are treated as foreign and left untouched. Generation uses `keep_alive=0s` by default and verifies that the runtime releases afterward. Pause, disable, release, validation, and uninstall never issue a separate unload or deletion request by mutable model name.
 
 For the catalog-audited LM Studio route, the helper first uses the Authenticode-verified current-user `lms` CLI as a read-only inventory source. It requires one exact catalog key, relative path, expected size, regular-file identity, and full SHA-256 match while holding the model file and the LM Studio models-root path lease. It then verifies the loopback REST process, loads the catalog key, proves that the returned instance maps back to the same audited file, generates through that exact instance, unloads only that instance, and requires both REST inventory and `lms ps` to show it absent. Existing beta.11 registrations do not contain all of this evidence and must be explicitly revalidated.
 
 There is one documented upstream-boundary limitation: the REST load request still names the audited catalog key. A separate client deliberately trying to load that same key during the small interval between the helper's inventory check and REST load could create a race. The helper holds its single-review lease, pins the model namespace and file identity, verifies the exact returned instance before generation, and fails closed on any mismatch; users should not manually load the same LM Studio key during helper validation or review. A future hardening step is a unique CLI-assigned instance identifier when that contract is suitable for this boundary.
+
+Each task category receives a bounded review rubric. The reviewer requests at most 20 structured advisory findings with an ID, claim, supplied-text location and evidence, confidence, potential impact, an independent verification step, and a false-positive condition. Complete valid records appear in `structuredFindings`; incomplete, oversized, duplicate-ID, invalid-confidence, or malformed records are omitted. `structuredFindingsStatus` distinguishes a valid parse, a parse with ignored records, malformed output, and a review that did not run. The original bounded `findings` text remains available for compatibility, and an empty structured array is never proof that the reviewed material is clean.
 
 Read [docs/hardware-selection.md](docs/hardware-selection.md), [docs/model-selection.md](docs/model-selection.md), [docs/task-aware-routing.md](docs/task-aware-routing.md), and the auditable [model catalog](model-catalog/models.v1.json).
 

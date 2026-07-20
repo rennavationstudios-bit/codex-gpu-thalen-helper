@@ -20,7 +20,9 @@ Generation is single-flight through a named per-user Windows semaphore. Busy cal
 
 ## Prompt injection and model output
 
-The review prompt labels supplied text as untrusted and denies tool/filesystem claims. Output is returned as hypotheses, with an explicit requirement for primary Codex verification. The model cannot execute its output or apply patches.
+The review prompt labels supplied text as untrusted and denies tool/filesystem claims. It applies a task-specific bounded rubric and asks for at most 20 structured advisory findings. The helper shape-checks required string fields, field lengths, unique IDs, and `low|medium|high` confidence; invalid records are omitted. This validates representation only, not truth. Model-provided locations and evidence must refer only to supplied text and remain untrusted hypotheses until primary Codex checks them against source code, tests, runtime evidence, or authoritative documentation. `confirmedObservations` remains empty, the original bounded response remains available for compatibility, and malformed output is never executed or applied as a patch.
+
+No prompt, raw response, structured finding, or parse status is written to product state, validation evidence, diagnostics, or logs. `structuredFindingsStatus` distinguishes valid, partially rejected, malformed, and not-run output, but an empty structured array still is not a claim that no issue exists.
 
 ## Build and release
 

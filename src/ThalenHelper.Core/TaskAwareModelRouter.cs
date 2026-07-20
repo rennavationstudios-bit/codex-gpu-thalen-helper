@@ -76,23 +76,54 @@ public sealed class TaskAwareModelRouter
                 BuildTuningPlan(state.Preferences, 0));
         }
 
+        var minimumQualityTier = ResolveMinimumQualityTier(taskKind, effort);
+        var qualityCandidates = request.GpuIntensiveWorkloadActive
+            ? eligible
+            : eligible
+                .Where(model => ModelSelector.GetHardwareTier(model) >= minimumQualityTier)
+                .ToArray();
+        if (qualityCandidates.Length == 0)
+        {
+            qualityCandidates = eligible;
+            warnings.Add($"No eligible model met the preferred {minimumQualityTier} quality floor for {taskKind} at {effort} effort, so routing used the best safe eligible fallback.");
+        }
+
         var preferredLmStudio = state.Preferences.PreferLmStudioForStandardAndDeep
             && effort is ReviewEffort.Standard or ReviewEffort.Deep
             && !request.GpuIntensiveWorkloadActive
-            ? eligible
+            ? qualityCandidates
                 .Where(model => string.Equals(model.Provider, ModelProviders.LmStudio, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(model => model.AutomaticPriority)
+                .OrderByDescending(model => TaskSuitabilityScore(model, taskKind))
+                .ThenByDescending(model => model.AutomaticPriority)
                 .ThenByDescending(model => model.ParameterBillions)
                 .FirstOrDefault()
             : null;
-        var selected = preferredLmStudio ?? effort switch
+        var standardCandidates = qualityCandidates.Where(model => model.ParameterBillions <= 16m).ToArray();
+        if (standardCandidates.Length == 0)
         {
-            ReviewEffort.Quick => eligible[0],
-            ReviewEffort.Standard => eligible.LastOrDefault(model => model.ParameterBillions <= 16m)
-                ?? eligible[Math.Min(eligible.Length - 1, eligible.Length / 2)],
-            ReviewEffort.Deep => eligible[^1],
-            _ => eligible[0]
-        };
+            standardCandidates = qualityCandidates;
+        }
+        var selected = preferredLmStudio ?? (request.GpuIntensiveWorkloadActive
+            ? eligible[0]
+            : effort switch
+            {
+                ReviewEffort.Quick => qualityCandidates
+                    .OrderByDescending(model => TaskSuitabilityScore(model, taskKind))
+                    .ThenBy(model => model.ParameterBillions)
+                    .ThenBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+                    .First(),
+                ReviewEffort.Standard => standardCandidates
+                    .OrderByDescending(model => TaskSuitabilityScore(model, taskKind))
+                    .ThenByDescending(model => model.ParameterBillions)
+                    .ThenBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+                    .First(),
+                ReviewEffort.Deep => qualityCandidates
+                    .OrderByDescending(model => model.ParameterBillions)
+                    .ThenByDescending(model => TaskSuitabilityScore(model, taskKind))
+                    .ThenBy(model => model.Tag, StringComparer.OrdinalIgnoreCase)
+                    .First(),
+                _ => qualityCandidates[0]
+            });
         var contextTokens = ResolveContextTokens(request, state.Preferences, selected, effort);
         return new ModelRouteDecision(
             true,
@@ -134,6 +165,16 @@ public sealed class TaskAwareModelRouter
             return request.TaskKind;
         }
 
+        if (InferTaskKind(request.Focus) is { } focusTaskKind)
+        {
+            return focusTaskKind;
+        }
+
+        if (InferTaskKind(request.Assignment) is { } assignmentTaskKind)
+        {
+            return assignmentTaskKind;
+        }
+
         var suppliedCharacters = SuppliedCharacters(request);
         return suppliedCharacters switch
         {
@@ -167,6 +208,99 @@ public sealed class TaskAwareModelRouter
 
         var suppliedCharacters = SuppliedCharacters(request);
         return suppliedCharacters <= 8_000 ? ReviewEffort.Quick : ReviewEffort.Standard;
+    }
+
+    private static ReviewTaskKind? InferTaskKind(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if ((ContainsAnyWord(text, "test", "tests")
+                && ContainsAnyWord(text, "fail", "fails", "failed", "failing", "failure", "failures"))
+            || ContainsAny(text, "assertion failure", "ci failure", "ci failures"))
+        {
+            return ReviewTaskKind.TestFailure;
+        }
+
+        if (ContainsAnyWord(text, "diff", "diffs", "patch", "patches")
+            || ContainsAny(text, "pull request", "merge request", "changed files", "regression review"))
+        {
+            return ReviewTaskKind.DiffReview;
+        }
+
+        if (ContainsAnyWord(text, "repository", "repo", "codebase")
+            || ContainsAny(text, "repo-wide", "repo wide", "architecture review", "repository architecture", "execution path"))
+        {
+            return ReviewTaskKind.RepositoryAnalysis;
+        }
+
+        if (ContainsAnyWord(text, "log", "logs", "stacktrace")
+            || ContainsAny(text, "stack trace", "stack traces"))
+        {
+            return ReviewTaskKind.LogTriage;
+        }
+
+        if (ContainsAny(text,
+            "edge case", "edge cases", "edge-case", "edge-cases", "test fixture", "test fixtures",
+            "fixture generation", "boundary case", "boundary cases"))
+        {
+            return ReviewTaskKind.EdgeCases;
+        }
+
+        return null;
+    }
+
+    private static HardwareTier ResolveMinimumQualityTier(ReviewTaskKind taskKind, ReviewEffort effort)
+        => (taskKind, effort) switch
+        {
+            (ReviewTaskKind.RepositoryAnalysis, _) => HardwareTier.High,
+            (ReviewTaskKind.TestFailure or ReviewTaskKind.DiffReview, ReviewEffort.Quick) => HardwareTier.Mid,
+            (ReviewTaskKind.TestFailure or ReviewTaskKind.DiffReview, _) => HardwareTier.High,
+            (_, ReviewEffort.Deep) => HardwareTier.High,
+            (_, ReviewEffort.Standard) => HardwareTier.Mid,
+            _ => HardwareTier.Entry
+        };
+
+    private static int TaskSuitabilityScore(ModelCatalogEntry model, ReviewTaskKind taskKind)
+    {
+        var indicators = taskKind switch
+        {
+            ReviewTaskKind.LogTriage => new[] { "log", "triage", "grouping" },
+            ReviewTaskKind.TestFailure => new[] { "test-failure", "test failure", "failure analysis", "failure grouping", "failure hypotheses" },
+            ReviewTaskKind.DiffReview => new[] { "diff", "code review", "patch" },
+            ReviewTaskKind.RepositoryAnalysis => new[] { "repository", "multi-file", "codebase", "architecture" },
+            ReviewTaskKind.EdgeCases => new[] { "edge-case", "edge case", "fixture", "boundary" },
+            _ => new[] { "review" }
+        };
+        return indicators.Count(indicator =>
+            model.IntendedTasks.Contains(indicator, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ContainsAny(string text, params string[] phrases)
+        => phrases.Any(phrase => text.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+
+    private static bool ContainsAnyWord(string text, params string[] words)
+        => words.Any(word => ContainsWord(text, word));
+
+    private static bool ContainsWord(string text, string word)
+    {
+        var startIndex = 0;
+        while ((startIndex = text.IndexOf(word, startIndex, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            var endIndex = startIndex + word.Length;
+            var startsAtBoundary = startIndex == 0 || !char.IsLetterOrDigit(text[startIndex - 1]);
+            var endsAtBoundary = endIndex == text.Length || !char.IsLetterOrDigit(text[endIndex]);
+            if (startsAtBoundary && endsAtBoundary)
+            {
+                return true;
+            }
+
+            startIndex = endIndex;
+        }
+
+        return false;
     }
 
     private static ModelRouteDecision PlanPinned(

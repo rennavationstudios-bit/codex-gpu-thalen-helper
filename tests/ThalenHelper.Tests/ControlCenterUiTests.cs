@@ -321,6 +321,56 @@ public sealed class ControlCenterUiTests
             Findings = findings
         }));
 
+    [Fact]
+    public void ReviewerTestAcceptsTheStructuredReadinessClaimRequiredByTheReviewerPrompt()
+        => Assert.True(MainForm.IsReadyResponse(new ThalenHelper.Core.ReviewerResult
+        {
+            ModelRan = true,
+            Findings = "{\"findings\":[{\"claim\":\"THALEN_READY\"}]}",
+            StructuredFindings =
+            [
+                new ThalenHelper.Core.StructuredReviewerFinding(
+                    "F1",
+                    "THALEN_READY",
+                    "readiness-check",
+                    "readiness-check",
+                    "high",
+                    "connectivity confirmed",
+                    "none",
+                "model did not follow this assignment")
+            ]
+        }));
+
+    [Fact]
+    public void ReviewerReadinessPromptParserAndVerifierShareOneStructuredContract()
+    {
+        var request = new ThalenHelper.Core.ReviewRequest(
+            Assignment: "Return one structured advisory finding whose claim is exactly THALEN_READY.",
+            Focus: "One bounded connectivity check only.",
+            MaximumOutputTokens: 256,
+            TaskKind: ThalenHelper.Core.ReviewTaskKind.DiffReview,
+            Effort: ThalenHelper.Core.ReviewEffort.Standard,
+            DesiredContextTokens: 8_192,
+            EstimatedInputCharacters: 120);
+        var prompt = ThalenHelper.Core.ReviewerService.BuildPrompt(
+            request,
+            ThalenHelper.Core.HardwareTier.Mid,
+            ThalenHelper.Core.ReviewTaskKind.DiffReview);
+        const string response = """{"findings":[{"id":"F1","claim":"THALEN_READY","location":"readiness-check","evidence":"readiness-check","confidence":"high","impact":"connectivity confirmed","verification":"none","falsePositiveCondition":"model did not follow this assignment"}]}""";
+        var parsed = ThalenHelper.Core.ReviewerService.ParseStructuredFindingsWithStatus(response);
+
+        Assert.Contains("Return only one JSON object", prompt, StringComparison.Ordinal);
+        Assert.Contains("THALEN_READY", prompt, StringComparison.Ordinal);
+        Assert.Equal("parsed", parsed.Status);
+        Assert.True(MainForm.IsReadyResponse(new ThalenHelper.Core.ReviewerResult
+        {
+            ModelRan = true,
+            Findings = response,
+            StructuredFindings = parsed.Findings,
+            StructuredFindingsStatus = parsed.Status
+        }));
+    }
+
     [Theory]
     [InlineData(ThalenHelper.Core.HelperAvailability.Enabled, false, true)]
     [InlineData(ThalenHelper.Core.HelperAvailability.Paused, false, true)]

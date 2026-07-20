@@ -60,7 +60,7 @@ public static class LocalGpuReviewerTools
     public static async Task<ReviewerPlanResult> PlanAsync(
         IServiceProvider services,
         [Description("A short description of the proposed bounded review task.")] string assignment,
-        [Description("Task category; auto infers a conservative category from the supplied estimate.")] ReviewTaskKind taskKind = ReviewTaskKind.Auto,
+        [Description("Task category; auto uses deterministic assignment cues, then falls back conservatively to the supplied size estimate.")] ReviewTaskKind taskKind = ReviewTaskKind.Auto,
         [Description("Requested review depth; auto chooses from task type and estimated size.")] ReviewEffort effort = ReviewEffort.Auto,
         [Description("Estimated total characters Codex would explicitly supply to the reviewer, from 0 through 110,000.")] int? estimatedInputCharacters = null,
         [Description("Set true while an emulator, graphics build, rendering, video, game, or other GPU-heavy workload is active.")] bool gpuIntensiveWorkloadActive = false,
@@ -99,7 +99,7 @@ public static class LocalGpuReviewerTools
         Idempotent = true,
         OpenWorld = false,
         UseStructuredContent = true)]
-    [Description("Runs one bounded advisory review using only explicitly supplied text. It cannot read files, use a shell, edit code, or make external changes.")]
+    [Description("Runs one bounded advisory review using only explicitly supplied text. The result preserves the original findings text, adds shape-validated advisory structuredFindings, and reports structuredFindingsStatus for parsed, partially rejected, malformed, or not-run output. It cannot read files, use a shell, edit code, or make external changes.")]
     public static async Task<ReviewerResult> ReviewAsync(
         IServiceProvider services,
         [Description("A precise bounded assignment, up to 12,000 characters.")] string assignment,
@@ -108,7 +108,7 @@ public static class LocalGpuReviewerTools
         [Description("Optional response token limit from 64 through 2,048.")] int? maximumOutputTokens = null,
         [Description("When another review is active, skip immediately (default) or enter a bounded queue.")] ReviewBusyBehavior busyBehavior = ReviewBusyBehavior.Skip,
         [Description("Bounded queue timeout from 1 through 120 seconds when busyBehavior is queue.")] int queueTimeoutSeconds = 30,
-        [Description("Task category; auto infers a conservative category from supplied text size.")] ReviewTaskKind taskKind = ReviewTaskKind.Auto,
+        [Description("Task category; auto uses deterministic focus and assignment cues, then falls back conservatively to supplied text size.")] ReviewTaskKind taskKind = ReviewTaskKind.Auto,
         [Description("Requested review depth; auto chooses from task type and supplied text size.")] ReviewEffort effort = ReviewEffort.Auto,
         [Description("Set true while an emulator, graphics build, rendering, video, game, or other GPU-heavy workload is active.")] bool gpuIntensiveWorkloadActive = false,
         [Description("Optional desired context from 512 through 131,072 tokens; the router caps it to the model and policy maximum.")] int? desiredContextTokens = null,

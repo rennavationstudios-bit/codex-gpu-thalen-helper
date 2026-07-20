@@ -50,6 +50,110 @@ public sealed class TaskAwareModelRouterTests
         Assert.Equal(expectedModel, route.Model);
     }
 
+    [Theory]
+    [InlineData("Triage the failing tests and assertion failures.", ReviewTaskKind.TestFailure)]
+    [InlineData("Review this diff for regressions.", ReviewTaskKind.DiffReview)]
+    [InlineData("Map the repository execution path.", ReviewTaskKind.RepositoryAnalysis)]
+    [InlineData("Analyze logs from the service.", ReviewTaskKind.LogTriage)]
+    [InlineData("Suggest edge cases and test fixtures.", ReviewTaskKind.EdgeCases)]
+    public void AutomaticTaskInferenceUsesAssignmentSemanticsBeforeLengthFallback(
+        string assignment,
+        ReviewTaskKind expectedTaskKind)
+    {
+        var request = new ReviewRequest(assignment, EstimatedInputCharacters: 100_000);
+
+        Assert.Equal(expectedTaskKind, TaskAwareModelRouter.ResolveTaskKind(request));
+    }
+
+    [Fact]
+    public void AutomaticTaskInferenceGivesSpecificFocusPriorityOverAssignmentAndLength()
+    {
+        var request = new ReviewRequest(
+            "Analyze the repository.",
+            Focus: "Concentrate on failing tests.",
+            EstimatedInputCharacters: 100_000);
+
+        Assert.Equal(ReviewTaskKind.TestFailure, TaskAwareModelRouter.ResolveTaskKind(request));
+    }
+
+    [Theory]
+    [InlineData(8_000, ReviewTaskKind.General)]
+    [InlineData(8_001, ReviewTaskKind.DiffReview)]
+    [InlineData(48_001, ReviewTaskKind.RepositoryAnalysis)]
+    public void AutomaticTaskInferenceFallsBackToSuppliedLengthWhenNoKeywordsMatch(
+        int estimatedCharacters,
+        ReviewTaskKind expectedTaskKind)
+    {
+        var request = new ReviewRequest("Summarize the supplied material.", EstimatedInputCharacters: estimatedCharacters);
+
+        Assert.Equal(expectedTaskKind, TaskAwareModelRouter.ResolveTaskKind(request));
+    }
+
+    [Fact]
+    public void AutomaticRoutingPrefersCatalogTaskSuitabilityWithinTheQualityFloor()
+    {
+        var small = Catalog().Models.Single(model => model.Tag == "qwen3:8b") with
+        {
+            IntendedTasks = "General summarization."
+        };
+        var suitable = Catalog().Models.Single(model => model.Tag == "qwen3:14b") with
+        {
+            IntendedTasks = "Bounded diff review and patch analysis."
+        };
+        var catalog = Catalog() with { Models = [small, suitable] };
+        var installed = new[] { Installed(small.Tag), Installed(suitable.Tag) };
+
+        var route = new TaskAwareModelRouter().Plan(
+            new ReviewRequest("Review the patch.", Effort: ReviewEffort.Quick),
+            AutomaticState(),
+            catalog,
+            Rtx3090(),
+            installed,
+            ValidationRegistry(installed));
+
+        Assert.True(route.Allowed, route.Reason);
+        Assert.Equal(suitable.Tag, route.Model);
+    }
+
+    [Fact]
+    public void QuickRepositoryAnalysisUsesAHighQualityFloorInsteadOfTheSmallestModel()
+    {
+        var tiny = Catalog().Models.Single(model => model.Tag == "qwen2.5-coder:0.5b");
+        var capable = Catalog().Models.Single(model => model.Tag == "qwen3:14b");
+        var catalog = Catalog() with { Models = [tiny, capable] };
+        var installed = new[] { Installed(tiny.Tag), Installed(capable.Tag) };
+
+        var route = new TaskAwareModelRouter().Plan(
+            new ReviewRequest("Map the repository.", Effort: ReviewEffort.Quick),
+            AutomaticState(),
+            catalog,
+            Rtx3090(),
+            installed,
+            ValidationRegistry(installed));
+
+        Assert.True(route.Allowed, route.Reason);
+        Assert.Equal(capable.Tag, route.Model);
+        Assert.Empty(route.Warnings);
+    }
+
+    [Fact]
+    public void QualityFloorFallsBackToTheBestSafeEligibleModel()
+    {
+        var installed = new[] { Installed("qwen3:8b") };
+
+        var route = new TaskAwareModelRouter().Plan(
+            new ReviewRequest("Analyze the repository.", Effort: ReviewEffort.Quick),
+            AutomaticState(),
+            Catalog(),
+            Rtx3090(),
+            installed,
+            ValidationRegistry(installed));
+
+        Assert.True(route.Allowed, route.Reason);
+        Assert.Equal("qwen3:8b", route.Model);
+        Assert.Contains(route.Warnings, warning => warning.Contains("quality floor", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void PassiveRoutingCapsDeepContextToAuditedModelLimit()
     {
@@ -115,7 +219,7 @@ public sealed class TaskAwareModelRouterTests
     {
         var route = new TaskAwareModelRouter().Plan(
             new ReviewRequest(
-                "Review a large log.",
+                "Analyze the repository inventory.",
                 Effort: ReviewEffort.Deep,
                 GpuIntensiveWorkloadActive: true),
             AutomaticState(),
@@ -125,6 +229,7 @@ public sealed class TaskAwareModelRouterTests
             ValidationRegistry(InstalledQwenModels()));
 
         Assert.True(route.Allowed);
+        Assert.Equal(ReviewTaskKind.RepositoryAnalysis, route.TaskKind);
         Assert.Equal("qwen3:8b", route.Model);
         Assert.Equal(ReviewEffort.Quick, route.Effort);
         Assert.Single(route.Warnings);

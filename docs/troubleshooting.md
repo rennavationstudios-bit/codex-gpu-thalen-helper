@@ -21,6 +21,10 @@ Hover over any Control Center button for a plain-language explanation before usi
 
 This is normally the safe idle state. Low-impact mode requests immediate release, so Ollama unloads the tracked model and LM Studio unloads the exact helper-created instance after each bounded review. A model being installed, registered, or selected is different from a model being loaded in GPU memory. Use the explicitly confirmed **Test local review** action only when you want to run inference; passive status never loads a model.
 
+## Review ran but structured findings are empty
+
+Check `modelRan`, `errorCode`, `structuredFindingsStatus`, and the original `findings` text together. `parsed` distinguishes a valid empty result from `malformed` prose/truncated/invalid JSON; `parsed_with_ignored_items` means at least one record was omitted or the 20-item cap applied. The helper preserves bounded original text for compatibility and never turns parsed records into confirmed observations. Do not report the review as clean from the empty array alone. Primary Codex should independently inspect any useful raw claim and may request another explicitly bounded review only when local inference is still appropriate and authorized.
+
 ## The reviewer is labeled external
 
 Setup found an unmarked `local_gpu_reviewer` that it does not own. It preserves that entry byte-for-byte and does not test, invoke, pause, unload, reconfigure, or add instructions for it. Managed-only Control Center buttons remain disabled. Run `thalen-helper repair --dry-run --diff-out <private-local-file> --migrate-existing`, review the private diff, then apply only with the four returned source/planned hashes and the same `--migrate-existing` flag. Ambiguous table layouts are intentionally refused. Packaged locking, pressure refusal, startup, routing, and unload controls apply only after that explicit migration succeeds.

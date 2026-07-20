@@ -41,10 +41,16 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'README.md') -Destination (Joi
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'INSTALL-WITH-CODEX.md') -Destination (Join-Path $stage '0 - PASTE THIS INTO CODEX.md')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\friend-install-and-use-guide.md') -Destination (Join-Path $stage 'INSTALL AND USE GUIDE.md')
-Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\CODEX-HANDOFF.md') -Destination (Join-Path $stage '3 - CODEX HANDOFF.md')
+$stagedHandoff = Join-Path $stage '3 - CODEX HANDOFF.md'
+Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\CODEX-HANDOFF.md') -Destination $stagedHandoff
+$handoffText = [System.IO.File]::ReadAllText($stagedHandoff)
+$handoffText = $handoffText.Replace('(model-selection.md', '(docs/MODEL%20SELECTION.md')
+$handoffText = $handoffText.Replace('(task-aware-routing.md', '(docs/task-aware-routing.md')
+[System.IO.File]::WriteAllText($stagedHandoff, $handoffText, [System.Text.UTF8Encoding]::new($false))
 $friendDocs = [ordered]@{
     'model-selection.md' = 'MODEL SELECTION.md'
     'privacy-and-security.md' = 'PRIVACY AND SECURITY.md'
+    'task-aware-routing.md' = 'task-aware-routing.md'
     'troubleshooting.md' = 'TROUBLESHOOTING.md'
     'uninstall.md' = 'UNINSTALL.md'
 }

@@ -341,6 +341,16 @@ public sealed record ReviewerTuningPlan(
     string ProviderControl,
     IReadOnlyList<string> ExperimentalOverrides);
 
+public sealed record StructuredReviewerFinding(
+    string Id,
+    string Claim,
+    string Location,
+    string Evidence,
+    string Confidence,
+    string Impact,
+    string Verification,
+    string FalsePositiveCondition);
+
 public sealed record ReviewerPlanResult
 {
     public string IntegrationName { get; init; } = ProductInfo.IntegrationName;
@@ -377,6 +387,8 @@ public sealed record ReviewerResult
     public ReviewerTuningPlan? Tuning { get; init; }
     public string? BoundedAssignment { get; init; }
     public string? Findings { get; init; }
+    public IReadOnlyList<StructuredReviewerFinding> StructuredFindings { get; init; } = [];
+    public string StructuredFindingsStatus { get; init; } = "not_run";
     public IReadOnlyList<string> ConfirmedObservations { get; init; } = [];
     public IReadOnlyList<string> Hypotheses { get; init; } = [];
     public long ElapsedMilliseconds { get; init; }

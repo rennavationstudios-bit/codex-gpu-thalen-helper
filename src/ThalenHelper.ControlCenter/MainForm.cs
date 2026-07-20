@@ -928,9 +928,9 @@ public sealed class MainForm : Form
         using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"));
         var reviewer = new ReviewerService(_paths, new StateStore(_paths.StateFile), client);
         var request = new ReviewRequest(
-            "Return exactly THALEN_READY. Do not add explanation.",
+            "Return one structured advisory finding whose claim is exactly THALEN_READY. Use readiness-check for the location and evidence, high confidence, connectivity confirmed for the impact, none for the verification, and model did not follow this assignment for the false-positive condition.",
             Focus: "One bounded connectivity check only.",
-            MaximumOutputTokens: 32,
+            MaximumOutputTokens: 256,
             BusyBehavior: ReviewBusyBehavior.Skip,
             TaskKind: ReviewTaskKind.DiffReview,
             Effort: ReviewEffort.Standard,
@@ -967,14 +967,15 @@ public sealed class MainForm : Form
         var message = result.ModelRan && responseVerified
             ? $"Review succeeded with {DisplayModel(result.Model ?? plan.Model)} through {result.Provider}.\n\nElapsed: {TimeSpan.FromMilliseconds(result.ElapsedMilliseconds):m\\:ss}.  Model released: {(released ? "Yes" : "Needs attention")}."
             : result.ModelRan
-                ? "The model ran, but its response did not match the expected bounded readiness token."
+                ? "The model ran, but its structured response did not contain the expected bounded readiness claim."
                 : result.ErrorMessage ?? "The model did not run.";
         MessageBox.Show(this, message, passed ? "Local review passed" : result.ErrorCode ?? "Local review needs attention", MessageBoxButtons.OK, passed ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
     }
 
     internal static bool IsReadyResponse(ReviewerResult result)
         => result.ModelRan
-           && string.Equals(result.Findings?.Trim(), "THALEN_READY", StringComparison.Ordinal);
+           && (string.Equals(result.Findings?.Trim(), "THALEN_READY", StringComparison.Ordinal)
+               || result.StructuredFindings.Any(finding => string.Equals(finding.Claim.Trim(), "THALEN_READY", StringComparison.Ordinal)));
 
     internal static bool ShouldEnableCodexEntry(HelperAvailability availability, bool managedConfigEnabled)
         => availability == HelperAvailability.Disabled || !managedConfigEnabled;

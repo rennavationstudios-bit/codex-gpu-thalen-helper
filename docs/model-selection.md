@@ -4,7 +4,7 @@ The base installer is passive: it does not download, register, load, validate, o
 
 For Ollama, the wizard asks where models should be stored. It shows the selected drive type, current free space, approximate download size, temporary overhead, and required safety reserve before it can continue. Automatic storage placement never chooses removable or network storage. A user may explicitly select an already mounted external drive that Windows exposes as a fixed volume, subject to the same reserve. The helper records a disconnect warning and expects the same drive letter to be available before Ollama or Codex starts; it does not copy installed models merely because storage is external.
 
-The versioned JSON catalog is the allowlist for both providers. Arbitrary scraped Ollama tags and arbitrary GGUF files cannot enter the managed route merely because a provider can load them. Entries include provider, size, family/parameters, task scope, VRAM/RAM/disk requirements, context bounds, performance tier, CPU suitability, license/source URLs, verification date, and digest where published.
+The versioned JSON catalog is the allowlist for both providers. Arbitrary scraped Ollama tags and arbitrary GGUF files cannot enter the managed route merely because a provider can load them. Entries include provider, size, family/parameters, task scope, VRAM/RAM/disk requirements, context bounds, performance tier, CPU suitability, license/source URLs, verification date, and digest where published. Automatic routing now compares deterministic task indicators with the existing `intendedTasks` text after all safety and eligibility checks; this is suitability guidance, not a benchmark score or quality guarantee.
 
 ## Hardware-aware choices
 
@@ -22,7 +22,7 @@ Models outside the conservative budget remain unavailable with an explanation. C
 
 Entry-tier context is reduced and low-impact mode is on. Hardware fixtures such as the MX330 test case are regression boundaries only; production selection is dynamic for the hardware actually detected.
 
-Automatic candidates must have a commercial-use-compatible license, `automaticSelectionAllowed=true`, and a current provider-specific validation pass for the exact installed identity. A missing, corrupt, legacy-protocol, stale, or digest-mismatched pass keeps that model out of automatic routing.
+Automatic candidates must have a commercial-use-compatible license, `automaticSelectionAllowed=true`, and a current provider-specific validation pass for the exact installed identity. A missing, corrupt, legacy-protocol, stale, or digest-mismatched pass keeps that model out of automatic routing. Only after this fail-closed pool is built does the router apply soft task/effort hardware-tier floors and catalog task suitability. If no safe candidate meets a preferred floor, it selects the best safe eligible fallback with a warning; it never relaxes catalog, digest, validation, storage, license, or resource requirements.
 
 ## Ollama acquisition and runtime validation
 

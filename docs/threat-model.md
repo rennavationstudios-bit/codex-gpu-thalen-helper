@@ -24,6 +24,7 @@
 | Threat | Primary controls | Residual risk |
 |---|---|---|
 | Prompt injection | Explicit untrusted-data framing; no execution/filesystem/shell tools | Model advice may still be misleading |
+| Misleading structured output | Task-specific bounded JSON contract; required non-empty fields; field/count/confidence bounds; duplicate-ID rejection; `confirmedObservations` remains empty; primary Codex verification required | Shape-valid claims, locations, evidence, confidence, and verification steps may still be wrong; empty structured output may also mean parsing failed |
 | Secret disclosure | Only caller-supplied text; no prompt logs; docs prohibit secrets | Codex/user can still explicitly supply sensitive text |
 | Endpoint impersonation | Loopback URI validation, listener checks, exact TCP-owner PID mapping, current-user SID match, exact Ollama executable name, and valid expected-publisher Authenticode verification before HTTP bytes | A compromised administrator/current-user security boundary or a malicious but still validly signed Ollama build remains trusted |
 | Model substitution | Catalog digest, selected-tag, manifest, and configured-directory checks before activation/review | A privileged local attacker can replace both runtime and trusted state |
