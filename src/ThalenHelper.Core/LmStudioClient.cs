@@ -30,6 +30,10 @@ public sealed partial class LmStudioClient : IDisposable
         _ownsHttpClient = httpClient is null;
         _httpClient = httpClient ?? new HttpClient(CreateVerifiedHandler());
         _httpClient.BaseAddress = _baseUri;
+        // Every operation below supplies its own bounded cancellation token. Disable
+        // HttpClient's independent 100-second default so a legitimate cold model load
+        // cannot be cancelled before the audited five-minute load budget expires.
+        _httpClient.Timeout = Timeout.InfiniteTimeSpan;
     }
 
     public Uri BaseUri => _baseUri;

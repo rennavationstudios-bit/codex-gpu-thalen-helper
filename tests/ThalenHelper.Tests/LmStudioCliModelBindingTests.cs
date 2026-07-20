@@ -266,7 +266,11 @@ public sealed class LmStudioCliModelBindingTests
         var inventoryStartInfo = LmStudioCliProcessInventorySource.CreateInventoryProcessStartInfo(
             executable,
             "ls");
+        Assert.False(inventoryStartInfo.UseShellExecute);
+        Assert.True(inventoryStartInfo.CreateNoWindow);
         Assert.True(inventoryStartInfo.RedirectStandardInput);
+        Assert.True(inventoryStartInfo.RedirectStandardOutput);
+        Assert.True(inventoryStartInfo.RedirectStandardError);
         Assert.Equal(["ls", "--json"], inventoryStartInfo.ArgumentList);
     }
 

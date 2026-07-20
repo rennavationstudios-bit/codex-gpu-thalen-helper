@@ -23,6 +23,8 @@ This is normally the safe idle state. Low-impact mode requests immediate release
 
 During a Codex-started review, beta.21 and later show **Loading**, **Review active**, **Releasing**, or **Check status** with the routed provider and model. That short-lived display signal is intentionally not proof of GPU residency or model ownership. Cleanup controls still require the separate exact ownership tracker, so a stale or forged status display can never authorize unloading a user-owned model. If **Check status** remains visible for more than two minutes, refresh the dashboard and use passive diagnostics; do not manually delete state while a provider may still be working.
 
+Beta.22 and later let a cold local-model load use the helper's full explicit five-minute budget. Earlier builds could be cancelled near 100 seconds by .NET's separate default HTTP timeout even though the provider load was still making progress. The per-operation limits remain bounded; this change does not make provider calls unbounded.
+
 ## Review ran but structured findings are empty
 
 Check `modelRan`, `errorCode`, `structuredFindingsStatus`, and the original `findings` text together. `parsed` distinguishes a valid empty result from `malformed` prose/truncated/invalid JSON; `parsed_with_ignored_items` means at least one record was omitted or the 20-item cap applied. The helper preserves bounded original text for compatibility and never turns parsed records into confirmed observations. Do not report the review as clean from the empty array alone. Primary Codex should independently inspect any useful raw claim and may request another explicitly bounded review only when local inference is still appropriate and authorized.

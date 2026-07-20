@@ -24,6 +24,10 @@ public sealed partial class OllamaClient : IDisposable
         _ownsHttpClient = httpClient is null;
         _httpClient = httpClient ?? new HttpClient(CreateVerifiedHandler());
         _httpClient.BaseAddress = _baseUri;
+        // Inventory, generation, pull, and unload requests all have explicit bounded
+        // cancellation tokens. Disable HttpClient's hidden 100-second default so those
+        // operation-specific limits remain authoritative for slow local model work.
+        _httpClient.Timeout = Timeout.InfiniteTimeSpan;
     }
 
     public Uri BaseUri => _baseUri;

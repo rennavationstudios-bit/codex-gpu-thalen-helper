@@ -2,7 +2,7 @@ Codex GPU Thalen Helper is an independent community project. It is not made, end
 
 The helper adds an optional, bounded, read-only local MCP reviewer. Codex remains the primary agent and continues to require its own supported sign-in or authentication. The helper never asks for or stores an OpenAI API key.
 
-This v0.1.0-beta.21 installer is not Authenticode-signed. Windows SmartScreen may show an unknown publisher warning. Verify the SHA-256 checksum and GitHub artifact attestation before running it.
+This v0.1.0-beta.22 installer is not Authenticode-signed. Windows SmartScreen may show an unknown publisher warning. Verify the SHA-256 checksum and GitHub artifact attestation before running it.
 
 Ollama is configured for loopback access only. Automatic startup is per-user and avoids starting a second process when Ollama is already running. If automatic startup is declined, local review requires manually starting Ollama after each sign-in.
 

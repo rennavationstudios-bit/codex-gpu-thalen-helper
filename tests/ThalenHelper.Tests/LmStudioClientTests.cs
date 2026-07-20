@@ -29,6 +29,71 @@ public sealed class LmStudioClientTests
     }
 
     [Fact]
+    public async Task ExplicitOperationTimeoutAllowsColdLoadBeyondInjectedClientTimeout()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/api/v1/models/load")
+            {
+                await Task.Delay(50, cancellationToken);
+                return FakeHttpMessageHandler.Json(
+                    "{\"model\":\"model-9b\",\"instance_id\":\"model-9b:1\",\"load_config\":{\"context_length\":65536,\"flash_attention\":true,\"offload_kv_cache_to_gpu\":true}}");
+            }
+
+            return request.RequestUri?.AbsolutePath == "/api/v1/models"
+                ? FakeHttpMessageHandler.Json(
+                    "{\"models\":[{\"key\":\"model-9b\",\"loaded_instances\":[{\"id\":\"model-9b:1\"}]}]}")
+                : FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+        });
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(5) };
+        using var client = new LmStudioClient(new Uri("http://127.0.0.1:1234"), http);
+
+        var result = await client.LoadOwnedAsync(
+            "model-9b",
+            tracker,
+            static (_, _) => Task.CompletedTask);
+
+        Assert.Equal("model-9b:1", result.InstanceId);
+        Assert.Equal("model-9b:1", tracker.ReadReference()?.InstanceId);
+        Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
+    }
+
+    [Fact]
+    public async Task CallerCancellationStillStopsColdLoadBeforeOwnershipExists()
+    {
+        using var temporary = new TemporaryDirectory();
+        var tracker = new ActiveModelTracker(temporary.Path);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            if (request.RequestUri?.AbsolutePath == "/api/v1/models/load")
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            return FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+        });
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(5) };
+        using var client = new LmStudioClient(new Uri("http://127.0.0.1:1234"), http);
+        using var cancellation = new CancellationTokenSource();
+
+        var load = client.LoadOwnedAsync(
+            "model-9b",
+            tracker,
+            static (_, _) => Task.CompletedTask,
+            cancellation.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        cancellation.Cancel();
+
+        _ = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => load);
+        Assert.Equal(ActiveModelTrackerStatus.Absent, tracker.Inspect().Status);
+        Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
+    }
+
+    [Fact]
     public async Task InventoryParsesNativeV1MetadataAndLoadedInstances()
     {
         const string body = """

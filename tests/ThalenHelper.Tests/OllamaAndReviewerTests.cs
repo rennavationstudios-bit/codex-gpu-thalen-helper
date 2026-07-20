@@ -21,6 +21,25 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
+    public async Task ExplicitOperationTimeoutOverridesHttpClientDefaultTimeout()
+    {
+        var handler = new FakeHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            await Task.Delay(50, cancellationToken);
+            return request.RequestUri?.AbsolutePath == "/api/tags"
+                ? FakeHttpMessageHandler.Json("{\"models\":[]}")
+                : FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound);
+        });
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(5) };
+        using var client = new OllamaClient(new Uri("http://127.0.0.1:11434"), http);
+
+        var models = await client.GetModelsAsync();
+
+        Assert.Empty(models);
+        Assert.Equal(Timeout.InfiniteTimeSpan, http.Timeout);
+    }
+
+    [Fact]
     public async Task GenerationRejectsAResponseForADifferentModelIdentity()
     {
         var handler = new FakeHttpMessageHandler((_, _) => Task.FromResult(FakeHttpMessageHandler.Json(

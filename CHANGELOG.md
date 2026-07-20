@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.22 - 2026-07-20
+
+- Removed .NET's independent 100-second `HttpClient` timeout from the loopback Ollama and LM Studio clients so each operation's existing bounded timeout is authoritative. Cold Qwythos loads can now use the full audited five-minute load budget instead of being cancelled near 100 seconds.
+- Kept bounded failure behavior unchanged: inventory calls still time out after 10 seconds, model generation and LM Studio loading after five minutes, Ollama pulls after two hours, and caller cancellation still releases helper-owned resources.
+- Added deterministic no-inference regression coverage proving a slower loopback response is governed by the helper's explicit operation timeout rather than an injected `HttpClient` default.
+- Locked the signed LM Studio CLI inventory launch to redirected standard streams, `UseShellExecute=false`, and `CreateNoWindow=true` so passive routing checks do not open a console window.
+
 ## 0.1.0-beta.21 - 2026-07-20
 
 - Added a separate display-only review activity signal so Codex-started Ollama and LM Studio work is visible during provider loading, reviewing, releasing, and attention states without weakening strict model-ownership tracking.
