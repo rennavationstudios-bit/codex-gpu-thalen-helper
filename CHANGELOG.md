@@ -4,11 +4,14 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.19 - 2026-07-20
+
 - Made automatic task inference meaning-aware without running inference: an explicit task kind still wins, then automatic routing checks deterministic focus and assignment phrases for test-failure, diff-review, repository-analysis, log-triage, and edge-case work before the existing conservative input-size fallback.
 - Automatic routing now uses existing catalog task guidance and soft task/effort hardware-tier floors while retaining exact model validation, hardware/resource guards, pinned behavior, LM Studio preference, and the smallest-safe-model rule during GPU-intensive work.
 - Added task-specific local-review rubrics, additive `structuredFindings`, and `structuredFindingsStatus` so valid empty, partially rejected, malformed, and not-run results remain distinguishable while preserving the original raw `findings` response.
 - Added regression coverage for deterministic task precedence, task-suitable model selection, safe fallback warnings, structured parsing bounds, malformed-output compatibility, and the public MCP schema.
 - Clarified automatic health output as a task-aware provider/model pool with eligible loopback endpoints; task planning remains the authoritative per-request route.
+- Kept automatic Ollama health available when optional LM Studio is closed or untrusted, reused one captured LM Studio inventory probe, and retained provider-qualified eligibility when model tags collide across providers.
 
 ## 0.1.0-beta.18 - 2026-07-18
 

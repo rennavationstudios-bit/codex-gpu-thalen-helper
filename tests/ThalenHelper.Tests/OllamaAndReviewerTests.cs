@@ -984,6 +984,38 @@ public sealed class OllamaAndReviewerTests
     }
 
     [Fact]
+    public void StructuredFindingParserRejectsDuplicateIdsAndInvalidConfidence()
+    {
+        static object Finding(string id, string confidence) => new
+        {
+            id,
+            claim = "Claim",
+            location = "File.cs:1",
+            evidence = "Supplied evidence",
+            confidence,
+            impact = "Impact",
+            verification = "Verification",
+            falsePositiveCondition = "False-positive condition"
+        };
+        var json = JsonSerializer.Serialize(new
+        {
+            findings = new[]
+            {
+                Finding("F1", "HIGH"),
+                Finding("F1", "medium"),
+                Finding("F2", "certain")
+            }
+        });
+
+        var result = ReviewerService.ParseStructuredFindingsWithStatus(json);
+
+        var finding = Assert.Single(result.Findings);
+        Assert.Equal("F1", finding.Id);
+        Assert.Equal("high", finding.Confidence);
+        Assert.Equal("parsed_with_ignored_items", result.Status);
+    }
+
+    [Fact]
     public async Task AutomaticPlanIsPassiveAndReviewUsesItsTaskAwareModelInsideTheLock()
     {
         using var temporary = new TemporaryDirectory();

@@ -158,6 +158,16 @@ public sealed class TaskAwareModelRouter
             .Select(model => model.Tag)
             .ToArray();
 
+    internal IReadOnlyList<(string Provider, string Tag)> GetEligibleInstalledModelIdentities(
+        InstallationState state,
+        ModelManifest catalog,
+        HardwareProfile hardware,
+        IReadOnlyList<OllamaModelInfo> installedModels,
+        ModelValidationRegistry? validations = null)
+        => GetEligibleInstalledModels(state, catalog, hardware, installedModels, validations)
+            .Select(model => (ModelProviders.Normalize(model.Provider), model.Tag))
+            .ToArray();
+
     internal static ReviewTaskKind ResolveTaskKind(ReviewRequest request)
     {
         if (request.TaskKind != ReviewTaskKind.Auto)

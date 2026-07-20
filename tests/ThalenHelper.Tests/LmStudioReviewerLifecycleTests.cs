@@ -112,6 +112,48 @@ public sealed class LmStudioReviewerLifecycleTests
         Assert.False(File.Exists(new ActiveModelTracker(fixture.Paths.StateDirectory).Path));
     }
 
+    [Fact]
+    public async Task AutomaticHealthDegradesToEligibleOllamaWhenRegisteredLmStudioIsUnavailable()
+    {
+        using var fixture = await ReviewerFixture.CreateAsync(
+            modelSelectionMode: ModelSelectionMode.Automatic,
+            ollamaEligible: true,
+            lmStudioUnavailable: true);
+
+        var health = await fixture.Reviewer.GetHealthAsync();
+
+        Assert.Null(health.ErrorCode);
+        Assert.True(health.EndpointReachable);
+        Assert.True(health.ModelAvailable);
+        Assert.False(health.ModelLoaded);
+        Assert.Equal("Automatic (Ollama)", health.Provider);
+        Assert.Equal("Task-aware pool", health.Model);
+        Assert.Equal([ModelProviders.Ollama], health.EligibleProviders);
+        Assert.Equal(["http://127.0.0.1:11434"], health.Endpoints);
+        Assert.Equal("http://127.0.0.1:11434", health.Endpoint);
+        Assert.Single(fixture.LmHttp.Requests, request => request.Path == "/api/v1/models");
+    }
+
+    [Fact]
+    public async Task LmStudioReviewPreservesRawStructuredFindingsAndVerifiedUnload()
+    {
+        const string response = """{"findings":[{"id":"LM1","claim":"Check the supplied branch.","location":"Reviewer.cs","evidence":"The supplied condition omits null.","confidence":"high","impact":"A null input may fail.","verification":"Run the focused null-input test.","falsePositiveCondition":"The caller rejects null first."}]}""";
+        using var fixture = await ReviewerFixture.CreateAsync(generationResponse: response);
+
+        var result = await fixture.Reviewer.ReviewAsync(Request());
+
+        Assert.True(result.ModelRan, result.ErrorMessage);
+        Assert.Equal(response, result.Findings);
+        Assert.Equal("parsed", result.StructuredFindingsStatus);
+        var finding = Assert.Single(result.StructuredFindings);
+        Assert.Equal("LM1", finding.Id);
+        Assert.Equal("high", finding.Confidence);
+        Assert.Equal("Reviewer.cs", finding.Location);
+        Assert.Empty(result.ConfirmedObservations);
+        Assert.Equal([ReviewerFixture.InstanceId], fixture.Rest.UnloadedInstances);
+        Assert.False(fixture.Rest.HelperLoaded);
+    }
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]
@@ -223,7 +265,10 @@ public sealed class LmStudioReviewerLifecycleTests
             bool cliLoadedMismatch = false,
             bool attemptWriteDuringGeneration = false,
             ModelSelectionMode modelSelectionMode = ModelSelectionMode.Pinned,
-            bool ollamaUnavailable = false)
+            bool ollamaUnavailable = false,
+            bool ollamaEligible = false,
+            bool lmStudioUnavailable = false,
+            string generationResponse = "SAFE_REVIEW")
         {
             GpuCoordination.ClearCancellation();
             var temporary = new TemporaryDirectory("lm-reviewer-lifecycle");
@@ -246,8 +291,14 @@ public sealed class LmStudioReviewerLifecycleTests
                 Assert.True(LmStudioModelFileBinding.TryOpen(modelPath, out var file, out var proof));
                 file.Dispose();
 
-                var sourceModel = new ModelCatalogService().LoadBundled().Models.Single(item =>
+                var bundledCatalog = new ModelCatalogService().LoadBundled();
+                var sourceModel = bundledCatalog.Models.Single(item =>
                     string.Equals(item.Provider, ModelProviders.LmStudio, StringComparison.Ordinal));
+                var ollamaModel = bundledCatalog.Models.Single(item =>
+                    string.Equals(item.Provider, ModelProviders.Ollama, StringComparison.Ordinal)
+                    && string.Equals(item.Tag, "qwen3:8b", StringComparison.Ordinal));
+                var ollamaDigest = ollamaModel.ExpectedDigest!
+                    + new string('0', 64 - ollamaModel.ExpectedDigest!.Length);
                 var model = sourceModel with
                 {
                     Tag = "fixture-model-key",
@@ -262,7 +313,11 @@ public sealed class LmStudioReviewerLifecycleTests
                     NonQ4AutomaticAllowed = true,
                     IndexedModelPath = indexedPath
                 };
-                var manifest = new ModelManifest(1, "lm-reviewer-fixture", DateOnly.FromDateTime(DateTime.UtcNow), [model]);
+                var manifest = new ModelManifest(
+                    1,
+                    "lm-reviewer-fixture",
+                    DateOnly.FromDateTime(DateTime.UtcNow),
+                    ollamaEligible ? [model, ollamaModel] : [model]);
                 var registration = new LocalModelRegistration(
                     ModelProviders.LmStudio,
                     model.Tag,
@@ -278,7 +333,7 @@ public sealed class LmStudioReviewerLifecycleTests
                     SelectedModel = model.Tag,
                     SelectedModelDigest = catalogDigest,
                     SelectedModelProvider = ModelProviders.LmStudio,
-                    ModelStorageLocation = foreignOllama
+                    ModelStorageLocation = foreignOllama || ollamaEligible
                         ? Path.Combine(temporary.Path, "mocked-ollama-models")
                         : null,
                     HardwareTier = HardwareTier.High,
@@ -302,6 +357,20 @@ public sealed class LmStudioReviewerLifecycleTests
                     1,
                     65_536,
                     ModelProviders.LmStudio));
+                if (ollamaEligible)
+                {
+                    await validations.UpsertAsync(new ModelValidationEntry(
+                        ollamaModel.Tag,
+                        ollamaDigest,
+                        ModelValidationStore.CurrentProtocolVersion,
+                        DateTimeOffset.UtcNow,
+                        10,
+                        20,
+                        "GPU",
+                        1_024,
+                        8_192,
+                        ModelProviders.Ollama));
+                }
 
                 var cli = new FakeCliBinding(cliLoadedMismatch);
                 var rest = new RestHarness(
@@ -309,6 +378,7 @@ public sealed class LmStudioReviewerLifecycleTests
                     modelPath,
                     foreignLmStudio,
                     attemptWriteDuringGeneration,
+                    generationResponse,
                     () => cli.ActivePathLeases);
                 var ollamaHttp = new FakeHttpMessageHandler((request, _) =>
                 {
@@ -320,6 +390,18 @@ public sealed class LmStudioReviewerLifecycleTests
 
                     return Task.FromResult(request.RequestUri?.AbsolutePath switch
                     {
+                        "/api/tags" when ollamaEligible => FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
+                        {
+                            models = new[]
+                            {
+                                new
+                                {
+                                    name = ollamaModel.Tag,
+                                    digest = $"sha256:{ollamaDigest}",
+                                    details = new { quantization_level = "Q4_K_M" }
+                                }
+                            }
+                        })),
                         "/api/tags" => FakeHttpMessageHandler.Json("{\"models\":[]}"),
                         "/api/ps" when foreignOllama => FakeHttpMessageHandler.Json($$"""
                             {"models":[{"name":"foreign:latest","digest":"sha256:{{new string('a', 64)}}","size":1,"size_vram":0}]}
@@ -328,7 +410,9 @@ public sealed class LmStudioReviewerLifecycleTests
                         _ => FakeHttpMessageHandler.Json("{}", HttpStatusCode.NotFound)
                     });
                 });
-                var lmHttp = new FakeHttpMessageHandler(rest.HandleAsync);
+                var lmHttp = new FakeHttpMessageHandler((request, token) => lmStudioUnavailable
+                    ? Task.FromException<HttpResponseMessage>(new HttpRequestException("The mocked LM Studio endpoint is unavailable."))
+                    : rest.HandleAsync(request, token));
                 var ollama = new OllamaClient(new Uri("http://127.0.0.1:11434"), new HttpClient(ollamaHttp));
                 var lmStudio = new LmStudioClient(new Uri("http://127.0.0.1:1234"), new HttpClient(lmHttp));
                 var hardware = FixtureFactory.Create(
@@ -337,7 +421,9 @@ public sealed class LmStudioReviewerLifecycleTests
                     store,
                     ollama,
                     _ => true,
-                    _ => throw new InvalidOperationException("Ollama storage validation must not run for an LM Studio-only route."),
+                    _ => ollamaEligible
+                        ? new ReviewerModelStorageVerification(true, "OK", "Storage verified.")
+                        : throw new InvalidOperationException("Ollama storage validation must not run for an LM Studio-only route."),
                     (_, _) => new ResourcePressureCheck(true, "OK", "Safe."),
                     router: new TaskAwareModelRouter(),
                     catalogProvider: () => manifest,
@@ -379,6 +465,7 @@ public sealed class LmStudioReviewerLifecycleTests
         string modelPath,
         bool foreignLmStudio,
         bool attemptWriteDuringGeneration,
+        string generationResponse,
         Func<int> activePathLeases)
     {
         internal bool HelperLoaded { get; private set; }
@@ -458,7 +545,7 @@ public sealed class LmStudioReviewerLifecycleTests
             return FakeHttpMessageHandler.Json(JsonSerializer.Serialize(new
             {
                 model_instance_id = ReviewerFixture.InstanceId,
-                output = new[] { new { type = "message", content = "SAFE_REVIEW" } },
+                output = new[] { new { type = "message", content = generationResponse } },
                 stats = new
                 {
                     input_tokens = 12,

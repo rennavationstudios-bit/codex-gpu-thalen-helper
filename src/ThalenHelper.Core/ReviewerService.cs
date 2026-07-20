@@ -123,39 +123,28 @@ public sealed class ReviewerService
                 }
             }
 
-            var models = await GetCombinedModelsAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
+            var modelSnapshot = await GetCombinedModelSnapshotAsync(state, ollamaConfigured, cancellationToken).ConfigureAwait(false);
+            var models = modelSnapshot.Models;
             var running = ollamaConfigured
                 ? await _ollama.GetRunningModelsAsync(cancellationToken).ConfigureAwait(false)
                 : [];
-            var lmRuntimeRequired = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                || !ollamaConfigured
-                || (state.Preferences.ModelSelectionMode == ModelSelectionMode.Pinned
-                    && string.Equals(
-                        ModelProviders.Normalize(state.SelectedModelProvider),
-                        ModelProviders.LmStudio,
-                        StringComparison.Ordinal));
-            var lmInventory = lmRuntimeRequired
-                && state.RegisteredLocalModels.Any(item => string.Equals(
-                    item.Provider,
-                    ModelProviders.LmStudio,
-                    StringComparison.OrdinalIgnoreCase))
-                && _lmStudio is not null
-                ? await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false)
-                : [];
+            var lmInventory = modelSnapshot.LmStudioInventory;
             var selected = state.SelectedModel;
             var selectedProvider = ModelProviders.Normalize(state.SelectedModelProvider);
             var selectedModel = models.FirstOrDefault(model =>
                 string.Equals(ModelProviders.Normalize(model.Provider), selectedProvider, StringComparison.Ordinal)
                 && ModelIntegrity.NamesMatch(model.Name, selected ?? string.Empty));
-            var eligibleModelTags = _router.GetEligibleInstalledModelTags(
+            var eligibleModelIdentities = _router.GetEligibleInstalledModelIdentities(
                 state,
                 _catalogProvider(),
                 _hardwareProvider(),
                 models,
                 validations);
-            var eligibleInstalledModels = eligibleModelTags.Count;
+            var eligibleInstalledModels = eligibleModelIdentities.Count;
             var eligibleProviders = models
-                .Where(model => eligibleModelTags.Any(tag => ModelIntegrity.NamesMatch(model.Name, tag)))
+                .Where(model => eligibleModelIdentities.Any(identity =>
+                    string.Equals(ModelProviders.Normalize(model.Provider), identity.Provider, StringComparison.Ordinal)
+                    && ModelIntegrity.NamesMatch(model.Name, identity.Tag)))
                 .Select(model => ModelProviders.Normalize(model.Provider))
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(provider => string.Equals(provider, ModelProviders.Ollama, StringComparison.Ordinal) ? 0 : 1)
@@ -173,13 +162,17 @@ public sealed class ReviewerService
             var digestMatches = selected is null
                 || ModelIntegrity.DigestMatches(selectedModel?.Digest, state.SelectedModelDigest);
             var runningModel = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
-                ? running.FirstOrDefault(model => eligibleModelTags.Any(tag => ModelIntegrity.NamesMatch(model.Name, tag)))
+                ? running.FirstOrDefault(model => eligibleModelIdentities.Any(identity =>
+                    string.Equals(identity.Provider, ModelProviders.Ollama, StringComparison.Ordinal)
+                    && ModelIntegrity.NamesMatch(model.Name, identity.Tag)))
                 : selected is null
                     ? null
                     : running.FirstOrDefault(model => ModelIntegrity.NamesMatch(model.Name, selected));
             var runningLmInstance = state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic
                 ? lmInventory
-                    .Where(model => eligibleModelTags.Any(tag => string.Equals(model.Key, tag, StringComparison.Ordinal)))
+                    .Where(model => eligibleModelIdentities.Any(identity =>
+                        string.Equals(identity.Provider, ModelProviders.LmStudio, StringComparison.Ordinal)
+                        && string.Equals(model.Key, identity.Tag, StringComparison.Ordinal)))
                     .SelectMany(model => model.LoadedInstances)
                     .FirstOrDefault()
                 : string.Equals(selectedProvider, ModelProviders.LmStudio, StringComparison.Ordinal)
@@ -282,6 +275,12 @@ public sealed class ReviewerService
         InstallationState state,
         bool includeOllama,
         CancellationToken cancellationToken)
+        => (await GetCombinedModelSnapshotAsync(state, includeOllama, cancellationToken).ConfigureAwait(false)).Models;
+
+    private async Task<CombinedModelSnapshot> GetCombinedModelSnapshotAsync(
+        InstallationState state,
+        bool includeOllama,
+        CancellationToken cancellationToken)
     {
         var combined = includeOllama
             ? (await _ollama.GetModelsAsync(cancellationToken).ConfigureAwait(false)).ToList()
@@ -291,7 +290,7 @@ public sealed class ReviewerService
             .ToArray();
         if (registrations.Length == 0)
         {
-            return combined;
+            return new(combined, []);
         }
 
         if (_lmStudio is null || _lmStudioCliBinding is null)
@@ -304,13 +303,14 @@ public sealed class ReviewerService
                     "LMSTUDIO_CLI_UNAVAILABLE",
                     "The signed current-user LM Studio CLI is unavailable, so the reviewer cannot bind a model key to its audited GGUF file.");
             }
-            return combined;
+            return new(combined, []);
         }
 
+        IReadOnlyList<LmStudioModelInfo> inventory = [];
         try
         {
             var catalog = _catalogProvider();
-            var inventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
+            inventory = await _lmStudio.GetModelsAsync(cancellationToken).ConfigureAwait(false);
             foreach (var registration in registrations)
             {
                 var catalogModel = catalog.Models.FirstOrDefault(model =>
@@ -360,9 +360,14 @@ public sealed class ReviewerService
             && state.Preferences.ModelSelectionMode == ModelSelectionMode.Automatic)
         {
             // Automatic mode degrades to a validated Ollama route when LM Studio is closed or untrusted.
+            inventory = [];
         }
-        return combined;
+        return new(combined, inventory);
     }
+
+    private sealed record CombinedModelSnapshot(
+        IReadOnlyList<OllamaModelInfo> Models,
+        IReadOnlyList<LmStudioModelInfo> LmStudioInventory);
 
     private static bool HasConfiguredOllamaProvider(
         InstallationState state,

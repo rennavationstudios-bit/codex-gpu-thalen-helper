@@ -546,6 +546,42 @@ public sealed class TaskAwareModelRouterTests
         Assert.False(registry.HasCurrentPass(ModelProviders.LmStudio, "collision:model", digest));
     }
 
+    [Fact]
+    public void EligibleModelIdentitiesRetainProviderForSameNamedModels()
+    {
+        var digest = new string('a', 64);
+        var source = Catalog();
+        var ollamaCatalog = source.Models.Single(item =>
+            item.Provider == ModelProviders.Ollama
+            && item.Tag == "qwen3:8b") with
+        {
+            Tag = "collision:model",
+            ExpectedDigest = digest
+        };
+        var lmCatalog = source.Models.Single(item => item.Provider == ModelProviders.LmStudio) with
+        {
+            Tag = "collision:model",
+            ExpectedDigest = digest
+        };
+        var installed = new[]
+        {
+            new OllamaModelInfo("collision:model", digest, null, "qwen3", "8B", "Q4_K_M", ModelProviders.Ollama),
+            new OllamaModelInfo("collision:model", digest, lmCatalog.ExpectedDownloadBytes, "qwen3", "9B", "BF16", ModelProviders.LmStudio)
+        };
+        var registry = new ModelValidationRegistry(
+            ModelValidationStore.SchemaVersion,
+            [Validation("collision:model", digest)]);
+
+        var identities = new TaskAwareModelRouter().GetEligibleInstalledModelIdentities(
+            AutomaticState(),
+            new ModelManifest(1, "collision", DateOnly.FromDateTime(DateTime.UtcNow), [ollamaCatalog, lmCatalog]),
+            Rtx3090(),
+            installed,
+            registry);
+
+        Assert.Equal([(ModelProviders.Ollama, "collision:model")], identities);
+    }
+
     private static InstallationState AutomaticState() => new()
     {
         Availability = HelperAvailability.Enabled,

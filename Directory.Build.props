@@ -15,7 +15,7 @@
     <NuGetAuditLevel>low</NuGetAuditLevel>
     <DebugType>embedded</DebugType>
     <VersionPrefix>0.1.0</VersionPrefix>
-    <VersionSuffix>beta.18</VersionSuffix>
+    <VersionSuffix>beta.19</VersionSuffix>
     <Authors>Codex GPU Thalen Helper contributors</Authors>
     <Company>Codex GPU Thalen Helper contributors</Company>
     <Product>Codex GPU Thalen Helper</Product>
