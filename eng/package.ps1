@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.22',
+    [string]$Version = '0.1.0-beta.23',
     [string]$InnoCompiler,
     [string]$SbomTool
 )

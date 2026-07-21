@@ -6,6 +6,8 @@ This bundle is designed for a Windows user who has never configured Codex, Ollam
 
 The simplest option is to open `0 - PASTE THIS INTO CODEX.md`, copy its prompt into a new Codex task, and let Codex select the highest valid semantic prerelease from the exact official repository, verify it, install it, and validate setup. Codex must still ask immediately before running the unsigned installer and must ask separately before each model download, load, validation, move, or delete action.
 
+The paste-ready prompt contains exact public repository and raw-file URLs. GitHub sign-in is not required. If a GitHub connector or a guessed deep link reports 404, Codex must retry the exact listed URL over ordinary unauthenticated HTTPS and report the exact failing address instead of assuming the repository is private.
+
 1. Extract the entire ZIP to a normal local folder. Do not run the installer from inside the ZIP preview.
 2. Open `1 - START HERE.txt` and verify the installer SHA-256 as shown there.
 3. Double-click `2 - INSTALL Codex GPU Thalen Helper.exe`.

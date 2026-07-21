@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.23 - 2026-07-21
+
+- Made the paste-into-Codex bootstrap work for signed-out public users by listing the exact repository and raw guide URLs instead of asking Codex to construct deep GitHub links.
+- Added explicit recovery for connector-specific and guessed-link 404 responses: retry the exact public URL over ordinary unauthenticated HTTPS, never infer that the repository is private from one failed integration, and report the exact failing URL/status if the public endpoint itself fails.
+- Added exact release-tag raw URL templates for the install guide and packaged Codex handoff, plus packaging assertions that prevent a friend bundle from omitting the public-access recovery contract.
+
 ## 0.1.0-beta.22 - 2026-07-20
 
 - Removed .NET's independent 100-second `HttpClient` timeout from the loopback Ollama and LM Studio clients so each operation's existing bounded timeout is authoritative. Cold Qwythos loads can now use the full audited five-minute load budget instead of being cancelled near 100 seconds.

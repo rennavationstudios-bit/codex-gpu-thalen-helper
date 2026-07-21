@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.22',
+    [string]$Version = '0.1.0-beta.23',
     [string]$ReleaseDirectory
 )
 
@@ -40,6 +40,20 @@ Copy-Item -LiteralPath $sourceSigning -Destination (Join-Path $stage 'SIGNING_ST
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'README.md') -Destination (Join-Path $stage 'README.md')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'INSTALL-WITH-CODEX.md') -Destination (Join-Path $stage '0 - PASTE THIS INTO CODEX.md')
+$stagedBootstrap = Join-Path $stage '0 - PASTE THIS INTO CODEX.md'
+$bootstrapText = [System.IO.File]::ReadAllText($stagedBootstrap)
+$requiredBootstrapText = @(
+    'https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper',
+    'https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md',
+    'Do not construct or guess either URL.',
+    'A public installation must not require my GitHub account.',
+    'report that exact URL and HTTP result'
+)
+foreach ($requiredText in $requiredBootstrapText) {
+    if ($bootstrapText.IndexOf($requiredText, [System.StringComparison]::Ordinal) -lt 0) {
+        throw "Friend bundle bootstrap is missing its public GitHub recovery contract: $requiredText"
+    }
+}
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\friend-install-and-use-guide.md') -Destination (Join-Path $stage 'INSTALL AND USE GUIDE.md')
 $stagedHandoff = Join-Path $stage '3 - CODEX HANDOFF.md'
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\CODEX-HANDOFF.md') -Destination $stagedHandoff

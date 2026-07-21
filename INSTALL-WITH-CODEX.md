@@ -5,9 +5,22 @@ Codex GPU Thalen Helper is an independent community Windows app that installs an
 ## Copy and paste this into Codex
 
 ```text
-Install the highest valid semantic prerelease of Codex GPU Thalen Helper from https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper.
+Install the highest valid semantic prerelease of Codex GPU Thalen Helper from this exact public repository:
 
-Read and follow INSTALL-WITH-CODEX.md and docs/CODEX-HANDOFF.md from that exact repository. I am a beginner, so use your available tools to do the safe technical work, explain choices in plain language, and ask me only for decisions or Windows clicks you cannot safely perform yourself.
+https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper
+
+Begin by opening that exact repository URL and this exact public bootstrap guide URL without requiring GitHub sign-in:
+
+https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md
+
+Do not construct or guess either URL. Do not treat a 404 from a GitHub app, search connector, or constructed deep link as proof that the repository is private. If a connector fails, retry the exact URLs above with an ordinary unauthenticated HTTPS request or browser. A public installation must not require my GitHub account. Only if an exact URL above also fails should you stop, report that exact URL and HTTP result, and ask me to verify the project address.
+
+Read and follow the bootstrap guide above. After selecting the release tag, replace `{TAG}` in these exact raw URL templates and read both files from that tag:
+
+https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/{TAG}/INSTALL-WITH-CODEX.md
+https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/{TAG}/docs/CODEX-HANDOFF.md
+
+I am a beginner, so use your available tools to do the safe technical work, explain choices in plain language, and ask me only for decisions or Windows clicks you cannot safely perform yourself.
 
 Use GitHub Releases as the only installer source. Consider only releases from that exact repository where `isDraft=false` and `isPrerelease=true`; choose the highest valid semantic prerelease that has the complete required asset set. Do not use `/releases/latest`, because GitHub excludes prereleases from that endpoint. Verify the exact repository owner/name, release checksums, and GitHub artifact attestation before running anything. Tell me the exact version and unsigned SmartScreen warning, then ask immediately before running the downloaded installer. Preserve my existing Codex configuration and instructions, use the helper's protected backup/dry-run/managed merge paths, and never hand-edit or replace those files.
 
@@ -19,6 +32,9 @@ After installation, finish the packaged CODEX-HANDOFF.md checklist, tell me when
 ## What Codex must verify before installation
 
 1. The repository is exactly `rennavationstudios-bit/codex-gpu-thalen-helper`. A fork, look-alike owner, mirror, direct-message attachment, or unrelated repository is not an approved source.
+   - The exact public repository URL is `https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper`.
+   - The exact public bootstrap URL is `https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md`.
+   - Neither URL requires a signed-in GitHub session. A connector-specific or guessed-link 404 is not enough to classify the repository as private; retry the exact URL over ordinary unauthenticated HTTPS and report the exact failing URL/status if it still fails.
 2. The chosen release is the highest valid semantic prerelease from that exact repository with `isDraft=false`, `isPrerelease=true`, and the complete required asset set: the Windows installer, `SHA256SUMS.txt`, release notes, and the friend bundle. Do not use `/releases/latest` to resolve it.
 3. The downloaded installer SHA-256 exactly matches its line in `SHA256SUMS.txt`.
 4. This GitHub attestation verification succeeds against the exact repository:
