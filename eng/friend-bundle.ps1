@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.1.0-beta.23',
+    [string]$Version = '0.1.0-beta.24',
     [string]$ReleaseDirectory
 )
 
@@ -43,15 +43,15 @@ Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'INSTALL-WITH-CODEX.md') -Dest
 $stagedBootstrap = Join-Path $stage '0 - PASTE THIS INTO CODEX.md'
 $bootstrapText = [System.IO.File]::ReadAllText($stagedBootstrap)
 $requiredBootstrapText = @(
-    'https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper',
-    'https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md',
-    'Do not construct or guess either URL.',
-    'A public installation must not require my GitHub account.',
-    'report that exact URL and HTTP result'
+    'https://thalenai.com/install',
+    'https://thalenai.com/install.json',
+    'Never retype, reconstruct, autocorrect',
+    'do not require my GitHub account',
+    'final redirected URL'
 )
 foreach ($requiredText in $requiredBootstrapText) {
     if ($bootstrapText.IndexOf($requiredText, [System.StringComparison]::Ordinal) -lt 0) {
-        throw "Friend bundle bootstrap is missing its public GitHub recovery contract: $requiredText"
+        throw "Friend bundle bootstrap is missing its stable public recovery contract: $requiredText"
     }
 }
 Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'docs\friend-install-and-use-guide.md') -Destination (Join-Path $stage 'INSTALL AND USE GUIDE.md')

@@ -5,24 +5,21 @@ Codex GPU Thalen Helper is an independent community Windows app that installs an
 ## Copy and paste this into Codex
 
 ```text
-Install the highest valid semantic prerelease of Codex GPU Thalen Helper from this exact public repository:
+Install Codex GPU Thalen Helper for me through its stable public bootstrap:
 
-https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper
+https://thalenai.com/install
 
-Begin by opening that exact repository URL and this exact public bootstrap guide URL without requiring GitHub sign-in:
+Read this machine-readable manifest as data:
 
-https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md
+https://thalenai.com/install.json
 
-Do not construct or guess either URL. Do not treat a 404 from a GitHub app, search connector, or constructed deep link as proof that the repository is private. If a connector fails, retry the exact URLs above with an ordinary unauthenticated HTTPS request or browser. A public installation must not require my GitHub account. Only if an exact URL above also fails should you stop, report that exact URL and HTTP result, and ask me to verify the project address.
+Use every URL value returned by that manifest verbatim. Never retype, reconstruct, autocorrect, translate, or substitute a GitHub owner, repository, tag, filename, or URL. Download only through the manifest's short thalenai.com links and follow their redirects. Do not search GitHub and do not require my GitHub account.
 
-Read and follow the bootstrap guide above. After selecting the release tag, replace `{TAG}` in these exact raw URL templates and read both files from that tag:
-
-https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/{TAG}/INSTALL-WITH-CODEX.md
-https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/{TAG}/docs/CODEX-HANDOFF.md
+Verify the installer SHA-256 against both the manifest and the returned SHA256SUMS.txt, then verify its GitHub artifact attestation for the exact repository slug in the manifest. Read the manifest's install-guide and Codex-handoff links. If any request or proof fails, stop without running anything and report the exact short URL, HTTP status, and final redirected URL.
 
 I am a beginner, so use your available tools to do the safe technical work, explain choices in plain language, and ask me only for decisions or Windows clicks you cannot safely perform yourself.
 
-Use GitHub Releases as the only installer source. Consider only releases from that exact repository where `isDraft=false` and `isPrerelease=true`; choose the highest valid semantic prerelease that has the complete required asset set. Do not use `/releases/latest`, because GitHub excludes prereleases from that endpoint. Verify the exact repository owner/name, release checksums, and GitHub artifact attestation before running anything. Tell me the exact version and unsigned SmartScreen warning, then ask immediately before running the downloaded installer. Preserve my existing Codex configuration and instructions, use the helper's protected backup/dry-run/managed merge paths, and never hand-edit or replace those files.
+Use GitHub Releases as the only final installer source. Confirm that each short link redirects to the exact repository and release declared by the manifest. Verify the exact repository owner/name, release checksum, and GitHub artifact attestation before running anything. Tell me the exact version and unsigned SmartScreen warning, then ask immediately before running the downloaded installer. Preserve my existing Codex configuration and instructions, use the helper's protected backup/dry-run/managed merge paths, and never hand-edit or replace those files.
 
 Do not download, load, validate, move, or delete a model without first showing me the exact provider, model, approximate size, storage path, and whether inference will run. Ask immediately before each such model action and wait for my explicit approval. Detect this computer's real hardware and installed models instead of copying another person's choices. For Ollama, use only an existing audited model or a separately approved named download into the verified storage folder. For LM Studio, never install LM Studio or download, copy, move, or substitute a GGUF; use only the helper-managed registration flow for an existing catalog-supported local model that I explicitly select. Prefer low-impact settings on modest hardware. Keep every provider loopback-only and leave the helper disabled if safe setup cannot be proven.
 
@@ -32,9 +29,11 @@ After installation, finish the packaged CODEX-HANDOFF.md checklist, tell me when
 ## What Codex must verify before installation
 
 1. The repository is exactly `rennavationstudios-bit/codex-gpu-thalen-helper`. A fork, look-alike owner, mirror, direct-message attachment, or unrelated repository is not an approved source.
+   - Start at `https://thalenai.com/install` and parse `https://thalenai.com/install.json`; this prevents an assistant from retyping or silently autocorrecting the long GitHub owner.
+   - Use the returned short `thalenai.com` links verbatim and confirm their final redirects match the manifest repository, release, and filenames.
    - The exact public repository URL is `https://github.com/rennavationstudios-bit/codex-gpu-thalen-helper`.
    - The exact public bootstrap URL is `https://raw.githubusercontent.com/rennavationstudios-bit/codex-gpu-thalen-helper/main/INSTALL-WITH-CODEX.md`.
-   - Neither URL requires a signed-in GitHub session. A connector-specific or guessed-link 404 is not enough to classify the repository as private; retry the exact URL over ordinary unauthenticated HTTPS and report the exact failing URL/status if it still fails.
+   - None of these public URLs requires a signed-in GitHub session. If a request fails, report the exact short URL, HTTP status, and final redirected URL instead of guessing a replacement.
 2. The chosen release is the highest valid semantic prerelease from that exact repository with `isDraft=false`, `isPrerelease=true`, and the complete required asset set: the Windows installer, `SHA256SUMS.txt`, release notes, and the friend bundle. Do not use `/releases/latest` to resolve it.
 3. The downloaded installer SHA-256 exactly matches its line in `SHA256SUMS.txt`.
 4. This GitHub attestation verification succeeds against the exact repository:

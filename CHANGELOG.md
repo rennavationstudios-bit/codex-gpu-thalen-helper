@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.24 - 2026-07-21
+
+- Replaced the long, error-prone GitHub bootstrap in the paste-into-Codex prompt with the stable `https://thalenai.com/install` entry point and machine-readable `https://thalenai.com/install.json` manifest.
+- Added short first-party release links for the installer, checksums, signing status, friend bundle, tagged install guide, and Codex handoff. Codex follows their redirects instead of retyping or reconstructing the repository owner, tag, or filenames.
+- Kept GitHub Releases, SHA-256 verification, GitHub artifact attestation, unsigned SmartScreen disclosure, protected-file merging, explicit model consent, and loopback-only provider checks as mandatory trust boundaries.
+- Added packaging assertions that prevent future friend bundles from restoring the brittle long-owner paste prompt.
+
 ## 0.1.0-beta.23 - 2026-07-21
 
 - Made the paste-into-Codex bootstrap work for signed-out public users by listing the exact repository and raw guide URLs instead of asking Codex to construct deep GitHub links.
