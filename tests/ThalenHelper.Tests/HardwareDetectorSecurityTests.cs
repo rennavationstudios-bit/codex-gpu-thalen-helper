@@ -6,6 +6,50 @@ namespace ThalenHelper.Tests;
 public sealed class HardwareDetectorSecurityTests
 {
     [Fact]
+    public void DuplicateVideoControllerNamesAreCoalescedWithoutCrashing()
+    {
+        var drivers = HardwareDetector.BuildVideoControllerDrivers(
+        [
+            ("DisplayLink USB Device", "11.5.0.0"),
+            ("DisplayLink USB Device", "11.5.0.0"),
+            ("NVIDIA GeForce RTX 3090", "32.0.15.7688")
+        ]);
+
+        Assert.Equal(2, drivers.Count);
+        Assert.Equal("11.5.0.0", drivers["DisplayLink USB Device"]);
+        Assert.Equal("32.0.15.7688", drivers["NVIDIA GeForce RTX 3090"]);
+    }
+
+    [Fact]
+    public void DuplicateVideoControllerNameKeepsAUsableDriverVersion()
+    {
+        var drivers = HardwareDetector.BuildVideoControllerDrivers(
+        [
+            (" DisplayLink USB Device ", null),
+            ("displaylink usb device", " 11.5.0.0 "),
+            (null, "ignored"),
+            (" ", "ignored")
+        ]);
+
+        Assert.Single(drivers);
+        Assert.Equal("11.5.0.0", drivers["DisplayLink USB Device"]);
+    }
+
+    [Fact]
+    public void ConflictingDuplicateDriverVersionsDoNotReportFalsePrecision()
+    {
+        var drivers = HardwareDetector.BuildVideoControllerDrivers(
+        [
+            ("DisplayLink USB Device", "11.5.0.0"),
+            ("displaylink usb device", "11.6.0.0"),
+            ("DisplayLink USB Device", "11.5.0.0")
+        ]);
+
+        Assert.Single(drivers);
+        Assert.Null(drivers["DisplayLink USB Device"]);
+    }
+
+    [Fact]
     public void ResolverUsesSystemDirectoryCandidateFirst()
     {
         using var temporary = new TemporaryDirectory();

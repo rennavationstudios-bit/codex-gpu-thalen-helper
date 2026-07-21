@@ -177,17 +177,56 @@ public sealed class HardwareDetector
         {
             using var searcher = new ManagementObjectSearcher("SELECT Name, DriverVersion FROM Win32_VideoController");
             using var results = searcher.Get();
-            return results.Cast<ManagementObject>()
-                .Where(item => item["Name"] is not null)
-                .ToDictionary(
-                    item => item["Name"]!.ToString()!,
-                    item => item["DriverVersion"]?.ToString(),
-                    StringComparer.OrdinalIgnoreCase);
+            return BuildVideoControllerDrivers(results.Cast<ManagementObject>()
+                .Select(item => (
+                    item["Name"]?.ToString(),
+                    item["DriverVersion"]?.ToString())));
         }
-        catch (ManagementException)
+        catch (Exception exception) when (exception is ManagementException or UnauthorizedAccessException)
         {
             return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         }
+    }
+
+    internal static Dictionary<string, string?> BuildVideoControllerDrivers(
+        IEnumerable<(string? Name, string? DriverVersion)> controllers)
+    {
+        var drivers = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var conflictingNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var controller in controllers)
+        {
+            var name = controller.Name?.Trim();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            var driverVersion = string.IsNullOrWhiteSpace(controller.DriverVersion)
+                ? null
+                : controller.DriverVersion.Trim();
+            if (!drivers.TryGetValue(name, out var existingVersion))
+            {
+                drivers[name] = driverVersion;
+                continue;
+            }
+
+            if (conflictingNames.Contains(name) || driverVersion is null)
+            {
+                continue;
+            }
+
+            if (existingVersion is null)
+            {
+                drivers[name] = driverVersion;
+            }
+            else if (!string.Equals(existingVersion, driverVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                drivers[name] = null;
+                conflictingNames.Add(name);
+            }
+        }
+
+        return drivers;
     }
 
     private static string? FindDriverVersion(Dictionary<string, string?> drivers, string adapterName)

@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.0-beta.25 - 2026-07-21
+
+- Prevented passive hardware health from crashing when Windows reports multiple display adapters with the same name, as can happen with multi-display DisplayLink docks. Duplicate controller names are now coalesced while retaining an available driver version.
+- Preserved conservative hardware reporting when duplicate adapter names disagree about their driver version: availability continues, but the ambiguous version is not reported as authoritative.
+
 ## 0.1.0-beta.24 - 2026-07-21
 
 - Replaced the long, error-prone GitHub bootstrap in the paste-into-Codex prompt with the stable `https://thalenai.com/install` entry point and machine-readable `https://thalenai.com/install.json` manifest.
