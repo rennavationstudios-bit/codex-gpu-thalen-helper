@@ -47,6 +47,7 @@ $requiredBootstrapText = @(
     'https://thalenai.com/install.json',
     'Never retype, reconstruct, autocorrect',
     'do not require my GitHub account',
+    "attestation link without authentication",
     'final redirected URL'
 )
 foreach ($requiredText in $requiredBootstrapText) {

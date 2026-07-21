@@ -8,6 +8,8 @@ This unsigned prerelease fixes a second public-install failure caused when anoth
 - The manifest returns short `thalenai.com` links for the installer, checksums, signing disclosure, friend bundle, tagged install guide, Codex handoff, release page, and source repository.
 - Codex follows those links and their redirects instead of retyping, reconstructing, autocorrecting, or substituting the GitHub owner, tag, filenames, or URLs.
 - The manifest pins the exact release, installer filename, installer SHA-256, and official repository identity. A public install does not require GitHub sign-in.
+- The signed-out path verifies that GitHub's public attestation API has an exact digest record for the manifest's numeric repository ID. This is disclosed as online GitHub repository-and-digest evidence rather than offline local cryptographic verification.
+- If GitHub CLI is already installed and authenticated, Codex also runs the local cryptographic verification. It does not require a GitHub account or install another developer tool solely for bootstrap verification.
 - Packaging tests prevent a friend bundle from omitting this stable recovery contract.
 
-GitHub Releases remains the final installer source. SHA-256 verification and GitHub artifact attestation remain mandatory, and Codex must still ask immediately before running the unsigned installer. Application and reviewer behavior are unchanged from beta.23. Windows SmartScreen may warn about an unknown publisher.
+GitHub Releases remains the final installer source. SHA-256 verification and the public GitHub attestation record remain mandatory, and Codex must still ask immediately before running the unsigned installer. Application and reviewer behavior are unchanged from beta.23. Windows SmartScreen may warn about an unknown publisher.

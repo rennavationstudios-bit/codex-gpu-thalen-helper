@@ -15,11 +15,11 @@ https://thalenai.com/install.json
 
 Use every URL value returned by that manifest verbatim. Never retype, reconstruct, autocorrect, translate, or substitute a GitHub owner, repository, tag, filename, or URL. Download only through the manifest's short thalenai.com links and follow their redirects. Do not search GitHub and do not require my GitHub account.
 
-Verify the installer SHA-256 against both the manifest and the returned SHA256SUMS.txt, then verify its GitHub artifact attestation for the exact repository slug in the manifest. Read the manifest's install-guide and Codex-handoff links. If any request or proof fails, stop without running anything and report the exact short URL, HTTP status, and final redirected URL.
+Verify the installer SHA-256 against both the manifest and the returned SHA256SUMS.txt. Fetch the manifest's attestation link without authentication; require HTTP 200, the exact installer digest in its final URL, and at least one GitHub attestation record whose `repository_id` matches the manifest. This public GitHub API record is online repository-and-digest evidence, not offline local signature verification. If GitHub CLI is already installed and authenticated, also run the manifest's optional cryptographic verification command; do not require GitHub sign-in or install another developer tool solely for this bootstrap. Read the manifest's install-guide and Codex-handoff links. If any request or proof fails, stop without running anything and report the exact short URL, HTTP status, and final redirected URL.
 
 I am a beginner, so use your available tools to do the safe technical work, explain choices in plain language, and ask me only for decisions or Windows clicks you cannot safely perform yourself.
 
-Use GitHub Releases as the only final installer source. Confirm that each short link redirects to the exact repository and release declared by the manifest. Verify the exact repository owner/name, release checksum, and GitHub artifact attestation before running anything. Tell me the exact version and unsigned SmartScreen warning, then ask immediately before running the downloaded installer. Preserve my existing Codex configuration and instructions, use the helper's protected backup/dry-run/managed merge paths, and never hand-edit or replace those files.
+Use GitHub Releases as the only final installer source. Confirm that each short link redirects to the exact repository and release declared by the manifest. Verify the exact repository owner/name, release checksum, and public GitHub attestation record before running anything. Tell me the exact version, the online-versus-local attestation assurance, and the unsigned SmartScreen warning, then ask immediately before running the downloaded installer. Preserve my existing Codex configuration and instructions, use the helper's protected backup/dry-run/managed merge paths, and never hand-edit or replace those files.
 
 Do not download, load, validate, move, or delete a model without first showing me the exact provider, model, approximate size, storage path, and whether inference will run. Ask immediately before each such model action and wait for my explicit approval. Detect this computer's real hardware and installed models instead of copying another person's choices. For Ollama, use only an existing audited model or a separately approved named download into the verified storage folder. For LM Studio, never install LM Studio or download, copy, move, or substitute a GGUF; use only the helper-managed registration flow for an existing catalog-supported local model that I explicitly select. Prefer low-impact settings on modest hardware. Keep every provider loopback-only and leave the helper disabled if safe setup cannot be proven.
 
@@ -36,13 +36,19 @@ After installation, finish the packaged CODEX-HANDOFF.md checklist, tell me when
    - None of these public URLs requires a signed-in GitHub session. If a request fails, report the exact short URL, HTTP status, and final redirected URL instead of guessing a replacement.
 2. The chosen release is the highest valid semantic prerelease from that exact repository with `isDraft=false`, `isPrerelease=true`, and the complete required asset set: the Windows installer, `SHA256SUMS.txt`, release notes, and the friend bundle. Do not use `/releases/latest` to resolve it.
 3. The downloaded installer SHA-256 exactly matches its line in `SHA256SUMS.txt`.
-4. This GitHub attestation verification succeeds against the exact repository:
+4. Fetch the manifest's short attestation link without authentication and require all of the following:
+   - HTTP 200 from the final `api.github.com` request.
+   - The final URL contains the exact `sha256:` digest of the downloaded installer.
+   - At least one returned attestation has a `repository_id` equal to the manifest's numeric `repository.id`.
+   - The user is told this is an online GitHub API repository-and-digest record, not offline local cryptographic verification.
+
+   If GitHub CLI is already installed **and authenticated**, Codex should additionally run:
 
    ```powershell
    gh attestation verify .\Codex-GPU-Thalen-Helper-Setup.exe --repo rennavationstudios-bit/codex-gpu-thalen-helper
    ```
 
-   GitHub stores the attestation in its attestation service; it is not a standalone release asset. If `gh attestation verify` or an equivalent GitHub provenance verification is unavailable or unsuccessful, stop without running the installer.
+   Do not require GitHub sign-in and do not install GitHub CLI solely for this bootstrap. The public attestation-record check above is the supported signed-out path. If an already-available local cryptographic verification is attempted and fails, stop without running the installer.
 
 5. The user is told that the prerelease is not Authenticode-signed and may trigger Windows SmartScreen. Checksum and attestation verification do not remove that warning.
 6. Codex asks immediately before running the newly downloaded executable. If provenance, integrity, or the repository identity cannot be verified, it stops without running it.
